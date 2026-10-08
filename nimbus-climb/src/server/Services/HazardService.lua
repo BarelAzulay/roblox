@@ -2,14 +2,22 @@
 -- DamageService. One Attach() call per match; the returned stopFn tears everything down.
 -- Plain Lua 5.1-compatible syntax only.
 --
--- Behaviours (see Config.Tags): SpinBar, StormCloud, LightningZone, VanishCloud, MovingCloud,
--- BouncePad, PressurePlate + PlateBridge. Every parameter is read from attributes with a sane
--- default, so a part with a missing attribute still behaves.
+-- Behaviours (see Config.Tags):
+--   v1: SpinBar, StormCloud, LightningZone, VanishCloud, MovingCloud, BouncePad,
+--       PressurePlate + PlateBridge
+--   v2: Pendulum (swinging beam), WindGust (periodic sideways push), CloudCannon (ballistic launch)
+-- Every parameter is read from attributes with a sane default, so a part with a missing attribute
+-- still behaves.
 --
 -- Structure: Attach() builds a per-match "context" table. All per-frame work (spinning bars,
--- moving clouds, storm ticks, plate polling) runs from ONE shared Heartbeat connection owned by
--- that context. Timed sequences (lightning, vanishing clouds) run in their own task threads that
--- check ctx.stopped after every wait. Everything created at runtime lives inside the container.
+-- pendulums, moving clouds, wind streaks, storm / plate / wind ticks) runs from ONE shared Heartbeat
+-- connection owned by that context. Timed sequences (lightning, wind gusts, vanishing clouds, cannon
+-- charge-ups) run in their own task threads that check ctx.stopped after every wait. Everything
+-- created at runtime lives inside the container, except the WindGust force constraints, which have
+-- to sit on the players' characters and are removed again by stopFn / when the gust ends.
+--
+-- Visual rule: warning discs, bolts, rain and puffs use the calm palette below (Theme.World when it
+-- exists). Nothing here is pure white or full-saturation neon, and lightning flashes are brief.
 
 local CollectionService = game:GetService("CollectionService")
 local Players = game:GetService("Players")
@@ -28,27 +36,72 @@ local HazardService = {}
 
 local TAGS = Config.Tags
 local SPARKLE_TEXTURE = "rbxasset://textures/particles/sparkles_main.dds"
+local SMOKE_TEXTURE = "rbxasset://textures/particles/smoke_main.dds"
+local TWO_PI = math.pi * 2
 
 ----------------------------------------------------------------------
 -- Tunables (anything a designer might want to tweak lives here)
 ----------------------------------------------------------------------
 local STORM_TICK = 0.25 -- seconds between storm damage ticks (4 Hz)
 local PLATE_TICK = 0.2 -- seconds between pressure-plate polls (5 Hz)
+local HIT_TICK = 0.08 -- backup overlap poll for moving damage bars (12 Hz)
+local WIND_TICK = 1 / 15 -- how often wind forces are re-evaluated
 local PLATE_RETRACT_DELAY = 1.0 -- bridge stays up this long after the last player leaves
 local PLATE_FADE_IN = 0.2
 local PLATE_FADE_OUT = 0.45
 local PLATE_PRESS_DEPTH = 0.18 -- how far a plate sinks when stood on
-local SPINBAR_DEBOUNCE = 0.35 -- per player, per bar (DamageService i-frames do the rest)
+local HITTER_DEBOUNCE = 0.35 -- per player, per bar (DamageService i-frames do the rest)
+local HITTER_MARGIN = 0.3 -- studs the overlap poll grows a bar by
 local SPINBAR_KNOCKBACK = 55
+local PENDULUM_KNOCKBACK = 55
 local BOUNCE_DEBOUNCE = 0.3
 local LIGHTNING_KNOCKBACK = 40
 local BOLT_HEIGHT = 90
 local BOLT_SEGMENTS = 8
 
-local WARNING_COLOR = Theme.Colors.Bad
-local WARNING_FILL_COLOR = Color3.fromRGB(255, 84, 70)
-local BOLT_CORE_COLOR = Color3.fromRGB(236, 244, 255)
-local BOLT_GLOW_COLOR = Color3.fromRGB(150, 140, 255)
+-- WindGust
+local WIND_BLOW_TIME = 1.5 -- seconds the push lasts after the warning
+local WIND_RAMP_IN = 0.3 -- push strength fades in over this long ...
+local WIND_RAMP_OUT = 0.4 -- ... and out over this long
+local WIND_MAX_FORCE = 40 -- hard cap on the Force attribute (studs/s)
+local WIND_MAX_ACCEL = 260 -- studs/s^2; strong enough to beat the Humanoid's ground grip
+local WIND_GAIN = 9 -- 1/s: acceleration = (ceiling - speed along wind) * gain, then clamped
+local WIND_STREAKS = 10 -- pooled streak parts per gust volume
+local WIND_WARN_STREAKS = 4 -- how many of them show during the warning
+
+-- CloudCannon
+local CANNON_CHARGE = 0.35 -- squash + puff before the launch
+local CANNON_REARM = 1.0 -- a player cannot be launched twice within this many seconds
+local CANNON_STAND_SLACK = 5 -- still counts as "on the pad" this far beyond its edge
+local CANNON_LANDING_GRACE = 0.8 -- extra protection after FlightTime for the touchdown
+local CANNON_MAX_SPEED = 260 -- sanity cap for a broken Target / FlightTime
+local CANNON_DEFAULT_FLIGHT = 1.6
+
+----------------------------------------------------------------------
+-- Palette: calm, readable colours (Theme.World when present, local fallbacks otherwise)
+----------------------------------------------------------------------
+local WORLD = Theme.World or {}
+
+local function colorOr(value, fallback)
+	if typeof(value) == "Color3" then
+		return value
+	end
+	return fallback
+end
+
+local PAL = {}
+PAL.Warn = colorOr(WORLD.HazardGlow, Color3.fromRGB(204, 84, 100))
+PAL.WarnFill = PAL.Warn:Lerp(Color3.fromRGB(236, 170, 160), 0.3)
+PAL.BoltCore = Color3.fromRGB(210, 222, 244) -- soft blue-white, never pure white
+PAL.BoltGlow = Color3.fromRGB(118, 110, 204)
+PAL.RainTop = Color3.fromRGB(152, 174, 210)
+PAL.RainBottom = Color3.fromRGB(104, 136, 188)
+PAL.Sparkle = Color3.fromRGB(228, 214, 164)
+PAL.PuffLight = Color3.fromRGB(206, 218, 238)
+PAL.PuffDark = Color3.fromRGB(150, 168, 200)
+PAL.Wind = Color3.fromRGB(190, 208, 232)
+PAL.WindDrift = Color3.fromRGB(170, 190, 220)
+PAL.PlateGlow = Color3.fromRGB(220, 228, 244)
 
 ----------------------------------------------------------------------
 -- Small helpers
@@ -66,7 +119,7 @@ end
 
 local function attrNumber(inst, name, default)
 	local value = inst:GetAttribute(name)
-	if type(value) == "number" then
+	if type(value) == "number" and value == value then
 		return value
 	end
 	return default
@@ -86,6 +139,17 @@ local function attrString(inst, name, default)
 		return default
 	end
 	return tostring(value)
+end
+
+-- Horizontal unit vector of `v` (Y dropped), or `fallback` when v is (nearly) vertical / nil.
+local function flatUnit(v, fallback)
+	if typeof(v) == "Vector3" then
+		local flat = Vector3.new(v.X, 0, v.Z)
+		if flat.Magnitude > 0.01 then
+			return flat.Unit
+		end
+	end
+	return fallback
 end
 
 -- Create an anchored, non-interactive effect part. Parent is applied last.
@@ -116,6 +180,39 @@ local function newEmitter(props)
 	emitter.LightInfluence = 0
 	for key, value in pairs(props) do
 		emitter[key] = value
+	end
+	return emitter
+end
+
+-- Soft smoke puff emitter (cannon poof, wind drift). Rate 0: fire it with :Emit() or set Rate.
+local function newPuffEmitter(props)
+	local emitter = newEmitter({
+		Texture = SMOKE_TEXTURE,
+		Rate = 0,
+		Color = ColorSequence.new(PAL.PuffLight, PAL.PuffDark),
+		LightEmission = 0.05,
+		LightInfluence = 0.8,
+		Lifetime = NumberRange.new(0.5, 0.9),
+		Speed = NumberRange.new(8, 16),
+		EmissionDirection = Enum.NormalId.Top,
+		SpreadAngle = Vector2.new(50, 50),
+		Rotation = NumberRange.new(0, 360),
+		RotSpeed = NumberRange.new(-80, 80),
+		Drag = 2,
+		Size = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 1.2),
+			NumberSequenceKeypoint.new(1, 4.5),
+		}),
+		Transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 0.4),
+			NumberSequenceKeypoint.new(0.6, 0.65),
+			NumberSequenceKeypoint.new(1, 1),
+		}),
+	})
+	if props then
+		for key, value in pairs(props) do
+			emitter[key] = value
+		end
 	end
 	return emitter
 end
@@ -161,6 +258,15 @@ local function worldExtents(part)
 		math.abs(r.Y) * s.X + math.abs(u.Y) * s.Y + math.abs(l.Y) * s.Z,
 		math.abs(r.Z) * s.X + math.abs(u.Z) * s.Y + math.abs(l.Z) * s.Z
 	)
+end
+
+-- Half-extent of the part's (oriented) box measured along the world unit vector `dir`.
+local function halfExtentAlong(part, dir)
+	local cf = part.CFrame
+	local s = part.Size
+	return 0.5 * (math.abs(dir:Dot(cf.RightVector)) * s.X
+		+ math.abs(dir:Dot(cf.UpVector)) * s.Y
+		+ math.abs(dir:Dot(cf.LookVector)) * s.Z)
 end
 
 -- A "fade set" is a part plus every BasePart (and particle emitter) parented under it, with the
@@ -240,13 +346,19 @@ local function newContext(container, matchHandle)
 		permanents = {}, -- instances HazardService added for the whole match (destroyed on stop)
 		temps = {}, -- short-lived effect parts: part -> true
 		spinBars = {},
+		pendulums = {},
+		hitters = {}, -- every moving damage bar (spin bars + pendulums), for the overlap backup poll
 		movers = {},
 		moversMoving = false,
 		storms = {},
+		winds = {},
+		launchedAt = {}, -- player -> os.clock() of their last cannon launch
 		groups = {}, -- BridgeId -> group
 		groupList = {},
 		stormAcc = 0,
 		plateAcc = 0,
+		hitAcc = 0,
+		windAcc = 0,
 	}
 end
 
@@ -311,7 +423,7 @@ local function hurt(ctx, player, amount, kind, opts)
 	return applied == true
 end
 
--- All living players with any body part overlapping the box.
+-- All living players with any body part overlapping the (possibly rotated) box.
 local function playersInBox(ctx, cf, size)
 	local found = {}
 	local characters = {}
@@ -381,6 +493,39 @@ local function sleep(ctx, seconds)
 end
 
 ----------------------------------------------------------------------
+-- Moving damage bars (SpinBar + Pendulum share one hit routine)
+--   A hit comes from the part's Touched signal OR from the 12 Hz overlap poll below: an anchored
+--   part that is swept through a character by CFrame occasionally misses a Touched event.
+----------------------------------------------------------------------
+local function registerHit(ctx, hitter, player)
+	if ctx.stopped or not isActive(ctx) then
+		return
+	end
+	local now = os.clock()
+	local last = hitter.lastHit[player]
+	if last and now - last < HITTER_DEBOUNCE then
+		return
+	end
+	hitter.lastHit[player] = now
+	hurt(ctx, player, hitter.damage, hitter.kind, {
+		KnockbackFrom = hitter.part.Position,
+		Knockback = hitter.knockback,
+	})
+end
+
+local function pollHitters(ctx)
+	for _, hitter in ipairs(ctx.hitters) do
+		local part = hitter.part
+		if part.Parent then
+			local size = part.Size + Vector3.new(HITTER_MARGIN, HITTER_MARGIN, HITTER_MARGIN)
+			for _, player in ipairs(playersInBox(ctx, part.CFrame, size)) do
+				registerHit(ctx, hitter, player)
+			end
+		end
+	end
+end
+
+----------------------------------------------------------------------
 -- Per-frame / per-tick work (all driven by the one shared Heartbeat)
 ----------------------------------------------------------------------
 local function updateSpinBars(ctx)
@@ -390,6 +535,25 @@ local function updateSpinBars(ctx)
 		if part.Parent then
 			-- Always derived from the base CFrame so rotation never accumulates error.
 			part.CFrame = bar.base * CFrame.Angles(0, bar.phase + bar.speed * t, 0)
+		end
+	end
+end
+
+-- Pendulum swing: the beam (and anything anchored under it) is rotated about the world pivot
+-- `Hinge` around the world axis `Axis`, always from the remembered base CFrame.
+local function updatePendulums(ctx)
+	local t = ctx.clock
+	for _, p in ipairs(ctx.pendulums) do
+		local part = p.part
+		if part.Parent then
+			local angle = p.arc * math.sin(TWO_PI * t / p.period + p.phase)
+			local transform = p.pivot * CFrame.fromAxisAngle(p.axis, angle) * p.pivotInverse
+			part.CFrame = transform * p.base
+			for _, f in ipairs(p.followers) do
+				if f.part.Parent then
+					f.part.CFrame = transform * f.base
+				end
+			end
 		end
 	end
 end
@@ -459,7 +623,7 @@ local function setPlatePressed(plate, pressed)
 	if pressed then
 		Util.Tween(part, 0.15, {
 			CFrame = plate.baseCF - Vector3.new(0, PLATE_PRESS_DEPTH, 0),
-			Color = plate.baseColor:Lerp(Theme.Colors.White, 0.45),
+			Color = plate.baseColor:Lerp(PAL.PlateGlow, 0.3),
 		}, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 	else
 		Util.Tween(part, 0.25, { CFrame = plate.baseCF, Color = plate.baseColor },
@@ -519,6 +683,195 @@ local function tickPlates(ctx)
 	end
 end
 
+----------------------------------------------------------------------
+-- WindGust runtime (per-frame streaks + 15 Hz push). Behaviour setup is further below.
+----------------------------------------------------------------------
+-- Wind push implementation note: the push is a horizontal VectorForce on the player's
+-- HumanoidRootPart, not repeated AssemblyLinearVelocity writes. A character is simulated by its
+-- owning client, so the server only ever reads a latency-old velocity; writing "old velocity +
+-- push" back 15 times a second would also overwrite the vertical velocity with stale values (it
+-- cancels jumps and makes falling floaty). A constraint is simulated by the owner itself, touches
+-- X/Z only, and still obeys the contract: the speed gained along the wind is capped at `Force`
+-- studs/s (the force switches off once the player is as fast as the gust).
+local function releasePush(entry)
+	if entry.force then
+		pcall(function()
+			entry.force:Destroy()
+		end)
+	end
+	if entry.attachment then
+		pcall(function()
+			entry.attachment:Destroy()
+		end)
+	end
+	entry.force = nil
+	entry.attachment = nil
+end
+
+local function clearWindPushes(wind)
+	for player, entry in pairs(wind.pushed) do
+		releasePush(entry)
+		wind.pushed[player] = nil
+	end
+end
+
+local function setWindPhase(ctx, wind, phase)
+	if ctx.stopped then
+		return
+	end
+	wind.phase = phase
+	wind.phaseClock = ctx.clock
+	if wind.drift then
+		if phase == "blow" then
+			wind.drift.Rate = wind.blowRate
+		elseif phase == "warning" then
+			wind.drift.Rate = wind.warnRate
+		else
+			wind.drift.Rate = 0
+		end
+	end
+end
+
+-- Strength 0..1 of the current push (0 outside the blow phase).
+local function windEnvelope(ctx, wind)
+	if wind.phase ~= "blow" then
+		return 0
+	end
+	local t = ctx.clock - wind.phaseClock
+	local env = math.min(1, t / WIND_RAMP_IN, (WIND_BLOW_TIME - t) / WIND_RAMP_OUT)
+	if env < 0 then
+		env = 0
+	end
+	return env
+end
+
+local function pushPlayer(wind, player, root, env)
+	local entry = wind.pushed[player]
+	if entry and (entry.root ~= root or not root.Parent or not entry.force or not entry.force.Parent) then
+		releasePush(entry) -- respawned (or the constraint vanished): start over
+		entry = nil
+	end
+	if not entry then
+		local attachment = Instance.new("Attachment")
+		attachment.Name = "NimbusWindAttachment"
+		attachment.Parent = root
+		local force = Instance.new("VectorForce")
+		force.Name = "NimbusWindForce"
+		force.Attachment0 = attachment
+		force.ApplyAtCenterOfMass = true
+		force.RelativeTo = Enum.ActuatorRelativeTo.World
+		force.Force = Vector3.new(0, 0, 0)
+		force.Parent = root
+		entry = { root = root, attachment = attachment, force = force }
+		wind.pushed[player] = entry
+	end
+	-- Speed already gained along the wind is capped at the (ramped) gust speed.
+	local along = root.AssemblyLinearVelocity:Dot(wind.dir)
+	local ceiling = wind.force * env
+	local accel = Util.Clamp((ceiling - along) * WIND_GAIN, 0, WIND_MAX_ACCEL)
+	entry.force.Force = wind.dir * (root.AssemblyMass * accel)
+end
+
+local function tickWind(ctx, wind)
+	local env = windEnvelope(ctx, wind)
+	if env <= 0 or not wind.part.Parent then
+		clearWindPushes(wind)
+		return
+	end
+	local inside = {}
+	for _, player in ipairs(playersInBox(ctx, wind.part.CFrame, wind.part.Size)) do
+		if not isDowned(player) then
+			local root = getLivingRoot(player)
+			if root then
+				inside[player] = true
+				pushPlayer(wind, player, root, env)
+			end
+		end
+	end
+	for player, entry in pairs(wind.pushed) do
+		if not inside[player] then
+			releasePush(entry)
+			wind.pushed[player] = nil
+		end
+	end
+end
+
+local function tickWinds(ctx, active)
+	for _, wind in ipairs(ctx.winds) do
+		if active then
+			tickWind(ctx, wind)
+		else
+			clearWindPushes(wind) -- paused: nobody keeps drifting
+		end
+	end
+end
+
+-- Start one streak: a thin soft line racing from the upwind face to the downwind face of the volume.
+local function launchStreak(ctx, wind, slot)
+	local rng = ctx.rng
+	local part = wind.part
+	local size = part.Size
+	local localPoint = Vector3.new(
+		(rng:NextNumber() - 0.5) * size.X,
+		(rng:NextNumber() - 0.5) * size.Y,
+		(rng:NextNumber() - 0.5) * size.Z
+	)
+	local point = part.CFrame:PointToWorldSpace(localPoint)
+	local along = (point - wind.center):Dot(wind.dir)
+	local lateral = point - wind.dir * along -- same spot, projected onto the centre plane
+	slot.a = lateral - wind.dir * wind.halfLen
+	slot.b = lateral + wind.dir * wind.halfLen
+	local speed = math.max(30, wind.force * 2.4) * rng:NextNumber(0.85, 1.25)
+	slot.life = Util.Clamp(wind.halfLen * 2 / speed, 0.35, 1.3)
+	slot.age = 0
+	slot.state = "fly"
+	if wind.phase == "blow" then
+		slot.minTransparency = 0.42
+	else
+		slot.minTransparency = 0.74 -- the warning is just a hint
+	end
+	local thickness = rng:NextNumber(0.1, 0.2)
+	slot.part.Size = Vector3.new(thickness, thickness, rng:NextNumber(4, 8))
+	wind.live = wind.live + 1
+end
+
+local function updateWindStreaks(ctx, dt)
+	for _, wind in ipairs(ctx.winds) do
+		if wind.phase ~= "idle" or wind.live > 0 then
+			local limit = 0
+			if wind.phase == "blow" then
+				limit = #wind.streaks
+			elseif wind.phase == "warning" then
+				limit = WIND_WARN_STREAKS
+			end
+			for index, slot in ipairs(wind.streaks) do
+				if slot.state == "idle" then
+					if index <= limit then
+						slot.delay = slot.delay - dt
+						if slot.delay <= 0 then
+							launchStreak(ctx, wind, slot)
+						end
+					end
+				else
+					slot.age = slot.age + dt
+					local u = slot.age / slot.life
+					if u >= 1 then
+						slot.state = "idle"
+						slot.part.Transparency = 1
+						slot.delay = ctx.rng:NextNumber(0.02, 0.35)
+						wind.live = wind.live - 1
+					else
+						local pos = slot.a:Lerp(slot.b, u)
+						slot.part.CFrame = CFrame.lookAt(pos, pos + wind.dir)
+						local alpha = math.min(u / 0.2, (1 - u) / 0.3, 1)
+						slot.part.Transparency = 1 - (1 - slot.minTransparency) * alpha
+					end
+				end
+			end
+		end
+	end
+end
+
 local function stepContext(ctx, dt)
 	if ctx.stopped then
 		return
@@ -532,8 +885,14 @@ local function stepContext(ctx, dt)
 		if #ctx.spinBars > 0 then
 			guarded("SpinBar", updateSpinBars, ctx)
 		end
+		if #ctx.pendulums > 0 then
+			guarded("Pendulum", updatePendulums, ctx)
+		end
 		if #ctx.movers > 0 then
 			guarded("MovingCloud", updateMovers, ctx)
+		end
+		if #ctx.winds > 0 then
+			guarded("WindGustVisuals", updateWindStreaks, ctx, dt)
 		end
 	elseif ctx.moversMoving then
 		guarded("MovingCloud", haltMovers, ctx)
@@ -545,6 +904,22 @@ local function stepContext(ctx, dt)
 		ctx.stormAcc = 0
 		if active and #ctx.storms > 0 then
 			guarded("StormCloud", tickStorms, ctx, elapsed)
+		end
+	end
+
+	ctx.hitAcc = ctx.hitAcc + dt
+	if ctx.hitAcc >= HIT_TICK then
+		ctx.hitAcc = 0
+		if active and #ctx.hitters > 0 then
+			guarded("HitPoll", pollHitters, ctx)
+		end
+	end
+
+	ctx.windAcc = ctx.windAcc + dt
+	if ctx.windAcc >= WIND_TICK then
+		ctx.windAcc = 0
+		if #ctx.winds > 0 then
+			guarded("WindGust", tickWinds, ctx, active)
 		end
 	end
 
@@ -569,45 +944,112 @@ local function ensureHeartbeat(ctx)
 	table.insert(ctx.connections, ctx.heartbeat)
 end
 
+-- Register a moving damage bar (SpinBar / Pendulum): Touched + the backup overlap poll.
+local function addHitter(ctx, hitter)
+	table.insert(ctx.hitters, hitter)
+	ensureHeartbeat(ctx)
+	connect(ctx, hitter.part.Touched, function(hit)
+		if ctx.stopped or not isActive(ctx) then
+			return
+		end
+		local player = playerFromHit(hit)
+		if player then
+			registerHit(ctx, hitter, player)
+		end
+	end)
+	onStop(ctx, function()
+		hitter.lastHit = {}
+	end)
+end
+
 ----------------------------------------------------------------------
 -- Behaviour: SpinBar
 ----------------------------------------------------------------------
-local function onSpinBarTouched(ctx, bar, hit)
-	if ctx.stopped or not isActive(ctx) then
-		return
-	end
-	local player = playerFromHit(hit)
-	if not player then
-		return
-	end
-	local now = os.clock()
-	local last = bar.lastHit[player]
-	if last and now - last < SPINBAR_DEBOUNCE then
-		return
-	end
-	bar.lastHit[player] = now
-	hurt(ctx, player, bar.damage, "SpinBar", {
-		KnockbackFrom = bar.part.Position,
-		Knockback = SPINBAR_KNOCKBACK,
-	})
-end
-
 local function attachSpinBar(ctx, part)
 	local bar = {
 		part = part,
 		base = part.CFrame,
 		speed = math.rad(attrNumber(part, "Speed", 70)),
 		phase = math.rad(attrNumber(part, "Phase", 0)),
+		-- hit data used by the shared moving-bar routine
 		damage = attrNumber(part, "Damage", 15),
+		kind = "SpinBar",
+		knockback = SPINBAR_KNOCKBACK,
 		lastHit = {},
 	}
 	table.insert(ctx.spinBars, bar)
-	ensureHeartbeat(ctx)
-	connect(ctx, part.Touched, function(hit)
-		onSpinBarTouched(ctx, bar, hit)
-	end)
+	addHitter(ctx, bar)
 	onStop(ctx, function()
-		bar.lastHit = {}
+		if part.Parent then
+			part.CFrame = bar.base
+		end
+	end)
+end
+
+----------------------------------------------------------------------
+-- Behaviour: Pendulum
+--   Tagged part = the swinging beam. Attributes: Hinge (world pivot), Axis (world swing axis),
+--   Period (s per full swing), Arc (degrees each side of rest), Damage, optional Phase (degrees).
+--   Swing angle = Arc * sin(2*pi*t/Period + Phase); decor welded to the beam follows by itself,
+--   decor merely parented under it (anchored) is moved by the same transform.
+----------------------------------------------------------------------
+local function attachPendulum(ctx, part)
+	local base = part.CFrame
+	local hinge = attrVector3(part, "Hinge", nil)
+	if not hinge then
+		hinge = base.Position + Vector3.new(0, 12, 0) -- sane default: pivot a little above the beam
+	end
+	local axis = attrVector3(part, "Axis", nil)
+	if not axis or axis.Magnitude < 0.01 then
+		axis = flatUnit(base.RightVector, Vector3.new(1, 0, 0))
+	else
+		axis = axis.Unit
+	end
+
+	local phase
+	local phaseAttr = part:GetAttribute("Phase")
+	if type(phaseAttr) == "number" then
+		phase = math.rad(phaseAttr)
+	else
+		-- no explicit phase: derive one from the position so neighbouring pendulums are not in lockstep
+		phase = (hinge.X * 0.173 + hinge.Y * 0.071 + hinge.Z * 0.291) % TWO_PI
+	end
+
+	-- anchored decor parented under the beam would be left behind by the swing: move it ourselves
+	local followers = {}
+	for _, d in ipairs(part:GetDescendants()) do
+		if d:IsA("BasePart") and d.Anchored then
+			table.insert(followers, { part = d, base = d.CFrame })
+		end
+	end
+
+	local pendulum = {
+		part = part,
+		base = base,
+		pivot = CFrame.new(hinge),
+		pivotInverse = CFrame.new(hinge):Inverse(),
+		axis = axis,
+		arc = math.rad(Util.Clamp(attrNumber(part, "Arc", 55), 0, 170)),
+		period = math.max(0.8, attrNumber(part, "Period", 4)),
+		phase = phase,
+		followers = followers,
+		-- hit data used by the shared moving-bar routine
+		damage = attrNumber(part, "Damage", 20),
+		kind = "Pendulum",
+		knockback = PENDULUM_KNOCKBACK,
+		lastHit = {},
+	}
+	table.insert(ctx.pendulums, pendulum)
+	addHitter(ctx, pendulum)
+	onStop(ctx, function()
+		if part.Parent then
+			part.CFrame = base
+		end
+		for _, f in ipairs(followers) do
+			if f.part.Parent then
+				f.part.CFrame = f.base
+			end
+		end
 	end)
 end
 
@@ -656,13 +1098,13 @@ local function addRain(ctx, part)
 		Speed = NumberRange.new(fallSpeed * 0.9, fallSpeed * 1.1),
 		EmissionDirection = Enum.NormalId.Bottom,
 		SpreadAngle = Vector2.new(3, 3),
-		LightEmission = 0.25,
-		LightInfluence = 0.6,
-		Color = ColorSequence.new(Theme.Colors.CloudShade, Theme.Colors.Stamina),
+		LightEmission = 0.1,
+		LightInfluence = 0.7,
+		Color = ColorSequence.new(PAL.RainTop, PAL.RainBottom),
 		Size = NumberSequence.new(0.28),
 		Transparency = NumberSequence.new({
-			NumberSequenceKeypoint.new(0, 0.15),
-			NumberSequenceKeypoint.new(0.8, 0.3),
+			NumberSequenceKeypoint.new(0, 0.2),
+			NumberSequenceKeypoint.new(0.8, 0.4),
 			NumberSequenceKeypoint.new(1, 1),
 		}),
 		Acceleration = Vector3.new(0, -40, 0),
@@ -680,8 +1122,9 @@ end
 ----------------------------------------------------------------------
 -- Behaviour: LightningZone
 --   The tagged part marks the strike disc: its centre is the impact point and `Radius`
---   (default: half its footprint) is the damage radius. Red warning disc fills up for
---   `Warning` seconds, then a jagged Neon bolt hits and everyone in the disc is damaged.
+--   (default: half its footprint) is the damage radius. A red warning disc fills up for
+--   `Warning` seconds, then a jagged bolt hits and everyone in the disc is damaged. The flash is
+--   brief and dim on purpose: it must read as a strike, not blind the screen.
 ----------------------------------------------------------------------
 local function zoneGroundY(part)
 	local half = part.Size.Y / 2
@@ -699,16 +1142,16 @@ local function showStrikeWarning(ctx, zone, target)
 		Shape = Enum.PartType.Cylinder,
 		Size = Vector3.new(0.1, diameter, diameter),
 		CFrame = flat,
-		Color = WARNING_COLOR,
-		Transparency = 0.5,
+		Color = PAL.Warn,
+		Transparency = 0.55,
 	})
 	local fill = makePart({
 		Name = "StrikeWarningFill",
 		Shape = Enum.PartType.Cylinder,
 		Size = Vector3.new(0.14, 0.4, 0.4),
 		CFrame = flat,
-		Color = WARNING_FILL_COLOR,
-		Transparency = 0.3,
+		Color = PAL.WarnFill,
+		Transparency = 0.62,
 	})
 	addTemp(ctx, ring, zone.warning + 3)
 	addTemp(ctx, fill, zone.warning + 3)
@@ -717,7 +1160,7 @@ local function showStrikeWarning(ctx, zone, target)
 		Enum.EasingStyle.Linear, Enum.EasingDirection.Out)
 	-- the outer ring pulses so the danger reads at a glance
 	TweenService:Create(ring, TweenInfo.new(0.22, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
-		{ Transparency = 0.15 }):Play()
+		{ Transparency = 0.3 }):Play()
 	return ring, fill
 end
 
@@ -725,7 +1168,7 @@ local function strikeAt(ctx, zone, target)
 	local rng = ctx.rng
 	local radius = zone.radius
 
-	-- 1. jagged bolt from the sky: a glow shell + a white core per segment
+	-- 1. jagged bolt from the sky: a soft glow shell + a thin core per segment
 	local top = Vector3.new(target.X + rng:NextNumber(-8, 8), target.Y + BOLT_HEIGHT, target.Z + rng:NextNumber(-8, 8))
 	local points = { top }
 	for i = 1, BOLT_SEGMENTS - 1 do
@@ -740,40 +1183,40 @@ local function strikeAt(ctx, zone, target)
 		local a = points[i]
 		local b = points[i + 1]
 		local length = (b - a).Magnitude + 0.4
-		local look = CFrame.new(a:Lerp(b, 0.5), b)
+		local look = CFrame.lookAt(a:Lerp(b, 0.5), b)
 		local glow = makePart({
 			Name = "BoltGlow",
-			Size = Vector3.new(2.4, 2.4, length),
+			Size = Vector3.new(1.8, 1.8, length),
 			CFrame = look,
-			Color = BOLT_GLOW_COLOR,
-			Transparency = 0.6,
+			Color = PAL.BoltGlow,
+			Transparency = 0.72,
 		})
 		local core = makePart({
 			Name = "BoltCore",
-			Size = Vector3.new(0.8, 0.8, length),
+			Size = Vector3.new(0.55, 0.55, length),
 			CFrame = look,
-			Color = BOLT_CORE_COLOR,
-			Transparency = 0,
+			Color = PAL.BoltCore,
+			Transparency = 0.08,
 		})
-		addTemp(ctx, glow, 1)
-		addTemp(ctx, core, 1)
-		Util.Tween(glow, 0.4, { Transparency = 1, Size = Vector3.new(0.6, 0.6, length) },
+		addTemp(ctx, glow, 0.7)
+		addTemp(ctx, core, 0.7)
+		Util.Tween(glow, 0.28, { Transparency = 1, Size = Vector3.new(0.5, 0.5, length) },
 			Enum.EasingStyle.Quad, Enum.EasingDirection.In)
-		Util.Tween(core, 0.4, { Transparency = 1, Size = Vector3.new(0.2, 0.2, length) },
+		Util.Tween(core, 0.28, { Transparency = 1, Size = Vector3.new(0.15, 0.15, length) },
 			Enum.EasingStyle.Quad, Enum.EasingDirection.In)
 	end
 
-	-- 2. impact flash: expanding ground disc + a fading point light + a spark fountain
+	-- 2. impact flash: a brief translucent ground disc + a small fading light + a short spark burst
 	local flash = makePart({
 		Name = "StrikeFlash",
 		Shape = Enum.PartType.Cylinder,
 		Size = Vector3.new(0.2, radius * 2, radius * 2),
 		CFrame = CFrame.new(target.X, target.Y + 0.25, target.Z) * CFrame.Angles(0, 0, math.pi / 2),
-		Color = BOLT_CORE_COLOR,
-		Transparency = 0.1,
+		Color = PAL.BoltCore,
+		Transparency = 0.5,
 	})
-	addTemp(ctx, flash, 1)
-	Util.Tween(flash, 0.45, { Size = Vector3.new(0.2, radius * 2.6, radius * 2.6), Transparency = 1 },
+	addTemp(ctx, flash, 0.8)
+	Util.Tween(flash, 0.35, { Size = Vector3.new(0.2, radius * 2.4, radius * 2.4), Transparency = 1 },
 		Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 
 	local impact = makePart({
@@ -783,27 +1226,27 @@ local function strikeAt(ctx, zone, target)
 		CFrame = CFrame.new(target.X, target.Y + 1.5, target.Z),
 	})
 	local light = Instance.new("PointLight")
-	light.Color = BOLT_CORE_COLOR
-	light.Brightness = 9
-	light.Range = Util.Clamp(radius * 5, 24, 48)
+	light.Color = PAL.BoltCore
+	light.Brightness = 2.4
+	light.Range = Util.Clamp(radius * 3.5, 16, 30)
 	light.Shadows = false
 	light.Parent = impact
 	local sparks = newEmitter({
 		Name = "StrikeSparks",
 		Rate = 0,
-		Color = ColorSequence.new(BOLT_CORE_COLOR, BOLT_GLOW_COLOR),
-		Lifetime = NumberRange.new(0.4, 0.8),
-		Speed = NumberRange.new(20, 36),
+		Color = ColorSequence.new(PAL.BoltCore, PAL.BoltGlow),
+		Lifetime = NumberRange.new(0.35, 0.7),
+		Speed = NumberRange.new(18, 32),
 		EmissionDirection = Enum.NormalId.Top,
 		SpreadAngle = Vector2.new(70, 70),
-		Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.9), NumberSequenceKeypoint.new(1, 0) }),
-		Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(1, 1) }),
+		Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.7), NumberSequenceKeypoint.new(1, 0) }),
+		Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.1), NumberSequenceKeypoint.new(1, 1) }),
 		Acceleration = Vector3.new(0, -60, 0),
 	})
 	sparks.Parent = impact
-	addTemp(ctx, impact, 1.5)
-	sparks:Emit(28)
-	Util.Tween(light, 0.55, { Brightness = 0 }, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+	addTemp(ctx, impact, 1.2)
+	sparks:Emit(20)
+	Util.Tween(light, 0.4, { Brightness = 0 }, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 
 	-- 3. damage everyone standing in the strike cylinder
 	local reach = radius + 0.8
@@ -883,6 +1326,298 @@ local function attachLightningZone(ctx, part)
 		radius = radius,
 	}
 	task.spawn(runLightningZone, ctx, zone)
+end
+
+----------------------------------------------------------------------
+-- Behaviour: WindGust
+--   Tagged part = invisible volume. Attributes: Force (studs/s the gust can reach), Direction
+--   (unit vector, used horizontally), Interval (s between gust starts), Warning (s of faint
+--   streaks before the push). Cycle: idle -> warning (hint streaks) -> blow (WIND_BLOW_TIME s of
+--   push + dense streaks) -> idle. No damage, ever. See the push note above releasePush.
+----------------------------------------------------------------------
+local function windCycle(ctx, wind)
+	if not awaitActive(ctx) then
+		return false
+	end
+	setWindPhase(ctx, wind, "warning")
+	if not waitActive(ctx, wind.warning) then
+		return false
+	end
+	setWindPhase(ctx, wind, "blow")
+	if not waitActive(ctx, WIND_BLOW_TIME) then
+		return false
+	end
+	setWindPhase(ctx, wind, "idle")
+	return true
+end
+
+local function runWind(ctx, wind)
+	-- Desynchronise gust volumes so a whole stage does not blow at once.
+	if not waitActive(ctx, ctx.rng:NextNumber(0.2, wind.interval)) then
+		return
+	end
+	while not ctx.stopped and wind.part.Parent do
+		local ok, result = pcall(windCycle, ctx, wind)
+		if not ok then
+			if not warned.WindCycle then
+				warned.WindCycle = true
+				warn("[HazardService] wind cycle failed: " .. tostring(result))
+			end
+			setWindPhase(ctx, wind, "idle")
+		elseif result == false then
+			return
+		end
+		local rest = wind.interval + ctx.rng:NextNumber(-0.4, 0.4) - wind.warning - WIND_BLOW_TIME
+		if rest < 0.8 then
+			rest = 0.8
+		end
+		if not waitActive(ctx, rest) then
+			return
+		end
+	end
+end
+
+local function attachWindGust(ctx, part)
+	part.CanCollide = false -- an invisible wall would be a nasty surprise
+	local dir = flatUnit(attrVector3(part, "Direction", nil), nil)
+	if not dir then
+		dir = flatUnit(part.CFrame.LookVector, Vector3.new(1, 0, 0))
+	end
+	local force = Util.Clamp(attrNumber(part, "Force", 18), 0, WIND_MAX_FORCE)
+	local halfLen = math.max(1, halfExtentAlong(part, dir))
+	local wind = {
+		part = part,
+		dir = dir,
+		force = force,
+		interval = math.max(2.5, attrNumber(part, "Interval", 5)),
+		warning = math.max(0.5, attrNumber(part, "Warning", 1.5)),
+		center = part.Position,
+		halfLen = halfLen,
+		phase = "idle",
+		phaseClock = 0,
+		pushed = {}, -- player -> { root, attachment, force }
+		streaks = {},
+		live = 0, -- streaks currently flying
+		drift = nil,
+		warnRate = 4,
+		blowRate = 22,
+	}
+
+	-- drifting smoke at the upwind face: faint puffs carried along the wind
+	local crossWidth = math.max(1, halfExtentAlong(part, dir:Cross(Vector3.new(0, 1, 0)).Unit) * 2)
+	local crossHeight = math.max(1, halfExtentAlong(part, Vector3.new(0, 1, 0)) * 2)
+	local upwind = wind.center - dir * halfLen
+	local driftPart = makePart({
+		Name = "WindDrift",
+		Transparency = 1,
+		Size = Vector3.new(crossWidth, crossHeight, 0.4),
+		CFrame = CFrame.lookAt(upwind, upwind + dir),
+		Parent = ctx.container,
+	})
+	table.insert(ctx.permanents, driftPart)
+	local driftSpeed = force * 0.9 + 8
+	wind.drift = newPuffEmitter({
+		Name = "WindSmoke",
+		Color = ColorSequence.new(PAL.WindDrift, PAL.PuffDark),
+		LightEmission = 0,
+		Lifetime = NumberRange.new(
+			Util.Clamp(halfLen * 2 / driftSpeed, 0.5, 1.6),
+			Util.Clamp(halfLen * 2.4 / driftSpeed, 0.6, 1.9)
+		),
+		Speed = NumberRange.new(driftSpeed * 0.85, driftSpeed * 1.15),
+		EmissionDirection = Enum.NormalId.Front, -- the part's look vector == the wind direction
+		SpreadAngle = Vector2.new(4, 4),
+		Drag = 0,
+		Size = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 2),
+			NumberSequenceKeypoint.new(1, 5),
+		}),
+		Transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 1),
+			NumberSequenceKeypoint.new(0.25, 0.86),
+			NumberSequenceKeypoint.new(1, 1),
+		}),
+	})
+	wind.drift.Parent = driftPart
+
+	-- pooled streak parts (invisible until used)
+	for _ = 1, WIND_STREAKS do
+		local streak = makePart({
+			Name = "WindStreak",
+			Size = Vector3.new(0.14, 0.14, 6),
+			Color = PAL.Wind,
+			Transparency = 1,
+			Parent = ctx.container,
+		})
+		table.insert(ctx.permanents, streak)
+		table.insert(wind.streaks, {
+			part = streak,
+			state = "idle",
+			delay = ctx.rng:NextNumber(0, 0.5),
+			age = 0,
+			life = 1,
+			a = wind.center,
+			b = wind.center,
+			minTransparency = 0.5,
+		})
+	end
+
+	table.insert(ctx.winds, wind)
+	ensureHeartbeat(ctx)
+	onStop(ctx, function()
+		clearWindPushes(wind)
+	end)
+	task.spawn(runWind, ctx, wind)
+end
+
+----------------------------------------------------------------------
+-- Behaviour: CloudCannon
+--   Touch the pad -> 0.35 s squash + puff -> the player's root gets the velocity of a projectile that
+--   leaves its CURRENT position and reaches Target after FlightTime under workspace.Gravity:
+--       v = (Target - p) / t + Vector3.new(0, g * t / 2, 0)
+--   (Target is where the root passes at t = FlightTime). The player cannot be launched again for
+--   CANNON_REARM seconds and is protected from all damage (fall / void included) while in flight.
+----------------------------------------------------------------------
+local function chargeCannon(cannon)
+	cannon.charging = cannon.charging + 1
+	if cannon.puff then
+		cannon.puff:Emit(8)
+	end
+	if cannon.sparks then
+		cannon.sparks:Emit(8)
+	end
+	local base = cannon.baseSize
+	cannon.tween = Util.Tween(cannon.part, CANNON_CHARGE * 0.85,
+		{ Size = Vector3.new(base.X * 1.1, base.Y * 0.68, base.Z * 1.1) },
+		Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
+end
+
+-- The charge ended (launch or cancelled): spring back once nobody else is charging.
+local function releaseCannon(ctx, cannon)
+	cannon.charging = math.max(0, cannon.charging - 1)
+	if cannon.charging > 0 or ctx.stopped or not cannon.part.Parent then
+		return
+	end
+	cannon.tween = Util.Tween(cannon.part, 0.55, { Size = cannon.baseSize },
+		Enum.EasingStyle.Elastic, Enum.EasingDirection.Out)
+end
+
+local function launchPlayer(ctx, cannon, player, root)
+	local gravity = Workspace.Gravity
+	local flight = cannon.flight
+	local velocity = (cannon.target - root.Position) / flight + Vector3.new(0, gravity * flight / 2, 0)
+	if velocity.Magnitude > CANNON_MAX_SPEED then
+		velocity = velocity.Unit * CANNON_MAX_SPEED
+	end
+	root.AssemblyLinearVelocity = velocity
+	ctx.launchedAt[player] = os.clock()
+	-- no fall / void / hazard damage until just after the touchdown
+	pcall(DamageService.GrantInvulnerability, player, flight + CANNON_LANDING_GRACE)
+	if cannon.puff then
+		cannon.puff:Emit(20)
+	end
+	if cannon.sparks then
+		cannon.sparks:Emit(14)
+	end
+end
+
+local function runCannonLaunch(ctx, cannon, player)
+	chargeCannon(cannon)
+	local alive = sleep(ctx, CANNON_CHARGE)
+	cannon.pending[player] = nil
+	if not alive then
+		return -- match ended: the part may already be gone
+	end
+	local launched = false
+	local root = getLivingRoot(player)
+	if root and player.Parent and isActive(ctx) and not isDowned(player) and cannon.part.Parent then
+		-- the player must still be on (or right next to) the pad: someone who jumped off is left alone
+		local offset = root.Position - cannon.part.Position
+		local reach = math.max(cannon.part.Size.X, cannon.part.Size.Z) / 2 + CANNON_STAND_SLACK
+		if Vector3.new(offset.X, 0, offset.Z).Magnitude <= reach and math.abs(offset.Y) <= 12 then
+			launchPlayer(ctx, cannon, player, root)
+			launched = true
+		end
+	end
+	if not launched and cannon.puff then
+		cannon.puff:Emit(4) -- a little fizzle so the charge does not just vanish
+	end
+	releaseCannon(ctx, cannon)
+end
+
+local function onCannonTouched(ctx, cannon, hit)
+	if ctx.stopped or not isActive(ctx) then
+		return
+	end
+	local player, root = playerFromHit(hit)
+	if not player or isDowned(player) or cannon.pending[player] then
+		return
+	end
+	local last = ctx.launchedAt[player]
+	if last and os.clock() - last < CANNON_REARM then
+		return -- already flying (or just landed on another pad)
+	end
+	if root.Position.Y < cannon.part.Position.Y then
+		return -- only standing on the pad arms it
+	end
+	cannon.pending[player] = true
+	task.spawn(function()
+		local ok, err = pcall(runCannonLaunch, ctx, cannon, player)
+		if not ok then
+			cannon.pending[player] = nil
+			if not warned.Cannon then
+				warned.Cannon = true
+				warn("[HazardService] cannon launch failed: " .. tostring(err))
+			end
+		end
+	end)
+end
+
+local function attachCloudCannon(ctx, part)
+	local target = attrVector3(part, "Target", nil)
+	if not target then
+		-- no landing point authored: lob the player a little way ahead of the pad
+		local ahead = flatUnit(part.CFrame.LookVector, Vector3.new(0, 0, 1))
+		target = part.Position + ahead * 30 + Vector3.new(0, 6, 0)
+	end
+	local cannon = {
+		part = part,
+		target = target,
+		flight = Util.Clamp(attrNumber(part, "FlightTime", CANNON_DEFAULT_FLIGHT), 0.4, 4),
+		baseSize = part.Size,
+		pending = {}, -- player -> true while charging
+		charging = 0,
+		tween = nil,
+		puff = nil,
+		sparks = nil,
+	}
+	cannon.puff = newPuffEmitter({ Name = "CannonPoof" })
+	cannon.puff.Parent = part
+	cannon.sparks = newEmitter({
+		Name = "CannonSparks",
+		Rate = 0,
+		Color = ColorSequence.new(PAL.Sparkle, PAL.PuffLight),
+		Lifetime = NumberRange.new(0.4, 0.8),
+		Speed = NumberRange.new(8, 18),
+		EmissionDirection = Enum.NormalId.Top,
+		SpreadAngle = Vector2.new(60, 60),
+		Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.6), NumberSequenceKeypoint.new(1, 0) }),
+		Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.1), NumberSequenceKeypoint.new(1, 1) }),
+		Acceleration = Vector3.new(0, -16, 0),
+	})
+	cannon.sparks.Parent = part
+	connect(ctx, part.Touched, function(hit)
+		onCannonTouched(ctx, cannon, hit)
+	end)
+	onStop(ctx, function()
+		if cannon.tween then
+			cannon.tween:Cancel()
+		end
+		if part.Parent then
+			part.Size = cannon.baseSize
+		end
+		cannon.pending = {}
+	end)
 end
 
 ----------------------------------------------------------------------
@@ -1024,13 +1759,13 @@ local function attachBouncePad(ctx, part)
 	local burst = newEmitter({
 		Name = "BounceBurst",
 		Rate = 0,
-		Color = ColorSequence.new(Theme.Colors.White, Theme.Colors.TokenGlow),
+		Color = ColorSequence.new(PAL.PuffLight, PAL.Sparkle),
 		Lifetime = NumberRange.new(0.4, 0.8),
 		Speed = NumberRange.new(10, 22),
 		EmissionDirection = Enum.NormalId.Top,
 		SpreadAngle = Vector2.new(40, 40),
 		Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.7), NumberSequenceKeypoint.new(1, 0) }),
-		Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(1, 1) }),
+		Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.1), NumberSequenceKeypoint.new(1, 1) }),
 		Acceleration = Vector3.new(0, -20, 0),
 	})
 	burst.Parent = part
@@ -1106,6 +1841,9 @@ local BEHAVIOURS = {
 	[TAGS.BouncePad] = attachBouncePad,
 	[TAGS.PressurePlate] = attachPressurePlate,
 	[TAGS.PlateBridge] = attachPlateBridge,
+	[TAGS.Pendulum] = attachPendulum,
+	[TAGS.WindGust] = attachWindGust,
+	[TAGS.CloudCannon] = attachCloudCannon,
 }
 
 local function stopContext(ctx)
@@ -1136,6 +1874,7 @@ local function stopContext(ctx)
 		end)
 	end
 	ctx.temps = {}
+	ctx.launchedAt = {}
 end
 
 -- Start every tagged behaviour found under `container`.

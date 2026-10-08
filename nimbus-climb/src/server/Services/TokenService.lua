@@ -1,7 +1,13 @@
 -- TokenService: the cloud tokens. MakeTokenPart builds the visual (a glowing golden coin with a
--- little white cloud puff on it), one shared Heartbeat driver spins and bobs every token near a
--- player, and Watch() turns tokens inside a match course into collectable pickups.
+-- little cloud puff on it), one shared Heartbeat driver spins and bobs every token near a player,
+-- and Watch() turns tokens inside a match course into collectable pickups.
+--
+-- v2: golden bonus tokens. MakeTokenPart(position, parent, value) with value >= Config.Tokens.GoldenValue
+-- builds a bigger (1.5x), paler-gold, brighter-sparkling coin with a flare disc and a glint star,
+-- tagged BOTH Config.Tags.GoldenToken and Config.Tags.CloudToken. Watch() stays the only collector.
+--
 -- Plain Lua 5.1-compatible syntax only. No asset ids: Parts + built-in particle textures.
+-- Palette: warm but calm golds (Theme.World.Token when available); nothing is pure white.
 
 local CollectionService = game:GetService("CollectionService")
 local Debris = game:GetService("Debris")
@@ -18,6 +24,9 @@ local Util = require(Shared.Util)
 local TokenService = {}
 
 local TOKEN_TAG = Config.Tags.CloudToken
+local GOLDEN_TAG = Config.Tags.GoldenToken
+local DEFAULT_VALUE = Config.Tokens.DefaultValue
+local GOLDEN_VALUE = Config.Tokens.GoldenValue
 local SPARKLE_TEXTURE = "rbxasset://textures/particles/sparkles_main.dds"
 
 ----------------------------------------------------------------------
@@ -29,20 +38,74 @@ local RIM_DIAMETER = 3.6
 local RIM_THICKNESS = 0.4
 local HALO_DIAMETER = 5.2
 
-local SPIN_SPEED = 2.0 -- radians per second around the vertical axis
-local BOB_SPEED = 2.2 -- radians per second of the up/down sine
-local BOB_AMPLITUDE = 0.45 -- studs
 local ANIM_STEP = 1 / 30 -- the driver updates tokens at 30 Hz (replication cannot show more)
 local CULL_DISTANCE = 220 -- tokens farther than this from every player are left alone
 local PLAYER_REFRESH = 0.5 -- how often the driver re-reads player positions
 
 local PICKUP_POLL = 0.12 -- backup proximity poll inside Watch()
 local PICKUP_RADIUS = 3.2 -- studs from the character's root to the token centre
+local GOLDEN_PICKUP_RADIUS = 4.4 -- golden tokens are bigger, so they are easier to grab
 local COLLECT_FADE = 0.3
 
-local GOLD = Theme.Colors.Token
-local GLOW = Theme.Colors.TokenGlow
-local AMBER = Color3.fromRGB(255, 168, 48)
+----------------------------------------------------------------------
+-- Palette
+----------------------------------------------------------------------
+local WORLD = Theme.World or {}
+
+local function colorOr(value, fallback)
+	if typeof(value) == "Color3" then
+		return value
+	end
+	return fallback
+end
+
+local GOLD = colorOr(WORLD.Token, Color3.fromRGB(232, 184, 62))
+local GLOW = GOLD:Lerp(Color3.fromRGB(255, 240, 190), 0.45)
+local AMBER = Color3.fromRGB(192, 124, 38)
+local PUFF = Color3.fromRGB(218, 226, 240)
+
+local GOLDEN_CORE = Color3.fromRGB(255, 236, 168) -- golden-white
+local GOLDEN_RIM = Color3.fromRGB(232, 182, 72)
+local GOLDEN_PUFF = Color3.fromRGB(246, 240, 214)
+local GOLDEN_GLOW = Color3.fromRGB(255, 230, 150)
+
+-- Everything that differs between a normal and a golden token.
+local LOOKS = {
+	normal = {
+		scale = 1,
+		core = GOLD,
+		rim = AMBER,
+		puff = PUFF,
+		glow = GLOW,
+		haloScale = 1,
+		haloTransparency = 0.88,
+		lightBrightness = 1.0,
+		lightRange = 11,
+		sparkleRate = 5,
+		sparkleSize = 0.55,
+		sparkleLife = NumberRange.new(0.9, 1.6),
+		spin = 2.0, -- radians per second around the vertical axis
+		bob = 0.45, -- bob amplitude in studs
+	},
+	golden = {
+		scale = 1.5,
+		core = GOLDEN_CORE,
+		rim = GOLDEN_RIM,
+		puff = GOLDEN_PUFF,
+		glow = GOLDEN_GLOW,
+		haloScale = 1.25,
+		haloTransparency = 0.82,
+		lightBrightness = 2.0,
+		lightRange = 17,
+		sparkleRate = 16,
+		sparkleSize = 0.95,
+		sparkleLife = NumberRange.new(1.1, 2.0),
+		spin = 2.6,
+		bob = 0.6,
+	},
+}
+
+local BOB_SPEED = 2.2 -- radians per second of the up/down sine
 
 ----------------------------------------------------------------------
 -- Shared animation driver
@@ -51,7 +114,7 @@ local AMBER = Color3.fromRGB(255, 168, 48)
 --   not in the workspace yet are skipped; tokens that were destroyed are dropped; tokens far
 --   from every player are not touched at all (no CPU, no replication).
 ----------------------------------------------------------------------
-local animated = {} -- token part -> { base, lastPos, phase, parented }
+local animated = {} -- token part -> { base, lastPos, phase, parented, spin, bob }
 local driverConnection = nil
 local nextStepAt = 0
 local nextRefreshAt = 0
@@ -109,9 +172,9 @@ local function stepTokens()
 				rec.base = rec.base + moved
 			end
 			if nearAnyPlayer(current) then
-				local bob = math.sin(now * BOB_SPEED + rec.phase) * BOB_AMPLITUDE
+				local bob = math.sin(now * BOB_SPEED + rec.phase) * rec.bob
 				local position = Vector3.new(rec.base.X, rec.base.Y + bob, rec.base.Z)
-				token.CFrame = CFrame.new(position) * CFrame.Angles(0, now * SPIN_SPEED + rec.phase, 0)
+				token.CFrame = CFrame.new(position) * CFrame.Angles(0, now * rec.spin + rec.phase, 0)
 				rec.lastPos = position
 			end
 		end
@@ -162,81 +225,117 @@ local function addPiece(token, name, shape, size, offset, color, material, trans
 	return piece
 end
 
+-- True when `value` makes a token golden.
+local function isGoldenValue(value)
+	return type(value) == "number" and value >= GOLDEN_VALUE
+end
+
 -- THE visual cloud token. position: world Vector3 (centre of the coin). parent: Instance or nil.
 -- value: how many tokens it is worth (attribute "Value", default Config.Tokens.DefaultValue).
+-- value >= Config.Tokens.GoldenValue makes a golden token (also tagged GoldenToken).
 -- The returned Part is the coin: Anchored, CanCollide=false, tagged CloudToken.
 function TokenService.MakeTokenPart(position, parent, value)
 	ensureDriver()
+	if type(value) ~= "number" or value ~= value then
+		value = DEFAULT_VALUE
+	end
+	local golden = isGoldenValue(value)
+	local look = golden and LOOKS.golden or LOOKS.normal
+	local s = look.scale
 	local phase = phaseRng:NextNumber(0, math.pi * 2)
 
 	-- Roblox cylinders have their axis along X, so this is a coin standing on its edge; spinning
 	-- it around the world Y axis shows both faces.
 	local token = Instance.new("Part")
-	token.Name = "CloudToken"
+	token.Name = golden and "GoldenCloudToken" or "CloudToken"
 	token.Shape = Enum.PartType.Cylinder
-	token.Size = Vector3.new(COIN_THICKNESS, COIN_DIAMETER, COIN_DIAMETER)
+	token.Size = Vector3.new(COIN_THICKNESS * s, COIN_DIAMETER * s, COIN_DIAMETER * s)
 	token.Material = Enum.Material.Neon
-	token.Color = GOLD
+	token.Color = look.core
 	token.Anchored = true
 	token.CanCollide = false
 	token.CanTouch = true
 	token.CanQuery = false
 	token.CastShadow = false
 	token.CFrame = CFrame.new(position) * CFrame.Angles(0, phase, 0)
-	token:SetAttribute("Value", value or Config.Tokens.DefaultValue)
+	token:SetAttribute("Value", value)
+	if golden then
+		token:SetAttribute("Golden", true)
+	end
 
-	-- deeper amber rim peeking out behind the coin
+	-- deeper rim peeking out behind the coin
 	addPiece(token, "Rim", Enum.PartType.Cylinder,
-		Vector3.new(RIM_THICKNESS, RIM_DIAMETER, RIM_DIAMETER), CFrame.new(0, 0, 0),
-		AMBER, Enum.Material.SmoothPlastic, 0)
+		Vector3.new(RIM_THICKNESS * s, RIM_DIAMETER * s, RIM_DIAMETER * s), CFrame.new(0, 0, 0),
+		look.rim, Enum.Material.SmoothPlastic, 0)
 
-	-- the little white cloud puff, poking through both faces of the coin (local X is the thickness)
-	addPiece(token, "PuffMiddle", Enum.PartType.Ball, Vector3.new(1.2, 1.2, 1.2), CFrame.new(0, 0.22, 0),
-		Theme.Colors.Cloud, Enum.Material.SmoothPlastic, 0)
-	addPiece(token, "PuffLeft", Enum.PartType.Ball, Vector3.new(0.85, 0.85, 0.85), CFrame.new(0, -0.12, -0.7),
-		Theme.Colors.Cloud, Enum.Material.SmoothPlastic, 0)
-	addPiece(token, "PuffRight", Enum.PartType.Ball, Vector3.new(0.85, 0.85, 0.85), CFrame.new(0, -0.12, 0.7),
-		Theme.Colors.Cloud, Enum.Material.SmoothPlastic, 0)
+	-- the little cloud puff, poking through both faces of the coin (local X is the thickness)
+	addPiece(token, "PuffMiddle", Enum.PartType.Ball, Vector3.new(1.2 * s, 1.2 * s, 1.2 * s),
+		CFrame.new(0, 0.22 * s, 0), look.puff, Enum.Material.SmoothPlastic, 0)
+	addPiece(token, "PuffLeft", Enum.PartType.Ball, Vector3.new(0.85 * s, 0.85 * s, 0.85 * s),
+		CFrame.new(0, -0.12 * s, -0.7 * s), look.puff, Enum.Material.SmoothPlastic, 0)
+	addPiece(token, "PuffRight", Enum.PartType.Ball, Vector3.new(0.85 * s, 0.85 * s, 0.85 * s),
+		CFrame.new(0, -0.12 * s, 0.7 * s), look.puff, Enum.Material.SmoothPlastic, 0)
 
 	-- soft translucent aura so tokens read from far away
-	addPiece(token, "Halo", Enum.PartType.Ball, Vector3.new(HALO_DIAMETER, HALO_DIAMETER, HALO_DIAMETER),
-		CFrame.new(0, 0, 0), GLOW, Enum.Material.Neon, 0.88)
+	local haloSize = HALO_DIAMETER * look.haloScale * s
+	addPiece(token, "Halo", Enum.PartType.Ball, Vector3.new(haloSize, haloSize, haloSize),
+		CFrame.new(0, 0, 0), look.glow, Enum.Material.Neon, look.haloTransparency)
+
+	if golden then
+		-- a big thin flare disc behind the coin and a four-point glint star across its face
+		addPiece(token, "Flare", Enum.PartType.Cylinder, Vector3.new(0.12, 8.4, 8.4), CFrame.new(0, 0, 0),
+			GOLDEN_GLOW, Enum.Material.Neon, 0.8)
+		addPiece(token, "GlintVertical", Enum.PartType.Block, Vector3.new(0.1, 7.4, 0.28), CFrame.new(0, 0, 0),
+			GOLDEN_GLOW, Enum.Material.Neon, 0.5)
+		addPiece(token, "GlintHorizontal", Enum.PartType.Block, Vector3.new(0.1, 0.28, 7.4), CFrame.new(0, 0, 0),
+			GOLDEN_GLOW, Enum.Material.Neon, 0.5)
+	end
 
 	local light = Instance.new("PointLight")
 	light.Name = "TokenLight"
-	light.Color = GOLD
-	light.Brightness = 1.2
-	light.Range = 11
+	light.Color = look.core
+	light.Brightness = look.lightBrightness
+	light.Range = look.lightRange
 	light.Shadows = false
 	light.Parent = token
 
 	local sparkles = Instance.new("ParticleEmitter")
 	sparkles.Name = "Sparkles"
 	sparkles.Texture = SPARKLE_TEXTURE
-	sparkles.Color = ColorSequence.new(GLOW, GOLD)
+	sparkles.Color = ColorSequence.new(look.glow, look.rim)
 	sparkles.LightEmission = 1
 	sparkles.LightInfluence = 0
-	sparkles.Rate = 5
-	sparkles.Lifetime = NumberRange.new(0.9, 1.6)
-	sparkles.Speed = NumberRange.new(0.4, 1.2)
+	sparkles.Rate = look.sparkleRate
+	sparkles.Lifetime = look.sparkleLife
+	sparkles.Speed = NumberRange.new(0.4, golden and 2.2 or 1.2)
 	sparkles.SpreadAngle = Vector2.new(180, 180)
 	sparkles.Rotation = NumberRange.new(0, 360)
 	sparkles.RotSpeed = NumberRange.new(-60, 60)
 	sparkles.Acceleration = Vector3.new(0, 0.8, 0)
 	sparkles.Size = NumberSequence.new({
 		NumberSequenceKeypoint.new(0, 0),
-		NumberSequenceKeypoint.new(0.3, 0.55),
+		NumberSequenceKeypoint.new(0.3, look.sparkleSize),
 		NumberSequenceKeypoint.new(1, 0),
 	})
 	sparkles.Transparency = NumberSequence.new({
 		NumberSequenceKeypoint.new(0, 1),
-		NumberSequenceKeypoint.new(0.2, 0.15),
+		NumberSequenceKeypoint.new(0.2, golden and 0.05 or 0.15),
 		NumberSequenceKeypoint.new(1, 1),
 	})
 	sparkles.Parent = token
 
 	CollectionService:AddTag(token, TOKEN_TAG)
-	animated[token] = { base = position, lastPos = position, phase = phase, parented = false }
+	if golden then
+		CollectionService:AddTag(token, GOLDEN_TAG)
+	end
+	animated[token] = {
+		base = position,
+		lastPos = position,
+		phase = phase,
+		parented = false,
+		spin = look.spin,
+		bob = look.bob,
+	}
 	token.Parent = parent
 	return token
 end
@@ -245,9 +344,12 @@ end
 -- Collection effect
 ----------------------------------------------------------------------
 -- Sparkle burst + expanding glow bubble (both parented to `effectParent` so they vanish with the
--- course), while the coin itself pops upward, fades and is destroyed.
-local function playCollectEffect(token, effectParent)
+-- course), while the coin itself pops upward, fades and is destroyed. Golden tokens get a bigger
+-- burst and an expanding ground ring on top.
+local function playCollectEffect(token, effectParent, golden)
 	local position = token.Position
+	local glow = golden and GOLDEN_GLOW or GLOW
+	local core = golden and GOLDEN_RIM or GOLD
 
 	local burst = Instance.new("Part")
 	burst.Name = "TokenBurst"
@@ -262,38 +364,38 @@ local function playCollectEffect(token, effectParent)
 
 	local emitter = Instance.new("ParticleEmitter")
 	emitter.Texture = SPARKLE_TEXTURE
-	emitter.Color = ColorSequence.new(GLOW, GOLD)
+	emitter.Color = ColorSequence.new(glow, core)
 	emitter.LightEmission = 1
 	emitter.LightInfluence = 0
 	emitter.Rate = 0
-	emitter.Lifetime = NumberRange.new(0.45, 0.85)
-	emitter.Speed = NumberRange.new(12, 24)
+	emitter.Lifetime = NumberRange.new(0.45, golden and 1.1 or 0.85)
+	emitter.Speed = NumberRange.new(12, golden and 30 or 24)
 	emitter.SpreadAngle = Vector2.new(180, 180)
 	emitter.Drag = 3
 	emitter.Rotation = NumberRange.new(0, 360)
 	emitter.RotSpeed = NumberRange.new(-180, 180)
 	emitter.Acceleration = Vector3.new(0, -8, 0)
 	emitter.Size = NumberSequence.new({
-		NumberSequenceKeypoint.new(0, 0.9),
+		NumberSequenceKeypoint.new(0, golden and 1.3 or 0.9),
 		NumberSequenceKeypoint.new(1, 0),
 	})
 	emitter.Transparency = NumberSequence.new({
-		NumberSequenceKeypoint.new(0, 0),
-		NumberSequenceKeypoint.new(0.7, 0.3),
+		NumberSequenceKeypoint.new(0, 0.05),
+		NumberSequenceKeypoint.new(0.7, 0.35),
 		NumberSequenceKeypoint.new(1, 1),
 	})
 	emitter.Parent = burst
 	burst.Parent = effectParent
-	emitter:Emit(24)
-	Debris:AddItem(burst, 1.5)
+	emitter:Emit(golden and 44 or 22)
+	Debris:AddItem(burst, 1.6)
 
 	local bubble = Instance.new("Part")
 	bubble.Name = "TokenBubble"
 	bubble.Shape = Enum.PartType.Ball
 	bubble.Size = Vector3.new(1.5, 1.5, 1.5)
 	bubble.Material = Enum.Material.Neon
-	bubble.Color = GLOW
-	bubble.Transparency = 0.35
+	bubble.Color = glow
+	bubble.Transparency = 0.5
 	bubble.Anchored = true
 	bubble.CanCollide = false
 	bubble.CanTouch = false
@@ -301,9 +403,31 @@ local function playCollectEffect(token, effectParent)
 	bubble.CastShadow = false
 	bubble.CFrame = CFrame.new(position)
 	bubble.Parent = effectParent
-	Util.Tween(bubble, 0.35, { Size = Vector3.new(7, 7, 7), Transparency = 1 },
+	local bubbleSize = golden and 11 or 7
+	Util.Tween(bubble, 0.35, { Size = Vector3.new(bubbleSize, bubbleSize, bubbleSize), Transparency = 1 },
 		Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 	Debris:AddItem(bubble, 0.6)
+
+	if golden then
+		-- flat ring racing outwards at the token's height
+		local ring = Instance.new("Part")
+		ring.Name = "TokenRing"
+		ring.Shape = Enum.PartType.Cylinder
+		ring.Size = Vector3.new(0.2, 2, 2)
+		ring.Material = Enum.Material.Neon
+		ring.Color = GOLDEN_GLOW
+		ring.Transparency = 0.45
+		ring.Anchored = true
+		ring.CanCollide = false
+		ring.CanTouch = false
+		ring.CanQuery = false
+		ring.CastShadow = false
+		ring.CFrame = CFrame.new(position) * CFrame.Angles(0, 0, math.pi / 2)
+		ring.Parent = effectParent
+		Util.Tween(ring, 0.6, { Size = Vector3.new(0.2, 16, 16), Transparency = 1 },
+			Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+		Debris:AddItem(ring, 0.9)
+	end
 
 	-- the coin itself: float up, fade every piece, dim the light, stop the sparkles
 	for _, d in ipairs(token:GetDescendants()) do
@@ -317,7 +441,7 @@ local function playCollectEffect(token, effectParent)
 	end
 	Util.Tween(token, COLLECT_FADE, {
 		Transparency = 1,
-		CFrame = token.CFrame + Vector3.new(0, 3, 0),
+		CFrame = token.CFrame + Vector3.new(0, golden and 4 or 3, 0),
 	}, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 	Debris:AddItem(token, COLLECT_FADE + 0.15)
 end
@@ -325,6 +449,10 @@ end
 ----------------------------------------------------------------------
 -- Watch: make the tokens of one match course collectable
 ----------------------------------------------------------------------
+local function isGoldenToken(token)
+	return CollectionService:HasTag(token, GOLDEN_TAG) or token:GetAttribute("Golden") == true
+end
+
 -- container: the course Folder/Model. matchHandle = { AddTokens = function(player, n) end }.
 -- Returns stopFn (idempotent): disconnects every Touched/poll/descendant hook.
 function TokenService.Watch(container, matchHandle)
@@ -334,14 +462,14 @@ function TokenService.Watch(container, matchHandle)
 	end
 
 	local stopped = false
-	local tokens = {} -- token part -> Touched connection
+	local tokens = {} -- token part -> { conn = Touched connection, radiusSq = pickup radius squared }
 	local collected = {} -- token part -> true; a token is only ever collected once
 	local connections = {} -- container-level connections
 
 	local function forget(token)
-		local conn = tokens[token]
-		if conn then
-			conn:Disconnect()
+		local rec = tokens[token]
+		if rec and rec.conn then
+			rec.conn:Disconnect()
 		end
 		tokens[token] = nil
 		stopAnimating(token)
@@ -369,16 +497,21 @@ function TokenService.Watch(container, matchHandle)
 		-- claim it first: everything below may yield or error, the token must stay claimed
 		collected[token] = true
 		token:SetAttribute("Collected", true)
+		local golden = isGoldenToken(token)
 		forget(token)
 
 		local value = token:GetAttribute("Value")
-		if type(value) ~= "number" then
-			value = Config.Tokens.DefaultValue
+		if type(value) ~= "number" or value ~= value then
+			if golden then
+				value = GOLDEN_VALUE
+			else
+				value = DEFAULT_VALUE
+			end
 		end
 		value = math.max(1, math.floor(value + 0.5))
 
 		if container.Parent then
-			local ok, err = pcall(playCollectEffect, token, container)
+			local ok, err = pcall(playCollectEffect, token, container, golden)
 			if not ok then
 				warn("[TokenService] collect effect failed: " .. tostring(err))
 				token:Destroy()
@@ -402,15 +535,22 @@ function TokenService.Watch(container, matchHandle)
 		if not inst:IsA("BasePart") or not CollectionService:HasTag(inst, TOKEN_TAG) then
 			return
 		end
-		tokens[inst] = inst.Touched:Connect(function(hit)
-			if stopped or collected[inst] then
-				return
-			end
-			local player = Util.PlayerFromPart(hit)
-			if player then
-				tryCollect(inst, player)
-			end
-		end)
+		local radius = PICKUP_RADIUS
+		if isGoldenToken(inst) then
+			radius = GOLDEN_PICKUP_RADIUS
+		end
+		tokens[inst] = {
+			radiusSq = radius * radius,
+			conn = inst.Touched:Connect(function(hit)
+				if stopped or collected[inst] then
+					return
+				end
+				local player = Util.PlayerFromPart(hit)
+				if player then
+					tryCollect(inst, player)
+				end
+			end),
+		}
 	end
 
 	for _, d in ipairs(container:GetDescendants()) do
@@ -419,8 +559,7 @@ function TokenService.Watch(container, matchHandle)
 	table.insert(connections, container.DescendantAdded:Connect(register))
 
 	-- Backup for Touched: anchored, spinning parts occasionally miss a fast-moving character, so
-	-- also collect when a living player's root is within PICKUP_RADIUS of a token.
-	local radiusSq = PICKUP_RADIUS * PICKUP_RADIUS
+	-- also collect when a living player's root is within the pickup radius of a token.
 	task.spawn(function()
 		while not stopped do
 			task.wait(PICKUP_POLL)
@@ -435,12 +574,12 @@ function TokenService.Watch(container, matchHandle)
 				end
 			end
 			if #nearby > 0 then
-				for token in pairs(tokens) do
+				for token, rec in pairs(tokens) do
 					if token.Parent and not collected[token] then
 						local tp = token.Position
 						for _, entry in ipairs(nearby) do
 							local d = tp - entry.position
-							if d:Dot(d) <= radiusSq then
+							if d:Dot(d) <= rec.radiusSq then
 								tryCollect(token, entry.player)
 								break
 							end
