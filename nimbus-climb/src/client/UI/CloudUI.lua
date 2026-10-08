@@ -335,6 +335,7 @@ function CloudUI.Button(props)
 	local button = Util.Create("TextButton", {
 		Name = props.Name or ("Button_" .. tostring(props.Text or "")),
 		AutoButtonColor = false,
+		Active = true, -- explicit: "Active == false" is how a button is switched off (see isDisabled)
 		BorderSizePixel = 0,
 		BackgroundColor3 = Theme.Lighten(styleBase(state.Style), 0.16),
 		Size = props.Size or UDim2.fromOffset(150, 46),
@@ -507,13 +508,14 @@ function CloudUI.Panel(props)
 	corner(body, 16)
 	stroke(body, NAVY, OUTLINE_THICKNESS, 0)
 	gradient(body, ColorSequence.new(frameTop, frameBottom), 90)
-	frame("Highlight", {
+	-- thin glossy highlight just inside the top edge
+	local highlight = frame("Highlight", {
 		BackgroundColor3 = WHITE,
 		BackgroundTransparency = 0.62,
 		Position = UDim2.new(0, 14, 0, 6),
 		Size = UDim2.new(1, -28, 0, 5),
-	}, body).Parent = body
-	round(body:FindFirstChild("Highlight"))
+	}, body)
+	round(highlight)
 
 	-- inner content well
 	local topInset = hasTitle and 34 or 22
@@ -732,7 +734,9 @@ end
 -- Icon button (round, with a caption below)
 ----------------------------------------------------------------------
 -- props: Glyph (short text), Label (caption), Color (Color3 or style name), Callback, Parent, Size
---        (whole widget, default 64x86), Badge (bool), Position, AnchorPoint, Name, LayoutOrder
+--        (whole widget, default 64x84; the circle's diameter is the widget width, and with a caption the
+--        widget is made at least width + 22 px tall so the caption never overlaps its neighbours),
+--        Badge (bool), Position, AnchorPoint, Name, LayoutOrder
 function CloudUI.IconButton(props)
 	props = props or {}
 	local hasLabel = type(props.Label) == "string" and props.Label ~= ""
@@ -744,8 +748,16 @@ function CloudUI.IconButton(props)
 		color = BUTTON_COLORS.Blue or Color3.fromRGB(90, 158, 234)
 	end
 
+	local widgetSize = props.Size or UDim2.fromOffset(64, hasLabel and 84 or 64)
+	if hasLabel and widgetSize.X.Scale == 0 and widgetSize.Y.Scale == 0 then
+		local minHeight = widgetSize.X.Offset + labelHeight + 2
+		if widgetSize.Y.Offset < minHeight then
+			widgetSize = UDim2.fromOffset(widgetSize.X.Offset, minHeight)
+		end
+	end
+
 	local root = frame(props.Name or ("IconButton_" .. tostring(props.Label or props.Glyph or "")), {
-		Size = props.Size or UDim2.fromOffset(64, hasLabel and 86 or 64),
+		Size = widgetSize,
 		Position = props.Position or UDim2.new(),
 		AnchorPoint = props.AnchorPoint or Vector2.new(0, 0),
 		LayoutOrder = props.LayoutOrder or 0,
@@ -1166,7 +1178,7 @@ function CloudUI.PetViewport(parent, petDef, size, opts)
 		ZIndex = opts.ZIndex or 1,
 		Ambient = Color3.fromRGB(176, 182, 206),
 		LightColor = Color3.fromRGB(255, 246, 232),
-		LightDirection = Vector3.new(-0.4, -0.8, -1),
+		LightDirection = Vector3.new(-0.4, -0.8, 1), -- shines towards +Z: onto a model's -Z "front" (see side)
 	})
 	local camera = Util.Create("Camera", { FieldOfView = FOV, Parent = viewport })
 	viewport.CurrentCamera = camera
@@ -1182,6 +1194,7 @@ function CloudUI.PetViewport(parent, petDef, size, opts)
 	local center = Vector3.new(0, 1, 0)
 	local halfH, halfW = 1.5, 1.8
 	local lastAspect = 1
+	local side = -1 -- which side of the model the camera sits on: -1 = the -Z side (Roblox models face -Z)
 
 	if petDef then
 		builder = getPetBuilder()
@@ -1203,8 +1216,25 @@ function CloudUI.PetViewport(parent, petDef, size, opts)
 		end
 		lastAspect = aspect
 		local t = math.tan(math.rad(FOV) / 2)
-		local dist = math.max(halfH * 1.2 / t, halfW * 1.12 / (t * aspect))
-		camera.CFrame = CFrame.new(center + Vector3.new(0, halfH * 0.12, dist), center)
+		local dist = math.max(halfH * 1.2 / t, halfW * 1.08 / (t * aspect))
+		camera.CFrame = CFrame.lookAt(center + Vector3.new(0, halfH * 0.12, dist * side), center)
+	end
+
+	-- Pets face -Z like every Roblox model (CFrame.lookAt convention). If a model's eyes turn out to sit
+	-- on its +Z side instead, put the camera (and the light) there so the viewport shows the face.
+	-- Expects the model to be posed at the origin with an identity pivot.
+	local function detectSide(m, c)
+		local sum, count = 0, 0
+		for _, d in ipairs(m:GetDescendants()) do
+			if d:IsA("BasePart") and d.Name:lower():find("eye", 1, true) then
+				sum = sum + (d.Position.Z - c.Z)
+				count = count + 1
+			end
+		end
+		if count > 0 and sum / count > 0.05 then
+			return 1
+		end
+		return -1
 	end
 
 	local function pose(t, dt)
@@ -1234,6 +1264,11 @@ function CloudUI.PetViewport(parent, petDef, size, opts)
 			center = cf.Position
 			halfH = math.max(0.5, bbox.Y * 0.5)
 			halfW = math.max(0.5, math.max(bbox.X, bbox.Z) * 0.5)
+			local okSide, found = pcall(detectSide, model, center)
+			if okSide and found then
+				side = found
+				viewport.LightDirection = Vector3.new(-0.4, -0.8, -side)
+			end
 		end
 		pose(0.35, 0)
 	else
@@ -1328,6 +1363,19 @@ end
 ----------------------------------------------------------------------
 -- Slot (inventory / hotbar cell with a rarity border)
 ----------------------------------------------------------------------
+local function petKey(info)
+	if type(info) ~= "table" then
+		return nil
+	end
+	local pet = info.Pet
+	if type(pet) == "table" then
+		return pet.Id
+	elseif type(pet) == "string" then
+		return pet
+	end
+	return nil
+end
+
 -- props: Size (default 72x72), Position, AnchorPoint, Parent, Callback, Hotkey, Name, LayoutOrder
 -- info = { Glyph, Color, Pet = PetDef, RarityColor, Name, Blurb }
 function CloudUI.Slot(props)
@@ -1476,6 +1524,13 @@ function CloudUI.Slot(props)
 	local slot = { Root = root, Button = button, Fx = fx }
 
 	function slot.SetContent(newInfo)
+		-- Windows re-render on every State.Changed: keep the (expensive) pet model when the same pet is shown again.
+		local keepKey = viewportHandle ~= nil and petKey(info) or nil
+		if keepKey ~= nil and keepKey == petKey(newInfo) then
+			info = newInfo
+			paint()
+			return
+		end
 		clearContent()
 		info = newInfo
 		if info then

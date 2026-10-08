@@ -1,32 +1,38 @@
--- NotifyController (client): toasts, the end-of-match results card and other players' dash puffs.
+-- NotifyController (client, v2): the game's side-of-screen voice. Nothing here is ever centred.
 --
 --   NotifyController.Init()
 --
 -- Remotes handled
---   Notify(text, kind, duration)  -> toast stack, top-centre below the HUD match panel (positioned and
---                                    scaled like HudController does, max MAX_TOASTS). kind: info|good|bad|token.
---                                    Identical toasts that are still showing are merged into "text x2".
---   MatchResult(result)           -> big centred results card: VICTORY!/DEFEAT, difficulty, time, tokens,
---                                    win bonus, a member table and a "Returning to the lobby in Ns…"
---                                    countdown. It closes when the server clears MatchState (the player is
---                                    sent back to the lobby), when the player presses the X, or shortly after
---                                    the countdown reaches zero as a safety net.
---   MatchState(nil)               -> closes the results card.
---   DashFx(userId)                -> a cheap trail + puff on that player's character (own dashes are ignored,
+--   Notify(text, kind, duration)  -> compact toast stack on the RIGHT edge, just under the HUD token pill.
+--                                    Max 4, 250 px wide, newest on top, slide in from the right, `Toast` role
+--                                    font, coloured by kind (info|good|bad|token). Identical toasts that are
+--                                    still showing are merged into "text x2".
+--   MatchResult(result)           -> compact result card on the right edge (about 45% down): VICTORY!/DEFEAT in
+--                                    the Title font with a gradient, difficulty + stars, time, tokens, bonus,
+--                                    a small member list and a "Back to lobby in Ns" line. It closes when the
+--                                    server clears MatchState (the player is back in the lobby), when the
+--                                    player presses its X, or a few seconds after the countdown ends.
+--   MatchState(nil)               -> closes the result card.
+--   DashFx(userId)                -> a cheap puff + trail on that player's character (own dashes are ignored,
 --                                    MovementController already shows those).
 --
--- Plain Lua 5.1-compatible syntax only. All fonts come from Theme.
+-- The GUI is "NimbusNotify" (display order 30, IgnoreGuiInset = false). Panels carry a UIScale driven by
+-- the viewport (same formula as HudController) and sit inside full-screen holder frames whose UIPadding is
+-- the screen margin, so scaling never detaches them from the edge.
+-- Plain Lua 5.1-compatible syntax only. All fonts come from Theme roles.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local GuiService = game:GetService("GuiService")
 local UserInputService = game:GetService("UserInputService")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
-local Config = require(Shared.Config)
-local Theme = require(Shared.Theme)
-local Util = require(Shared.Util)
-local Remotes = require(Shared.Remotes)
+local Config = require(Shared:WaitForChild("Config"))
+local Theme = require(Shared:WaitForChild("Theme"))
+local Util = require(Shared:WaitForChild("Util"))
+local Remotes = require(Shared:WaitForChild("Remotes"))
+
+local Client = script.Parent.Parent
+local CloudUI = require(Client:WaitForChild("UI"):WaitForChild("CloudUI"))
 
 local NotifyController = {}
 
@@ -37,509 +43,466 @@ local LocalPlayer = Players.LocalPlayer
 ----------------------------------------------------------------------
 -- toasts
 local MAX_TOASTS = 4
-local TOAST_HEIGHT = 46
-local TOAST_GAP = 8
-local TOAST_MAX_TEXT_W = 440
-local TOAST_BG = 0.14
-local TOAST_STROKE = 0.15
-local TOAST_TEXT_STROKE = 0.55
+local TOAST_W = 250
+local TOAST_GAP = 6
+local TOAST_TEXT_SIZE = 15
+local TOAST_BG = 0.1
 local DEFAULT_DURATION = 3
-local MAX_TOAST_TEXT = 120 -- bytes
+local MIN_DURATION = 1.5
+local MAX_DURATION = 8
+local MAX_TOAST_CHARS = 90
 
--- Where the toast stack starts. HudController scales its whole layout by
--- s = clamp(min(vpY / DESIGN_H, vpX / DESIGN_W), MIN_SCALE, MAX_SCALE) and puts the match panel
--- (HUD_MATCH_H design px) just under the GUI inset, so the stack is placed (and scaled) the same way
--- instead of using a fixed pixel offset. KEEP THESE IN SYNC with the constants of the same meaning in
--- HudController.lua (DESIGN_W/H, MIN/MAX_SCALE, EDGE, TOUCH_SAFE, TOKEN_W, TOKEN_H_MATCH, MATCH_W/H).
-local HUD_DESIGN_W = 1500
-local HUD_DESIGN_H = 1080
-local HUD_MIN_SCALE = 0.75
-local HUD_MAX_SCALE = 2.5
-local HUD_EDGE = 14 -- HudController EDGE: margin to the screen edge
-local HUD_TOUCH_SAFE = 22 -- extra side margin on touch devices
-local HUD_TOP_PAD = 6 -- design px between the GUI inset and the match panel
-local HUD_MATCH_W = 520
-local HUD_MATCH_MIN_W = 440
-local HUD_MATCH_H = 126
-local HUD_TOKEN_W = 214
-local HUD_TOKEN_H_MATCH = 86 -- token counter height while in a match
-local HUD_GAP = 10 -- design px between stacked HUD panels / below the match panel
+-- KEEP IN SYNC with HudController.lua: REF_W/REF_H/MIN_SCALE/MAX_SCALE, EDGE, TOUCH_EDGE and PILL_H.
+-- The toast stack starts directly below the HUD token pill (top-right).
+local REF_W, REF_H = 1280, 720
+local MIN_SCALE, MAX_SCALE = 0.7, 1.25
+local EDGE = 10
+local TOUCH_EDGE = 20
+local PILL_H = 44
+local PILL_GAP = 8
 
--- results card
-local CARD_W = 560
-local PAD = 24
-local CONTENT_W = CARD_W - PAD * 2
-local TILE_W = 164
-local TILE_GAP = 10
-local ROW_H = 36
-local ROW_GAP = 6
-local MAX_ROWS = 8
-local RESULT_GRACE = 3 -- seconds the card may outlive its countdown while waiting for the server
+-- result card
+local RESULT_W = 264
+local RESULT_Y = 0.47 -- vertical position (fraction of the screen), right edge
+local CONFETTI_PIECES = 18
 
--- other players' dash puffs
-local FX_MAX_DISTANCE = 160 -- studs from the camera
-local FX_MIN_INTERVAL = 0.25 -- per player
-
+-- dash puffs of other players
+local FX_MAX_DISTANCE = 140
+local FX_MIN_INTERVAL = 0.2
 local TEX_SMOKE = "rbxasset://textures/particles/smoke_main.dds"
 local TEX_SPARKLES = "rbxasset://textures/particles/sparkles_main.dds"
 
-local KINDS = {
-	info = { Color = Theme.Colors.Stamina, Glyph = "✦" },
-	good = { Color = Theme.Colors.Good, Glyph = "✔" },
-	bad = { Color = Theme.Colors.Bad, Glyph = "!" },
-	token = { Color = Theme.Colors.Token, Glyph = "☁" },
+local Colors = Theme.Colors
+local WHITE = Colors.White
+local NAVY = Colors.Navy or Colors.Ink
+local MUTED = Colors.Muted or Colors.CloudShade
+local GOLD = Colors.Gold or Colors.Token
+
+local FALLBACK_KINDS = {
+	info = Color3.fromRGB(90, 158, 234),
+	good = Color3.fromRGB(96, 196, 108),
+	bad = Color3.fromRGB(228, 90, 92),
+	token = Color3.fromRGB(240, 188, 66),
+}
+local KIND_GLYPH = {
+	info = "i",
+	good = "\226\156\148", -- check mark
+	bad = "!",
+	token = "\226\152\129", -- cloud
 }
 
-local SUBTITLES = {
-	victory = "Every climber reached the summit!",
-	defeat = "The whole team was knocked out of the sky.",
-	timeout = "The storm outlasted the clock.",
-	abandoned = "The team drifted away.",
+local REASON_TEXT = {
+	defeat = "The whole team went down",
+	timeout = "Out of time",
+	abandoned = "Match abandoned",
 }
 
 ----------------------------------------------------------------------
 -- State
 ----------------------------------------------------------------------
 local initialized = false
-
-local toastHolder = nil -- Frame that toasts live in
-local holderScale = nil -- UIScale on toastHolder (follows the HUD scale)
-local toasts = {} -- alive toasts, oldest first
-local pendingToasts = {} -- Notify calls that arrived before the GUI existed
-
-local current = nil -- the results card that is showing, if any
-local lastDashFx = {} -- [userId] = os.clock() of the last puff
+local rng = Random.new()
+local UI = {} -- Gui, Stack, StackScale, ToastPad, ResultPad
+local scalers = {}
+local toasts = {} -- live toasts, oldest first
+local toastSerial = 0
+local result = { Panel = nil, Serial = 0 } -- the open result card
+local lastDashFx = {}
 
 ----------------------------------------------------------------------
--- Small helpers
+-- Helpers
 ----------------------------------------------------------------------
--- Set properties instantly (seconds <= 0) or tween them.
-local function applyProps(inst, props, seconds)
-	if seconds and seconds > 0 then
-		return Util.Tween(inst, seconds, props)
-	end
-	for key, value in pairs(props) do
-		inst[key] = value
-	end
-	return nil
+local tween = Util.Tween
+
+local function isTouchDevice()
+	return UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
 end
 
-local function makeLabel(parent, text, role, size, color, props)
-	local label = Theme.Label(text, role, { Size = size, Color = color, Props = props })
+local function viewportSize()
+	local camera = workspace.CurrentCamera
+	local vp = camera and camera.ViewportSize or Vector2.new(REF_W, REF_H)
+	if vp.X < 2 or vp.Y < 2 then
+		return Vector2.new(REF_W, REF_H)
+	end
+	return vp
+end
+
+local function currentScale()
+	local vp = viewportSize()
+	return Util.Clamp(math.min(vp.X / REF_W, vp.Y / REF_H), MIN_SCALE, MAX_SCALE)
+end
+
+local function hex(color)
+	return string.format(
+		"#%02X%02X%02X",
+		math.floor(color.R * 255 + 0.5),
+		math.floor(color.G * 255 + 0.5),
+		math.floor(color.B * 255 + 0.5)
+	)
+end
+
+local function newFrame(parent, name, props)
+	local p = { Name = name, BackgroundTransparency = 1, BorderSizePixel = 0 }
+	if props then
+		for key, value in pairs(props) do
+			p[key] = value
+		end
+	end
+	p.Parent = parent
+	return Util.Create("Frame", p)
+end
+
+-- Themed TextLabel. props may include Stroke (text outline transparency) plus any label property.
+local function newText(parent, name, text, role, size, color, props)
+	local extra = {
+		Name = name,
+		BorderSizePixel = 0,
+		Size = UDim2.new(1, 0, 1, 0),
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextYAlignment = Enum.TextYAlignment.Center,
+	}
+	local stroke = 0.3
+	if props then
+		for key, value in pairs(props) do
+			if key == "Stroke" then
+				stroke = value
+			else
+				extra[key] = value
+			end
+		end
+	end
+	local label = Theme.Label(text, role, { Size = size, Color = color, Stroke = stroke, Props = extra })
 	label.Parent = parent
 	return label
 end
 
--- Cut text to at most maxBytes without ever splitting a multi-byte UTF-8 character.
-local function truncateText(text, maxBytes)
-	if #text <= maxBytes then
-		return text
+local function round(inst)
+	return Theme.Corner(inst, UDim.new(0.5, 0))
+end
+
+local function addViewportScale(root)
+	local s = Instance.new("UIScale")
+	s.Scale = currentScale()
+	s.Parent = root
+	table.insert(scalers, s)
+	return s
+end
+
+local function kindColor(kind)
+	local name = "info"
+	if type(kind) == "string" and FALLBACK_KINDS[string.lower(kind)] then
+		name = string.lower(kind)
 	end
-	local cut = maxBytes
-	while cut > 0 do
-		local b = string.byte(text, cut + 1)
-		if b and b >= 128 and b < 192 then
-			cut = cut - 1 -- the next byte continues a character: back up to its start
-		else
-			break
+	local fromTheme = Theme.Kinds and Theme.Kinds[name]
+	return fromTheme or FALLBACK_KINDS[name], name
+end
+
+-- Cut a string to `maxChars` characters (UTF-8 aware) and add "..." when it was longer.
+local function truncateText(text, maxChars)
+	text = tostring(text or "")
+	local okLen, len = pcall(utf8.len, text)
+	if okLen and len then
+		if len <= maxChars then
+			return text
+		end
+		local okOff, offset = pcall(utf8.offset, text, maxChars + 1)
+		if okOff and offset then
+			return string.sub(text, 1, offset - 1) .. "..."
 		end
 	end
-	return string.sub(text, 1, cut)
+	if #text <= maxChars then
+		return text
+	end
+	return string.sub(text, 1, maxChars) .. "..."
 end
 
-local function getPlayerGui()
-	return LocalPlayer:FindFirstChildOfClass("PlayerGui")
+-- A transparent full-screen frame whose UIPadding is the screen margin.
+local function newHolder(name)
+	local holder = newFrame(UI.Gui, name, { Size = UDim2.fromScale(1, 1) })
+	local pad = Instance.new("UIPadding")
+	pad.Parent = holder
+	return holder, pad
 end
 
-local function newScreenGui(name, displayOrder)
-	local gui = Instance.new("ScreenGui")
-	gui.Name = name
-	gui.ResetOnSpawn = false
-	gui.IgnoreGuiInset = true
-	gui.DisplayOrder = displayOrder
-	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-	return gui
+local function applyMargins()
+	local side = isTouchDevice() and TOUCH_EDGE or EDGE
+	local k = currentScale()
+	if UI.ToastPad then
+		UI.ToastPad.PaddingRight = UDim.new(0, side)
+		UI.ToastPad.PaddingTop = UDim.new(0, math.floor(EDGE + (PILL_H + PILL_GAP) * k))
+	end
+	if UI.ResultPad then
+		UI.ResultPad.PaddingRight = UDim.new(0, side)
+	end
+end
+
+local function relayout()
+	local k = currentScale()
+	for i = #scalers, 1, -1 do
+		local s = scalers[i]
+		if s.Parent then
+			s.Scale = k
+		else
+			table.remove(scalers, i)
+		end
+	end
+	applyMargins()
 end
 
 ----------------------------------------------------------------------
 -- Toasts
 ----------------------------------------------------------------------
--- a = 0 fully visible, a = 1 fully transparent
+-- a = 0 fully visible .. 1 fully faded
 local function setToastAlpha(toast, a, seconds)
-	applyProps(toast.Frame, { BackgroundTransparency = Util.Lerp(TOAST_BG, 1, a) }, seconds)
-	applyProps(toast.Stroke, { Transparency = Util.Lerp(TOAST_STROKE, 1, a) }, seconds)
-	applyProps(toast.IconBg, { BackgroundTransparency = a }, seconds)
-	applyProps(toast.IconLabel, { TextTransparency = a }, seconds)
-	applyProps(toast.Label, {
-		TextTransparency = a,
-		TextStrokeTransparency = Util.Lerp(TOAST_TEXT_STROKE, 1, a),
-	}, seconds)
-end
-
-local function toastY(index)
-	return (index - 1) * (TOAST_HEIGHT + TOAST_GAP)
-end
-
--- Slide every alive toast into its slot (index 1 = top = oldest).
-local function layoutToasts()
-	for i, toast in ipairs(toasts) do
-		Util.Tween(
-			toast.Frame,
-			0.3,
-			{ Position = UDim2.new(0.5, 0, 0, toastY(i)) },
-			Enum.EasingStyle.Quint,
-			Enum.EasingDirection.Out
-		)
+	local goals = {
+		{ toast.Card, { BackgroundTransparency = TOAST_BG + (1 - TOAST_BG) * a } },
+		{ toast.Stroke, { Transparency = a } },
+		{ toast.Label, { TextTransparency = a, TextStrokeTransparency = 0.35 + 0.65 * a } },
+		{ toast.Icon, { BackgroundTransparency = a } },
+		{ toast.IconGlyph, { TextTransparency = a, TextStrokeTransparency = 0.35 + 0.65 * a } },
+	}
+	for _, entry in ipairs(goals) do
+		if seconds and seconds > 0 then
+			tween(entry[1], seconds, entry[2], Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+		else
+			for key, value in pairs(entry[2]) do
+				entry[1][key] = value
+			end
+		end
 	end
 end
 
 local function dismissToast(toast)
-	if not toast.Alive then
+	if toast.Dead then
 		return
 	end
-	toast.Alive = false
-	for i, t in ipairs(toasts) do
-		if t == toast then
+	toast.Dead = true
+	for i, live in ipairs(toasts) do
+		if live == toast then
 			table.remove(toasts, i)
 			break
 		end
 	end
-	setToastAlpha(toast, 1, 0.25)
-	Util.Tween(
-		toast.Frame,
-		0.25,
-		{ Position = UDim2.new(0.5, 0, 0, toast.Frame.Position.Y.Offset - 14) },
-		Enum.EasingStyle.Quad,
-		Enum.EasingDirection.In
-	)
-	task.delay(0.3, function()
-		if toast.Frame.Parent then
-			toast.Frame:Destroy()
+	tween(toast.Card, 0.22, { Position = UDim2.new(0, TOAST_W + 40, 0, 0) }, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+	setToastAlpha(toast, 1, 0.22)
+	task.delay(0.25, function()
+		local slot = toast.Slot
+		if not slot or not slot.Parent then
+			return
 		end
+		-- collapse the gap smoothly instead of popping the stack
+		local scale = UI.StackScale and UI.StackScale.Scale or 1
+		local height = slot.AbsoluteSize.Y / math.max(0.01, scale)
+		slot.AutomaticSize = Enum.AutomaticSize.None
+		slot.Size = UDim2.new(1, 0, 0, height)
+		tween(slot, 0.15, { Size = UDim2.new(1, 0, 0, 0) }, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+		task.delay(0.18, function()
+			if slot.Parent then
+				slot:Destroy()
+			end
+		end)
 	end)
-	layoutToasts()
 end
 
 local function scheduleExpiry(toast, duration)
-	toast.Token = toast.Token + 1
-	local token = toast.Token
-	task.delay(duration, function()
-		if toast.Alive and toast.Token == token then
+	toast.Expiry = os.clock() + duration
+	task.delay(duration + 0.02, function()
+		if not toast.Dead and os.clock() >= toast.Expiry then
 			dismissToast(toast)
 		end
 	end)
 end
 
-local function pulseToast(toast)
-	if toast.ScaleTween then
-		toast.ScaleTween:Cancel()
+local function refreshToastText(toast)
+	local text = toast.Text
+	if toast.Count > 1 then
+		text = text .. "  x" .. tostring(toast.Count)
 	end
-	toast.Scale.Scale = 1.12
-	toast.ScaleTween = Util.Tween(toast.Scale, 0.3, { Scale = 1 }, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+	toast.Label.Text = text
 end
 
-local function buildToast(text, kindName)
-	local kind = KINDS[kindName]
+local function buildToast(text, kind)
+	local color, kindName = kindColor(kind)
+	toastSerial = toastSerial + 1
 
-	local frame = Instance.new("Frame")
-	frame.Name = "Toast"
-	frame.AnchorPoint = Vector2.new(0.5, 0)
-	frame.AutomaticSize = Enum.AutomaticSize.X
-	frame.Size = UDim2.fromOffset(0, TOAST_HEIGHT)
-	frame.BackgroundColor3 = Theme.Colors.Panel
-	frame.BackgroundTransparency = TOAST_BG
-	frame.BorderSizePixel = 0
-	Theme.Corner(frame, UDim.new(0.5, 0))
-	local stroke = Theme.Stroke(frame, kind.Color, 2, TOAST_STROKE)
+	-- the slot is the list item (it keeps its place while the card slides); the card is what moves
+	local slot = newFrame(UI.Stack, "ToastSlot", {
+		Size = UDim2.new(1, 0, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		LayoutOrder = -toastSerial, -- newest on top
+	})
+	local card = newFrame(slot, "Toast", {
+		Position = UDim2.new(0, TOAST_W + 40, 0, 0),
+		Size = UDim2.new(1, 0, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundTransparency = 1,
+		BackgroundColor3 = Colors.Panel,
+	})
+	Theme.Corner(card, UDim.new(0, 12))
+	local stroke = Theme.Stroke(card, Theme.Lighten(color, 0.1), 2, 1)
+	Util.Create("UISizeConstraint", { MinSize = Vector2.new(0, 34), Parent = card })
+	local pad = Instance.new("UIPadding")
+	pad.PaddingTop = UDim.new(0, 6)
+	pad.PaddingBottom = UDim.new(0, 6)
+	pad.PaddingLeft = UDim.new(0, 8)
+	pad.PaddingRight = UDim.new(0, 10)
+	pad.Parent = card
 
-	local padding = Instance.new("UIPadding")
-	padding.PaddingLeft = UDim.new(0, 8)
-	padding.PaddingRight = UDim.new(0, 20)
-	padding.Parent = frame
-
-	local layout = Instance.new("UIListLayout")
-	layout.FillDirection = Enum.FillDirection.Horizontal
-	layout.HorizontalAlignment = Enum.HorizontalAlignment.Left
-	layout.VerticalAlignment = Enum.VerticalAlignment.Center
-	layout.SortOrder = Enum.SortOrder.LayoutOrder
-	layout.Padding = UDim.new(0, 10)
-	layout.Parent = frame
-
-	-- round coloured badge with a glyph
-	local iconBg = Instance.new("Frame")
-	iconBg.Name = "Icon"
-	iconBg.LayoutOrder = 1
-	iconBg.Size = UDim2.fromOffset(30, 30)
-	iconBg.BackgroundColor3 = kind.Color
-	iconBg.BorderSizePixel = 0
-	iconBg.Parent = frame
-	Theme.Corner(iconBg, UDim.new(0.5, 0))
-	local iconLabel = makeLabel(iconBg, kind.Glyph, "Heading", 18, Theme.Colors.Ink, {
-		Size = UDim2.fromScale(1, 1),
+	local icon = newFrame(card, "Icon", {
+		AnchorPoint = Vector2.new(0, 0.5),
+		Position = UDim2.new(0, 0, 0.5, 0),
+		Size = UDim2.fromOffset(24, 24),
+		BackgroundTransparency = 1,
+		BackgroundColor3 = Theme.Darken(color, 0.15),
+	})
+	round(icon)
+	local glyph = newText(icon, "Glyph", KIND_GLYPH[kindName] or "i", "Heading", 15, WHITE, {
+		TextXAlignment = Enum.TextXAlignment.Center,
+		TextTransparency = 1,
 		TextStrokeTransparency = 1,
 	})
 
-	local label = makeLabel(frame, text, "Body", 21, Theme.Colors.White, {
-		LayoutOrder = 2,
-		AutomaticSize = Enum.AutomaticSize.X,
-		Size = UDim2.new(0, 0, 1, 0),
-		TextXAlignment = Enum.TextXAlignment.Left,
-		TextWrapped = false,
-		TextTruncate = Enum.TextTruncate.AtEnd,
+	local label = newText(card, "Text", text, "Toast", TOAST_TEXT_SIZE, Theme.Lighten(color, 0.4), {
+		Position = UDim2.new(0, 32, 0, 0),
+		Size = UDim2.new(1, -32, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		TextWrapped = true,
+		TextTransparency = 1,
+		TextStrokeTransparency = 1,
+		Stroke = 1,
 	})
-	local limit = Instance.new("UISizeConstraint")
-	limit.MaxSize = Vector2.new(TOAST_MAX_TEXT_W, TOAST_HEIGHT)
-	limit.Parent = label
-
-	local scale = Instance.new("UIScale")
-	scale.Parent = frame
 
 	return {
-		Frame = frame,
-		Stroke = stroke,
-		IconBg = iconBg,
-		IconLabel = iconLabel,
-		Label = label,
-		Scale = scale,
-		ScaleTween = nil,
-		Text = text,
-		Kind = kindName,
-		Count = 1,
-		Alive = true,
-		Token = 0,
+		Slot = slot, Card = card, Stroke = stroke, Icon = icon, IconGlyph = glyph, Label = label,
+		Text = text, Kind = kindName, Count = 1, Dead = false, Expiry = 0, Color = color,
 	}
 end
 
-local function addToast(text, kindName, duration)
-	if not toastHolder then
-		if #pendingToasts < 8 then
-			table.insert(pendingToasts, { text, kindName, duration })
-		end
+local function addToast(text, kind, duration)
+	if not UI.Stack then
 		return
 	end
-
-	text = tostring(text or "")
+	text = truncateText(text, MAX_TOAST_CHARS)
 	if text == "" then
 		return
 	end
-	text = truncateText(text, MAX_TOAST_TEXT)
-	if type(kindName) ~= "string" or not KINDS[kindName] then
-		kindName = "info"
-	end
-	duration = Util.Clamp(tonumber(duration) or DEFAULT_DURATION, 1, 12)
+	duration = Util.Clamp(tonumber(duration) or DEFAULT_DURATION, MIN_DURATION, MAX_DURATION)
 
-	-- the same message again while it is still on screen: bump a counter instead of stacking
-	for i = #toasts, 1, -1 do
-		local existing = toasts[i]
-		if existing.Alive and existing.Text == text and existing.Kind == kindName then
-			existing.Count = existing.Count + 1
-			existing.Label.Text = text .. " ×" .. existing.Count
-			scheduleExpiry(existing, duration)
-			pulseToast(existing)
+	-- merge an identical toast that is still showing
+	local _, kindName = kindColor(kind)
+	for _, live in ipairs(toasts) do
+		if not live.Dead and live.Text == text and live.Kind == kindName then
+			live.Count = live.Count + 1
+			refreshToastText(live)
+			live.Label.TextColor3 = WHITE
+			tween(live.Label, 0.35, { TextColor3 = Theme.Lighten(live.Color, 0.4) }, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+			scheduleExpiry(live, duration)
 			return
 		end
 	end
 
-	-- the stack is full: the oldest toast makes room
-	while #toasts >= MAX_TOASTS do
+	local toast = buildToast(text, kind)
+	table.insert(toasts, toast)
+	-- never more than MAX_TOASTS: the oldest one leaves first
+	while #toasts > MAX_TOASTS do
 		dismissToast(toasts[1])
 	end
 
-	local toast = buildToast(text, kindName)
-	local slot = #toasts + 1
-	table.insert(toasts, toast)
-
-	-- start a little above the slot, invisible and small, then settle in
-	toast.Frame.Position = UDim2.new(0.5, 0, 0, toastY(slot) - 18)
-	toast.Scale.Scale = 0.85
-	setToastAlpha(toast, 1, 0)
-	toast.Frame.Parent = toastHolder
-
-	setToastAlpha(toast, 0, 0.25)
-	toast.ScaleTween = Util.Tween(toast.Scale, 0.35, { Scale = 1 }, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
-	layoutToasts()
-	if kindName == "bad" then
-		toast.Frame.Rotation = 3
-		Util.Tween(toast.Frame, 0.55, { Rotation = 0 }, Enum.EasingStyle.Elastic, Enum.EasingDirection.Out)
-	end
+	toast.Card.Position = UDim2.new(0, TOAST_W + 40, 0, 0)
+	tween(toast.Card, 0.38, { Position = UDim2.new(0, 0, 0, 0) }, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+	setToastAlpha(toast, 0, 0.2)
 	scheduleExpiry(toast, duration)
 end
 
--- Place and scale the toast stack for a viewport of size vp, mirroring HudController.relayout:
--- the stack starts a gap below the match panel (and below the token counter when HudController tucks
--- it under the match panel on narrow screens) and uses the same UIScale as the HUD.
-local function applyHolderLayout(vp)
-	if not toastHolder or not holderScale then
-		return
-	end
-	local s = Util.Clamp(math.min(vp.Y / HUD_DESIGN_H, vp.X / HUD_DESIGN_W), HUD_MIN_SCALE, HUD_MAX_SCALE)
-
-	local insetY = 0
-	pcall(function()
-		insetY = GuiService:GetGuiInset().Y
-	end)
-
-	-- same "narrow" test as HudController (token counter does not fit beside the match panel)
-	local side = 0
-	if UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled then
-		side = HUD_TOUCH_SAFE
-	end
-	local effW = vp.X / s -- viewport width in design pixels
-	local matchW = math.floor(Util.Clamp(effW - 2 * (HUD_EDGE + side), HUD_MATCH_MIN_W, HUD_MATCH_W))
-	local belowDesign = HUD_TOP_PAD + HUD_MATCH_H + HUD_GAP
-	if effW < matchW + 2 * (HUD_TOKEN_W + HUD_EDGE) then
-		belowDesign = belowDesign + HUD_TOKEN_H_MATCH + HUD_GAP
-	end
-
-	holderScale.Scale = s
-	-- a UIScale also scales its parent's size: pre-divide the width so the stack still spans the screen
-	-- (toasts are centred on it); the height is in design px and scales with the toasts
-	toastHolder.Size = UDim2.new(1 / s, 0, 0, toastY(MAX_TOASTS + 1))
-	-- the holder's own Position is not affected by its UIScale: this is real screen pixels
-	toastHolder.Position = UDim2.fromOffset(0, math.floor(insetY + belowDesign * s + 0.5))
-end
-
-local function layoutHolder()
-	local camera = workspace.CurrentCamera
-	local vp = camera and camera.ViewportSize or Vector2.new(1280, 720)
-	if vp.X < 8 or vp.Y < 8 then
-		return -- the viewport can be 1x1 at startup: the next change / delayed re-check fixes it
-	end
-	applyHolderLayout(vp)
-end
-
--- Keep the stack in step with the HUD whenever the viewport changes (same pattern as
--- HudController.hookCamera).
-local function hookToastCamera()
-	local cameraConn = nil
-	local function bind()
-		if cameraConn then
-			cameraConn:Disconnect()
-			cameraConn = nil
-		end
-		local camera = workspace.CurrentCamera
-		if camera then
-			cameraConn = camera:GetPropertyChangedSignal("ViewportSize"):Connect(layoutHolder)
-		end
-		layoutHolder()
-	end
-	workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(bind)
-	bind()
-	task.delay(0.5, layoutHolder)
-	task.delay(2, layoutHolder)
-end
-
-local function buildToastGui()
-	local playerGui = LocalPlayer:WaitForChild("PlayerGui", 30)
-	if not playerGui then
-		return
-	end
-	local gui = newScreenGui("NimbusToasts", 20)
-
-	local holder = Instance.new("Frame")
-	holder.Name = "Stack"
-	holder.BackgroundTransparency = 1
-	holder.BorderSizePixel = 0
-	holder.Parent = gui
-
-	local scale = Instance.new("UIScale")
-	scale.Name = "HolderScale"
-	scale.Parent = holder
-
-	gui.Parent = playerGui
-	toastHolder = holder
-	holderScale = scale
-
-	-- sane placement until the real viewport is known, then follow the camera
-	applyHolderLayout(Vector2.new(1280, 720))
-	hookToastCamera()
-
-	local queued = pendingToasts
-	pendingToasts = {}
-	for _, args in ipairs(queued) do
-		addToast(args[1], args[2], args[3])
-	end
+local function buildToastStack()
+	local holder, pad = newHolder("ToastHolder")
+	UI.ToastPad = pad
+	local stack = newFrame(holder, "ToastStack", {
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, 0, 0, 0),
+		Size = UDim2.fromOffset(TOAST_W, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+	})
+	local list = Instance.new("UIListLayout")
+	list.SortOrder = Enum.SortOrder.LayoutOrder
+	list.FillDirection = Enum.FillDirection.Vertical
+	list.HorizontalAlignment = Enum.HorizontalAlignment.Right
+	list.VerticalAlignment = Enum.VerticalAlignment.Top
+	list.Padding = UDim.new(0, TOAST_GAP)
+	list.Parent = stack
+	UI.Stack = stack
+	UI.StackScale = addViewportScale(stack)
 end
 
 ----------------------------------------------------------------------
--- Results card
+-- Result card
 ----------------------------------------------------------------------
 local function closeResults(immediate)
-	local r = current
-	if not r then
+	local panel = result.Panel
+	result.Serial = result.Serial + 1
+	result.Panel = nil
+	if not panel or not panel.Root or not panel.Root.Parent then
 		return
-	end
-	current = nil
-	r.Alive = false
-	for _, conn in ipairs(r.Conns) do
-		pcall(function()
-			conn:Disconnect()
-		end)
 	end
 	if immediate then
-		pcall(function()
-			r.Gui:Destroy()
-		end)
+		panel.Destroy()
 		return
 	end
-	Util.Tween(r.Dim, 0.35, { BackgroundTransparency = 1 })
-	Util.Tween(r.Pop, 0.3, { Scale = 0.05 }, Enum.EasingStyle.Back, Enum.EasingDirection.In)
-	task.delay(0.4, function()
-		pcall(function()
-			r.Gui:Destroy()
-		end)
+	tween(panel.Root, 0.3, { Position = UDim2.new(1.8, 0, RESULT_Y, 0) }, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+	task.delay(0.35, function()
+		if panel.Root.Parent then
+			panel.Destroy()
+		end
 	end)
 end
 
--- Count a label up from 0 to 'target' (format(n) -> string). Stops by itself when the label is destroyed.
-local function countUp(label, target, delay, seconds, format)
-	label.Text = format(0)
-	if target <= 0 then
-		return
-	end
+-- Count a label up from 0 to `target`. The serial stops it if the card closed meanwhile.
+local function countUp(label, target, delay, seconds, format, serial)
 	task.spawn(function()
 		task.wait(delay)
-		local startAt = os.clock()
-		while label.Parent do
-			local t = (os.clock() - startAt) / seconds
-			if t >= 1 then
-				break
+		local started = os.clock()
+		while true do
+			if result.Serial ~= serial or not label.Parent then
+				return
 			end
-			local eased = 1 - (1 - t) * (1 - t)
+			local a = (os.clock() - started) / seconds
+			if a >= 1 then
+				label.Text = format(target)
+				return
+			end
+			local eased = 1 - (1 - a) * (1 - a) * (1 - a)
 			label.Text = format(math.floor(target * eased + 0.5))
-			task.wait()
-		end
-		if label.Parent then
-			label.Text = format(target)
+			task.wait(0.03)
 		end
 	end)
 end
 
--- A falling burst of coloured paper behind the card (victory only).
-local function burstConfetti(r, count, delay)
-	local rng = Random.new()
-	local colors = Theme.Colors.Rainbow
-	for _ = 1, count do
-		task.delay(delay + rng:NextNumber(0, 0.9), function()
-			if not r.Alive or not r.Confetti.Parent then
+local function burstConfetti(root, serial)
+	local palette = Theme.World and Theme.World.Rainbow or Colors.Rainbow
+	for i = 1, CONFETTI_PIECES do
+		local x = rng:NextNumber(0.08, 0.92)
+		local startY = rng:NextNumber(-4, 16)
+		local piece = newFrame(root, "Confetti", {
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.new(x, 0, 0, startY),
+			Size = UDim2.fromOffset(rng:NextInteger(5, 8), rng:NextInteger(7, 11)),
+			BackgroundTransparency = 1,
+			BackgroundColor3 = palette[(i % #palette) + 1],
+			Rotation = rng:NextInteger(0, 359),
+			ZIndex = 12,
+		})
+		task.delay(rng:NextNumber(0.2, 0.7), function()
+			if result.Serial ~= serial or not piece.Parent then
 				return
 			end
-			local x = rng:NextNumber(0.02, 0.98)
-			local piece = Instance.new("Frame")
-			piece.AnchorPoint = Vector2.new(0.5, 0.5)
-			piece.BorderSizePixel = 0
-			piece.Size = UDim2.fromOffset(rng:NextInteger(7, 12), rng:NextInteger(10, 18))
-			piece.BackgroundColor3 = colors[rng:NextInteger(1, #colors)]
-			piece.Position = UDim2.fromScale(x, -0.05)
-			piece.Rotation = rng:NextNumber(0, 360)
-			piece.Parent = r.Confetti
-
-			local fall = rng:NextNumber(2.2, 3.8)
-			Util.Tween(piece, fall, {
-				Position = UDim2.fromScale(x + rng:NextNumber(-0.12, 0.12), 1.08),
-				Rotation = piece.Rotation + rng:NextNumber(-540, 540),
-			}, Enum.EasingStyle.Linear, Enum.EasingDirection.In)
-			task.delay(fall + 0.1, function()
+			piece.BackgroundTransparency = 0
+			local fall = rng:NextNumber(110, 190)
+			tween(piece, rng:NextNumber(0.9, 1.4), {
+				Position = UDim2.new(Util.Clamp(x + rng:NextNumber(-0.12, 0.12), 0.02, 0.98), 0, 0, startY + fall),
+				Rotation = piece.Rotation + rng:NextInteger(-320, 320),
+				BackgroundTransparency = 1,
+			}, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+			task.delay(1.5, function()
 				if piece.Parent then
 					piece:Destroy()
 				end
@@ -548,425 +511,248 @@ local function burstConfetti(r, count, delay)
 	end
 end
 
-local function makeTile(parent, index, caption, valueText, valueColor)
-	local tile = Instance.new("Frame")
-	tile.Name = "Tile" .. index
-	tile.Position = UDim2.fromOffset((index - 1) * (TILE_W + TILE_GAP), 0)
-	tile.Size = UDim2.fromOffset(TILE_W, 74)
-	tile.BackgroundColor3 = Theme.Colors.PanelLight
-	tile.BackgroundTransparency = 0.45
-	tile.BorderSizePixel = 0
-	tile.Parent = parent
-	Theme.Corner(tile, UDim.new(0, 12))
-
-	makeLabel(tile, caption, "Label", 13, Theme.Colors.CloudShade, {
-		Position = UDim2.fromOffset(0, 9),
-		Size = UDim2.new(1, 0, 0, 16),
-	})
-	-- TextScaled keeps long values ("☁ 124 / 240") inside the tile; the constraint caps the size
-	local value = makeLabel(tile, valueText, "Display", 30, valueColor, {
-		Position = UDim2.fromOffset(8, 28),
-		Size = UDim2.new(1, -16, 0, 38),
-		TextScaled = true,
-	})
-	local cap = Instance.new("UITextSizeConstraint")
-	cap.MaxTextSize = 30
-	cap.MinTextSize = 12
-	cap.Parent = value
-	return value
-end
-
 local function normaliseMembers(list)
 	local out = {}
 	if type(list) == "table" then
 		for _, m in ipairs(list) do
-			if type(m) == "table" and #out < MAX_ROWS then
+			if type(m) == "table" then
 				table.insert(out, {
-					Name = tostring(m.Name or "Climber"),
-					MatchTokens = tonumber(m.MatchTokens) or 0,
+					Name = tostring(m.Name or "?"),
+					Tokens = math.max(0, math.floor(tonumber(m.MatchTokens) or 0)),
 					Finished = m.Finished == true,
 					Downed = m.Downed == true,
 				})
 			end
+			if #out >= 4 then
+				break
+			end
 		end
 	end
-	table.sort(out, function(a, b)
-		if a.Finished ~= b.Finished then
-			return a.Finished
-		end
-		if a.MatchTokens ~= b.MatchTokens then
-			return a.MatchTokens > b.MatchTokens
-		end
-		return a.Name < b.Name
-	end)
 	return out
 end
 
 local function isLocalName(name)
-	return name == LocalPlayer.DisplayName or name == LocalPlayer.Name
+	return name == LocalPlayer.Name or name == LocalPlayer.DisplayName
 end
 
--- Build the whole results GUI (not yet parented). Returns the runtime record for 'current'.
-local function buildResults(result)
-	local won = result.Won == true
-	local reason = tostring(result.Reason or "")
-	if reason == "" then
-		if won then
-			reason = "victory"
-		else
-			reason = "defeat"
-		end
-	end
-	local diff = Config.GetDifficulty(result.DifficultyId)
-	local diffName = result.DifficultyName
-	if type(diffName) ~= "string" or diffName == "" then
-		if diff then
-			diffName = diff.DisplayName
-		else
-			diffName = "Sky Course"
-		end
-	end
-	local diffColor = Theme.Colors.Stamina
-	local stars = 0
-	if diff then
-		diffColor = diff.Color
-		stars = diff.Stars or 0
-	end
-	local seconds = tonumber(result.Seconds) or 0
-	local tokens = math.floor(tonumber(result.MatchTokens) or 0)
-	local totalTokens = math.floor(tonumber(result.TotalTokens) or 0)
-	local bonus = math.floor(tonumber(result.Bonus) or 0)
-	local members = normaliseMembers(result.Members)
+local function buildResults(data)
+	local won = data.Won == true
+	local diff = Config.GetDifficulty(data.DifficultyId)
+	local diffColor = (diff and diff.Color) or Colors.Stamina
+	local starCount = tonumber(data.Stars) or (diff and diff.Stars) or 0
+	local members = normaliseMembers(data.Members)
+	local showMembers = #members > 1
+	local reason = (not won) and REASON_TEXT[tostring(data.Reason or "defeat")] or nil
 
-	local accent = Theme.Colors.Bad
-	local titleText = "DEFEAT"
-	local titleTop = Color3.fromRGB(205, 214, 255)
-	local titleBottom = Color3.fromRGB(150, 120, 235)
-	local subtitle = SUBTITLES[reason]
+	-- fixed vertical layout (inner coordinates)
+	local TITLE_H, DIFF_H, REASON_H, ROW_H, MEMBER_H, FOOT_H = 36, 18, 16, 20, 18, 22
+	local y = 0
+	local titleY = y
+	y = y + TITLE_H
+	local diffY = y
+	y = y + DIFF_H
+	local reasonY = y
+	if reason then
+		y = y + REASON_H
+	end
+	y = y + 6
+	local statsY = y
+	y = y + ROW_H * 3 + 4
+	local membersY = y
+	if showMembers then
+		y = y + #members * MEMBER_H + 4
+	end
+	local footY = y
+	y = y + FOOT_H
+	local panelH = 34 + 8 + y
+
+	local accent = won and (Theme.Buttons and Theme.Buttons.Gold or GOLD) or Color3.fromRGB(118, 130, 204)
+	local panel = CloudUI.Panel({
+		Name = "ResultCard",
+		Size = UDim2.fromOffset(RESULT_W, panelH),
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1.8, 0, RESULT_Y, 0),
+		Accent = accent,
+		Closable = true,
+		OnClose = function()
+			closeResults(false)
+		end,
+		Parent = UI.ResultHolder,
+	})
+	panel.Body.Active = false
+	addViewportScale(panel.Root)
+	local inner = newFrame(panel.Content, "Inner", {
+		Position = UDim2.new(0, 10, 0, 4),
+		Size = UDim2.new(1, -20, 1, -8),
+	})
+
+	-- headline with a gradient (the label itself stays white, the gradient colours it)
+	local headline = newText(inner, "Headline", won and "VICTORY!" or "DEFEAT", "Title", 32, WHITE, {
+		Position = UDim2.fromOffset(0, titleY),
+		Size = UDim2.new(1, 0, 0, TITLE_H),
+		TextXAlignment = Enum.TextXAlignment.Center,
+		Stroke = 0.1,
+	})
 	if won then
-		accent = Theme.Colors.Token
-		titleText = "VICTORY!"
-		titleTop = Color3.fromRGB(255, 244, 170)
-		titleBottom = Color3.fromRGB(255, 150, 120)
-		subtitle = subtitle or SUBTITLES.victory
+		Theme.Gradient(headline, Colors.TokenGlow, Colors.Token, 90)
 	else
-		subtitle = subtitle or SUBTITLES.defeat
+		Theme.Gradient(headline, Color3.fromRGB(190, 204, 244), Color3.fromRGB(128, 138, 214), 90)
 	end
 
-	-- vertical layout (card-local pixels)
-	local tilesY = 160
-	local tableY = 248
-	local rowsY = tableY + 22
-	local rowCount = math.max(1, #members)
-	local rowsEnd = rowsY + rowCount * (ROW_H + ROW_GAP) - ROW_GAP
-	local countdownY = rowsEnd + 14
-	local cardH = countdownY + 24 + 20
-
-	local gui = newScreenGui("NimbusResults", 15)
-
-	local dim = Instance.new("Frame")
-	dim.Name = "Dim"
-	dim.BackgroundColor3 = Theme.Colors.Ink
-	dim.BackgroundTransparency = 1
-	dim.BorderSizePixel = 0
-	dim.Size = UDim2.fromScale(1, 1)
-	dim.ZIndex = 1
-	dim.Parent = gui
-
-	local confetti = Instance.new("Frame")
-	confetti.Name = "Confetti"
-	confetti.BackgroundTransparency = 1
-	confetti.BorderSizePixel = 0
-	confetti.ClipsDescendants = true
-	confetti.Size = UDim2.fromScale(1, 1)
-	confetti.ZIndex = 2
-	confetti.Parent = gui
-
-	-- holder: fits the card to the screen; card: does the pop-in
-	local holder = Instance.new("Frame")
-	holder.Name = "Holder"
-	holder.BackgroundTransparency = 1
-	holder.AnchorPoint = Vector2.new(0.5, 0.5)
-	holder.Position = UDim2.fromScale(0.5, 0.5)
-	holder.Size = UDim2.fromOffset(CARD_W, cardH)
-	holder.ZIndex = 3
-	holder.Parent = gui
-	local fit = Instance.new("UIScale")
-	fit.Parent = holder
-
-	local card = Theme.Panel({
-		Name = "Card",
-		AnchorPoint = Vector2.new(0.5, 0.5),
-		Position = UDim2.fromScale(0.5, 0.5),
-		Size = UDim2.fromScale(1, 1),
-		BackgroundTransparency = 0.06,
-	})
-	card.Parent = holder
-	Theme.Gradient(card, Color3.fromRGB(255, 255, 255), Color3.fromRGB(185, 196, 230), 90)
-	local cardStroke = card:FindFirstChildOfClass("UIStroke")
-	if cardStroke then
-		cardStroke.Color = accent
-		cardStroke.Thickness = 3
-		cardStroke.Transparency = 0.1
+	-- difficulty + stars
+	local diffText = tostring(data.DifficultyName or data.DifficultyId or "")
+	if starCount > 0 then
+		diffText = diffText .. "  <font color=\"" .. hex(GOLD) .. "\">" .. string.rep("\226\152\133", math.min(5, starCount)) .. "</font>"
 	end
-	local pop = Instance.new("UIScale")
-	pop.Scale = 0.6
-	pop.Parent = card
-
-	local content = Instance.new("Frame")
-	content.Name = "Content"
-	content.BackgroundTransparency = 1
-	content.Position = UDim2.fromOffset(PAD, 0)
-	content.Size = UDim2.new(0, CONTENT_W, 1, 0)
-	content.Parent = card
-
-	-- header
-	local title = makeLabel(content, titleText, "Title", 56, Theme.Colors.White, {
-		Position = UDim2.fromOffset(0, 14),
-		Size = UDim2.new(1, 0, 0, 64),
-		TextStrokeTransparency = 0.3,
+	newText(inner, "Difficulty", diffText, "Heading", 15, Theme.Lighten(diffColor, 0.3), {
+		Position = UDim2.fromOffset(0, diffY),
+		Size = UDim2.new(1, 0, 0, DIFF_H),
+		TextXAlignment = Enum.TextXAlignment.Center,
+		RichText = true,
 	})
-	Theme.Gradient(title, titleTop, titleBottom, 90)
-
-	makeLabel(content, subtitle, "Script", 20, Theme.Colors.Cloud, {
-		Position = UDim2.fromOffset(0, 80),
-		Size = UDim2.new(1, 0, 0, 24),
-	})
-
-	local diffText = diffName
-	if stars > 0 then
-		diffText = diffText .. "   " .. string.rep("★", stars) .. string.rep("☆", math.max(0, 3 - stars))
-	end
-	makeLabel(content, diffText, "Heading", 22, diffColor, {
-		Position = UDim2.fromOffset(0, 108),
-		Size = UDim2.new(1, 0, 0, 28),
-	})
-
-	local divider = Instance.new("Frame")
-	divider.Name = "Divider"
-	divider.BackgroundColor3 = Theme.Colors.PanelLight
-	divider.BackgroundTransparency = 0.35
-	divider.BorderSizePixel = 0
-	divider.Position = UDim2.fromOffset(0, 146)
-	divider.Size = UDim2.new(1, 0, 0, 2)
-	divider.Parent = content
-
-	-- stat tiles
-	local tiles = Instance.new("Frame")
-	tiles.Name = "Tiles"
-	tiles.BackgroundTransparency = 1
-	tiles.Position = UDim2.fromOffset(0, tilesY)
-	tiles.Size = UDim2.new(1, 0, 0, 74)
-	tiles.Parent = content
-
-	makeTile(tiles, 1, "TIME", Util.FormatTime(seconds), Theme.Colors.White)
-	local tokenValue = makeTile(tiles, 2, "CLOUD TOKENS", "☁ 0", Theme.Colors.Token)
-	local bonusColor = Theme.Colors.Good
-	local bonusStart = "+0 ☁"
-	if bonus <= 0 then
-		bonusColor = Theme.Colors.CloudShade
-		bonusStart = "—"
-	end
-	local bonusValue = makeTile(tiles, 3, "WIN BONUS", bonusStart, bonusColor)
-
-	local function formatTokens(n)
-		if totalTokens > 0 then
-			return "☁ " .. n .. " / " .. totalTokens
-		end
-		return "☁ " .. n
-	end
-	countUp(tokenValue, tokens, 0.45, 0.9, formatTokens)
-	if bonus > 0 then
-		countUp(bonusValue, bonus, 0.8, 0.7, function(n)
-			return "+" .. n .. " ☁"
-		end)
-	end
-
-	-- member table
-	makeLabel(content, "CLIMBER", "Label", 12, Theme.Colors.CloudShade, {
-		Position = UDim2.fromOffset(16, tableY),
-		Size = UDim2.fromOffset(200, 18),
-		TextXAlignment = Enum.TextXAlignment.Left,
-	})
-	makeLabel(content, "TOKENS", "Label", 12, Theme.Colors.CloudShade, {
-		Position = UDim2.fromOffset(280, tableY),
-		Size = UDim2.fromOffset(100, 18),
-	})
-	makeLabel(content, "STATUS", "Label", 12, Theme.Colors.CloudShade, {
-		Position = UDim2.fromOffset(CONTENT_W - 16 - 130, tableY),
-		Size = UDim2.fromOffset(130, 18),
-		TextXAlignment = Enum.TextXAlignment.Right,
-	})
-
-	local rows = {}
-	if #members == 0 then
-		-- the server always sends members, but never show an empty box
-		members = { { Name = LocalPlayer.DisplayName, MatchTokens = tokens, Finished = false, Downed = false } }
-	end
-	for i, m in ipairs(members) do
-		local me = isLocalName(m.Name)
-		local y = rowsY + (i - 1) * (ROW_H + ROW_GAP)
-
-		local row = Instance.new("Frame")
-		row.Name = "Row" .. i
-		row.Position = UDim2.fromOffset(0, y)
-		row.Size = UDim2.new(1, 0, 0, ROW_H)
-		row.BorderSizePixel = 0
-		row.BackgroundColor3 = Theme.Colors.PanelLight
-		row.BackgroundTransparency = 0.55
-		row.Visible = false
-		row.Parent = content
-		Theme.Corner(row, UDim.new(0, 10))
-		if me then
-			row.BackgroundColor3 = accent:Lerp(Theme.Colors.Panel, 0.65)
-			row.BackgroundTransparency = 0.2
-			Theme.Stroke(row, accent, 1.5, 0.35)
-		end
-
-		local nameText = m.Name
-		if me then
-			nameText = nameText .. " (you)"
-		end
-		makeLabel(row, nameText, "Body", 20, Theme.Colors.White, {
-			Position = UDim2.fromOffset(16, 0),
-			Size = UDim2.new(0, 250, 1, 0),
-			TextXAlignment = Enum.TextXAlignment.Left,
-			TextTruncate = Enum.TextTruncate.AtEnd,
+	if reason then
+		newText(inner, "Reason", reason, "Body", 13, MUTED, {
+			Position = UDim2.fromOffset(0, reasonY),
+			Size = UDim2.new(1, 0, 0, REASON_H),
+			TextXAlignment = Enum.TextXAlignment.Center,
+			Stroke = 0.5,
 		})
-		makeLabel(row, "☁ " .. math.floor(m.MatchTokens), "Display", 20, Theme.Colors.Token, {
-			Position = UDim2.fromOffset(280, 0),
-			Size = UDim2.new(0, 100, 1, 0),
-		})
+	end
 
-		local statusText = "Didn't finish"
-		local statusColor = Theme.Colors.CloudShade
-		if m.Finished then
-			statusText = "✔ Finished"
-			statusColor = Theme.Colors.Good
-		elseif m.Downed then
-			statusText = "Downed"
-			statusColor = Theme.Colors.Bad
-		end
-		makeLabel(row, statusText, "Heading", 15, statusColor, {
-			Position = UDim2.new(1, -16 - 130, 0, 0),
-			Size = UDim2.new(0, 130, 1, 0),
+	-- stats
+	local serial = result.Serial
+	local function statRow(index, caption, valueText, valueColor)
+		local rowY = statsY + (index - 1) * ROW_H
+		local bar = newFrame(inner, "Row" .. caption, {
+			Position = UDim2.fromOffset(0, rowY),
+			Size = UDim2.new(1, 0, 0, ROW_H - 2),
+			BackgroundTransparency = 0.7,
+			BackgroundColor3 = Colors.Ink,
+		})
+		Theme.Corner(bar, UDim.new(0, 8))
+		newText(bar, "Caption", caption, "Body", 14, MUTED, {
+			Position = UDim2.new(0, 8, 0, 0),
+			Size = UDim2.new(0.4, 0, 1, 0),
+			Stroke = 0.5,
+		})
+		return newText(bar, "Value", valueText, "Heading", 15, valueColor, {
+			AnchorPoint = Vector2.new(1, 0),
+			Position = UDim2.new(1, -8, 0, 0),
+			Size = UDim2.new(0.6, 0, 1, 0),
 			TextXAlignment = Enum.TextXAlignment.Right,
+			Stroke = 0.3,
 		})
-
-		table.insert(rows, { Frame = row, Y = y })
 	end
 
-	-- countdown
-	local countdown = makeLabel(content, "", "Body", 18, Theme.Colors.Cloud, {
-		Position = UDim2.fromOffset(0, countdownY),
-		Size = UDim2.new(1, 0, 0, 24),
+	local ownTokens = math.max(0, math.floor(tonumber(data.MatchTokens) or 0))
+	local totalTokens = math.max(0, math.floor(tonumber(data.TotalTokens) or 0))
+	local bonus = math.max(0, math.floor(tonumber(data.Bonus) or 0))
+	local seconds = tonumber(data.Seconds) or 0
+
+	statRow(1, "Time", Util.FormatTime(seconds), WHITE)
+	local tokenValue = statRow(2, "Tokens", "0 / " .. tostring(totalTokens), Colors.TokenGlow)
+	local bonusValue = statRow(3, "Win bonus", bonus > 0 and "+0 \226\152\129" or "-", bonus > 0 and GOLD or MUTED)
+	countUp(tokenValue, ownTokens, 0.45, 0.8, function(n)
+		return tostring(n) .. " / " .. tostring(totalTokens)
+	end, serial)
+	if bonus > 0 then
+		countUp(bonusValue, bonus, 0.9, 0.7, function(n)
+			return "+" .. tostring(n) .. " \226\152\129"
+		end, serial)
+	end
+
+	-- members
+	if showMembers then
+		for i, m in ipairs(members) do
+			local row = newFrame(inner, "Member" .. i, {
+				Position = UDim2.fromOffset(0, membersY + (i - 1) * MEMBER_H),
+				Size = UDim2.new(1, 0, 0, MEMBER_H),
+			})
+			local mine = isLocalName(m.Name)
+			newText(row, "Name", m.Name, "Body", 13, mine and Colors.TokenGlow or WHITE, {
+				Position = UDim2.new(0, 6, 0, 0),
+				Size = UDim2.new(1, -86, 1, 0),
+				TextTruncate = Enum.TextTruncate.AtEnd,
+				Stroke = 0.5,
+			})
+			newText(row, "Tokens", "\226\152\129 " .. tostring(m.Tokens), "Heading", 13, Colors.TokenGlow, {
+				AnchorPoint = Vector2.new(1, 0),
+				Position = UDim2.new(1, -24, 0, 0),
+				Size = UDim2.fromOffset(58, MEMBER_H),
+				TextXAlignment = Enum.TextXAlignment.Right,
+				Stroke = 0.5,
+			})
+			local stateText = ""
+			local stateColor = WHITE
+			if m.Finished then
+				stateText = "\226\156\148"
+				stateColor = Colors.Good
+			elseif m.Downed then
+				stateText = "\226\152\160" -- skull and crossbones
+				stateColor = Colors.Bad
+			end
+			newText(row, "State", stateText, "Heading", 13, stateColor, {
+				AnchorPoint = Vector2.new(1, 0),
+				Position = UDim2.new(1, -4, 0, 0),
+				Size = UDim2.fromOffset(16, MEMBER_H),
+				TextXAlignment = Enum.TextXAlignment.Center,
+			})
+		end
+	end
+
+	-- footer: countdown to the lobby
+	local footer = newText(inner, "Footer", "", "Toast", 15, Colors.Cloud, {
+		Position = UDim2.fromOffset(0, footY),
+		Size = UDim2.new(1, 0, 0, FOOT_H),
+		TextXAlignment = Enum.TextXAlignment.Center,
+		Stroke = 0.3,
 	})
 
-	-- small close button
-	local hide = Instance.new("TextButton")
-	hide.Name = "Hide"
-	hide.AnchorPoint = Vector2.new(1, 0)
-	hide.Position = UDim2.new(1, -12, 0, 12)
-	hide.Size = UDim2.fromOffset(30, 30)
-	hide.BackgroundTransparency = 1
-	hide.AutoButtonColor = false
-	hide.Text = "✕"
-	Theme.Style(hide, "Heading", { Size = 18, Color = Theme.Colors.CloudShade })
-	hide.Parent = card
-
-	local function updateFit()
-		local camera = workspace.CurrentCamera
-		if not camera then
-			return
-		end
-		local vp = camera.ViewportSize
-		local s = math.min(vp.X / (CARD_W + 40), vp.Y / (cardH + 40), 1.15)
-		fit.Scale = Util.Clamp(s, 0.45, 1.15)
-	end
-	updateFit()
-
-	local record = {
-		Gui = gui,
-		Dim = dim,
-		Confetti = confetti,
-		Pop = pop,
-		Countdown = countdown,
-		Rows = rows,
-		Hide = hide,
-		Conns = {},
-		Alive = true,
-		Won = won,
-		Deadline = os.clock() + Config.Match.EndScreenSeconds,
-		UpdateFit = updateFit,
-	}
-	return record
+	return panel, footer, serial
 end
 
-local function showResults(result)
+local function showResults(data)
+	if type(data) ~= "table" or not UI.ResultHolder then
+		return
+	end
 	closeResults(true)
-	if type(result) ~= "table" then
+	result.Serial = result.Serial + 1
+	local ok, panel, footer, serial = pcall(buildResults, data)
+	if not ok then
+		warn("[NotifyController] result card failed: " .. tostring(panel))
 		return
 	end
-	local playerGui = getPlayerGui()
-	if not playerGui then
-		return
-	end
-	local okBuild, r = pcall(buildResults, result)
-	if not okBuild then
-		warn("[NotifyController] results card failed: " .. tostring(r))
-		return
-	end
-	current = r
-	r.Gui.Parent = playerGui
+	result.Panel = panel
 
-	-- keep the card on screen when the window is resized
-	local camera = workspace.CurrentCamera
-	if camera then
-		table.insert(r.Conns, camera:GetPropertyChangedSignal("ViewportSize"):Connect(r.UpdateFit))
-	end
-	table.insert(r.Conns, r.Hide.Activated:Connect(function()
-		closeResults(false)
-	end))
-
-	-- entrance
-	Util.Tween(r.Dim, 0.4, { BackgroundTransparency = 0.45 })
-	Util.Tween(r.Pop, 0.45, { Scale = 1 }, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
-	for i, row in ipairs(r.Rows) do
-		row.Frame.Position = UDim2.fromOffset(40, row.Y)
-		task.delay(0.35 + (i - 1) * 0.1, function()
-			if r.Alive and row.Frame.Parent then
-				row.Frame.Visible = true
-				Util.Tween(
-					row.Frame,
-					0.35,
-					{ Position = UDim2.fromOffset(0, row.Y) },
-					Enum.EasingStyle.Quint,
-					Enum.EasingDirection.Out
-				)
-			end
-		end)
-	end
-	if r.Won then
-		burstConfetti(r, 40, 0.25)
-		burstConfetti(r, 30, 1.6)
+	tween(panel.Root, 0.5, { Position = UDim2.new(1, 0, RESULT_Y, 0) }, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+	if data.Won == true then
+		burstConfetti(panel.Root, serial)
 	end
 
-	-- countdown back to the lobby
+	-- "Back to lobby in Ns"
 	task.spawn(function()
-		while r.Alive and r.Countdown.Parent do
-			local remaining = r.Deadline - os.clock()
-			if remaining > 0 then
-				r.Countdown.Text = string.format("Returning to the lobby in %ds…", math.ceil(remaining))
-			else
-				r.Countdown.Text = "Returning to the lobby…"
-				if remaining < -RESULT_GRACE then
-					closeResults(false) -- the server never cleared MatchState: do not hang around forever
-					return
-				end
+		local deadline = os.clock() + (Config.Match.EndScreenSeconds or 10)
+		while result.Serial == serial and footer.Parent do
+			local left = math.ceil(deadline - os.clock())
+			if left <= 0 then
+				footer.Text = "Going back to the lobby..."
+				break
 			end
+			footer.Text = "Back to lobby in " .. tostring(left) .. "s"
 			task.wait(0.2)
 		end
+		-- safety net: the server normally clears MatchState (which closes the card) right about now
+		task.wait(5)
+		if result.Serial == serial then
+			closeResults(false)
+		end
 	end)
+end
+
+local function buildResultHolder()
+	local holder, pad = newHolder("ResultHolder")
+	UI.ResultHolder = holder
+	UI.ResultPad = pad
 end
 
 ----------------------------------------------------------------------
@@ -1000,6 +786,7 @@ local function dashPuff(player)
 	feetOffset = Util.Clamp(feetOffset, 2, 5)
 
 	local instances = {}
+	local soft = Theme.Lighten(Colors.Stamina, 0.55)
 
 	local feet = Instance.new("Attachment")
 	feet.Name = "NC_DashFeet"
@@ -1010,7 +797,7 @@ local function dashPuff(player)
 	local puff = newEmitter(feet, {
 		Name = "NC_DashPuff",
 		Texture = TEX_SMOKE,
-		Color = ColorSequence.new(Theme.Colors.Cloud, Theme.Colors.CloudShade),
+		Color = ColorSequence.new(Colors.Cloud, Colors.CloudShade),
 		Transparency = NumberSequence.new({
 			NumberSequenceKeypoint.new(0, 0.35),
 			NumberSequenceKeypoint.new(1, 1),
@@ -1025,7 +812,7 @@ local function dashPuff(player)
 		Rotation = NumberRange.new(0, 360),
 		RotSpeed = NumberRange.new(-60, 60),
 		Drag = 3,
-		LightEmission = 0.1,
+		LightEmission = 0.05,
 		LockedToPart = false,
 		Rate = 0,
 		Enabled = false,
@@ -1035,7 +822,7 @@ local function dashPuff(player)
 	local sparks = newEmitter(root, {
 		Name = "NC_DashSparks",
 		Texture = TEX_SPARKLES,
-		Color = ColorSequence.new(Theme.Colors.White, Theme.Colors.Stamina),
+		Color = ColorSequence.new(soft, Colors.Stamina),
 		Transparency = NumberSequence.new({
 			NumberSequenceKeypoint.new(0, 0),
 			NumberSequenceKeypoint.new(1, 1),
@@ -1048,7 +835,7 @@ local function dashPuff(player)
 		Speed = NumberRange.new(8, 18),
 		SpreadAngle = Vector2.new(180, 180),
 		Drag = 4,
-		LightEmission = 1,
+		LightEmission = 0.8,
 		LockedToPart = false,
 		Rate = 0,
 		Enabled = false,
@@ -1075,10 +862,10 @@ local function dashPuff(player)
 	trail.Lifetime = 0.3
 	trail.MinLength = 0.1
 	trail.FaceCamera = true
-	trail.LightEmission = 0.7
-	trail.Color = ColorSequence.new(Theme.Colors.White, Theme.Colors.Stamina)
+	trail.LightEmission = 0.5
+	trail.Color = ColorSequence.new(soft, Colors.Stamina)
 	trail.Transparency = NumberSequence.new({
-		NumberSequenceKeypoint.new(0, 0.2),
+		NumberSequenceKeypoint.new(0, 0.25),
 		NumberSequenceKeypoint.new(1, 1),
 	})
 	trail.WidthScale = NumberSequence.new({
@@ -1120,14 +907,14 @@ local function onDashFx(userId)
 end
 
 ----------------------------------------------------------------------
--- Remote handlers
+-- Remote handlers + wiring
 ----------------------------------------------------------------------
 local function onNotify(text, kind, duration)
 	addToast(text, kind, duration)
 end
 
-local function onMatchResult(result)
-	showResults(result)
+local function onMatchResult(data)
+	showResults(data)
 end
 
 local function onMatchState(state)
@@ -1154,9 +941,31 @@ local function hook(name, handler)
 	end)
 end
 
-----------------------------------------------------------------------
--- Public API
-----------------------------------------------------------------------
+local function hookCamera()
+	local cameraConn = nil
+	local function bind()
+		if cameraConn then
+			cameraConn:Disconnect()
+			cameraConn = nil
+		end
+		local camera = workspace.CurrentCamera
+		if camera then
+			cameraConn = camera:GetPropertyChangedSignal("ViewportSize"):Connect(function()
+				pcall(relayout)
+			end)
+		end
+		pcall(relayout)
+	end
+	workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(bind)
+	bind()
+	task.delay(0.5, function()
+		pcall(relayout)
+	end)
+	task.delay(2, function()
+		pcall(relayout)
+	end)
+end
+
 function NotifyController.Init()
 	if initialized then
 		return
@@ -1166,17 +975,22 @@ function NotifyController.Init()
 		return
 	end
 
-	task.spawn(function()
-		local ok, err = pcall(buildToastGui)
-		if not ok then
-			warn("[NotifyController] toast GUI failed: " .. tostring(err))
-		end
-	end)
-
+	-- hook the remotes first so nothing sent while the GUI builds is lost to a yield
 	hook("Notify", onNotify)
 	hook("MatchResult", onMatchResult)
 	hook("MatchState", onMatchState)
 	hook("DashFx", onDashFx)
+
+	local ok, err = pcall(function()
+		UI.Gui = CloudUI.NewScreenGui("NimbusNotify", 30)
+		buildResultHolder() -- first: toasts are created afterwards, so they draw on top of the card
+		buildToastStack()
+		applyMargins()
+		hookCamera()
+	end)
+	if not ok then
+		warn("[NotifyController] GUI setup failed: " .. tostring(err))
+	end
 
 	Players.PlayerRemoving:Connect(function(player)
 		lastDashFx[player.UserId] = nil

@@ -1,14 +1,17 @@
--- DamageFx (client): everything the player sees and feels when they get hurt (or get paid).
+-- DamageFx (client, v2): everything the player sees and feels when they get hurt (or get paid).
 --
 --   DamageFx.Init()
 --
 -- What it does
---   * Remotes.DamageTaken(amount, kind): coloured screen-edge vignette (four gradient strips, no
---     images), a short camera shake, and a floating "-12" number with a kind word ("ZAP!") that pops,
---     rises and fades above the local player's head.
+--   * Remotes.DamageTaken(amount, kind): a SUBTLE coloured vignette on the screen EDGES only (four gradient
+--     strips, no images; the middle of the screen stays clear), a short camera shake, and a small floating
+--     "-12" number with a kind word ("ZAP!") that pops, rises and fades above the local player's head.
 --   * Storm damage arrives four times a second, so it is merged into one gentle number every
 --     STORM_INTERVAL seconds instead of spamming the screen.
---   * The MatchTokens player attribute going up pops a golden "+n ☁" above the head.
+--   * The MatchTokens player attribute going up pops a golden "+n ☁" above the head (golden tokens get a
+--     bigger, paler pop).
+--
+-- Colours follow the calmer v2 palette: nothing flashes white, the lightning flash is a faint warm wash.
 --
 -- Camera shake
 --   The shake is driven through Humanoid.CameraOffset by a RenderStepped connection that exists only
@@ -22,10 +25,13 @@ local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
-local Config = require(Shared.Config)
-local Theme = require(Shared.Theme)
-local Util = require(Shared.Util)
-local Remotes = require(Shared.Remotes)
+local Config = require(Shared:WaitForChild("Config"))
+local Theme = require(Shared:WaitForChild("Theme"))
+local Util = require(Shared:WaitForChild("Util"))
+local Remotes = require(Shared:WaitForChild("Remotes"))
+
+local Client = script.Parent.Parent
+local CloudUI = require(Client:WaitForChild("UI"):WaitForChild("CloudUI"))
 
 local DamageFx = {}
 
@@ -36,65 +42,75 @@ local ATTR = Config.Attr
 -- Tuning
 ----------------------------------------------------------------------
 local STORM_INTERVAL = 0.6 -- seconds between merged storm damage numbers
-local MAX_LIVE_FLOATS = 14 -- hard cap on simultaneous floating texts
+local MAX_LIVE_FLOATS = 12 -- hard cap on simultaneous floating texts
 
-local SHAKE_MAX = 1.0 -- studs of camera offset at full trauma
-local SHAKE_DECAY = 2.4 -- trauma lost per second
+local SHAKE_MAX = 0.8 -- studs of camera offset at full trauma
+local SHAKE_DECAY = 2.6 -- trauma lost per second
 local SHAKE_SPEED = 1.0 -- multiplier for the shake oscillation speed
 
-local FLOAT_W = 260
-local FLOAT_H = 120
+local FLOAT_W = 220
+local FLOAT_H = 100
+
+local Colors = Theme.Colors
 
 -- Per damage kind: the word, the number colour, the vignette colour and how hard it shakes.
+-- (All kinds of Config.Damage.Kinds are covered; anything unknown falls back to Other.)
 local KIND_STYLE = {
 	Void = {
 		Word = "SPLASH",
-		Color = Color3.fromRGB(196, 156, 255),
-		Vignette = Color3.fromRGB(150, 92, 255),
-		Shake = 0.55,
+		Color = Color3.fromRGB(190, 168, 242),
+		Vignette = Color3.fromRGB(120, 88, 214),
+		Shake = 0.5,
 	},
 	Lightning = {
 		Word = "ZAP!",
-		Color = Color3.fromRGB(255, 238, 120),
-		Vignette = Color3.fromRGB(255, 220, 80),
-		Shake = 0.85,
+		Color = Color3.fromRGB(244, 226, 134),
+		Vignette = Color3.fromRGB(226, 196, 84),
+		Shake = 0.8,
 		Flash = true,
 	},
 	SpinBar = {
 		Word = "WHACK!",
-		Color = Color3.fromRGB(255, 142, 92),
-		Vignette = Color3.fromRGB(255, 72, 72),
-		Shake = 0.65,
+		Color = Color3.fromRGB(240, 156, 112),
+		Vignette = Color3.fromRGB(214, 84, 76),
+		Shake = 0.6,
+	},
+	Pendulum = {
+		Word = "BONK!",
+		Color = Color3.fromRGB(236, 170, 120),
+		Vignette = Color3.fromRGB(206, 100, 80),
+		Shake = 0.6,
 	},
 	Storm = {
 		Word = "DRIZZLE",
-		Color = Color3.fromRGB(146, 196, 255),
-		Vignette = Color3.fromRGB(86, 126, 220),
-		Shake = 0.12,
+		Color = Color3.fromRGB(150, 192, 238),
+		Vignette = Color3.fromRGB(80, 118, 196),
+		Shake = 0.1,
 		Soft = true,
 	},
 	Other = {
 		Word = "OOF!",
-		Color = Theme.Colors.Bad,
-		Vignette = Color3.fromRGB(255, 60, 84),
+		Color = Colors.Bad,
+		Vignette = Color3.fromRGB(204, 72, 92),
 		Shake = 0.4,
 	},
 }
 
--- Smooth falloff for the vignette strips (opaque at the screen edge, clear towards the middle).
+-- Smooth falloff for the vignette strips (strongest at the screen edge, clear towards the middle).
 local VIGNETTE_FALLOFF = NumberSequence.new({
 	NumberSequenceKeypoint.new(0, 0),
-	NumberSequenceKeypoint.new(0.35, 0.55),
-	NumberSequenceKeypoint.new(0.7, 0.88),
+	NumberSequenceKeypoint.new(0.4, 0.6),
+	NumberSequenceKeypoint.new(0.75, 0.9),
 	NumberSequenceKeypoint.new(1, 1),
 })
 
 -- rotation: UIGradient offset 0 sits at the screen edge. 90 = top edge, -90 = bottom, 0 = left, 180 = right.
+-- The strips are narrow: only the outer fifth of the screen is ever tinted.
 local EDGE_DEFS = {
-	{ Name = "Top", Anchor = Vector2.new(0, 0), Position = UDim2.fromScale(0, 0), Size = UDim2.fromScale(1, 0.3), Rotation = 90 },
-	{ Name = "Bottom", Anchor = Vector2.new(0, 1), Position = UDim2.fromScale(0, 1), Size = UDim2.fromScale(1, 0.3), Rotation = -90 },
-	{ Name = "Left", Anchor = Vector2.new(0, 0), Position = UDim2.fromScale(0, 0), Size = UDim2.fromScale(0.2, 1), Rotation = 0 },
-	{ Name = "Right", Anchor = Vector2.new(1, 0), Position = UDim2.fromScale(1, 0), Size = UDim2.fromScale(0.2, 1), Rotation = 180 },
+	{ Name = "Top", Anchor = Vector2.new(0, 0), Position = UDim2.fromScale(0, 0), Size = UDim2.fromScale(1, 0.22), Rotation = 90 },
+	{ Name = "Bottom", Anchor = Vector2.new(0, 1), Position = UDim2.fromScale(0, 1), Size = UDim2.fromScale(1, 0.22), Rotation = -90 },
+	{ Name = "Left", Anchor = Vector2.new(0, 0), Position = UDim2.fromScale(0, 0), Size = UDim2.fromScale(0.14, 1), Rotation = 0 },
+	{ Name = "Right", Anchor = Vector2.new(1, 0), Position = UDim2.fromScale(1, 0), Size = UDim2.fromScale(0.14, 1), Rotation = 180 },
 }
 
 ----------------------------------------------------------------------
@@ -118,17 +134,7 @@ local lastMatchTokens = 0
 -- Screen vignette
 ----------------------------------------------------------------------
 local function buildScreenGui()
-	local playerGui = LocalPlayer:WaitForChild("PlayerGui", 30)
-	if not playerGui then
-		return
-	end
-
-	local gui = Instance.new("ScreenGui")
-	gui.Name = "NimbusDamageFx"
-	gui.ResetOnSpawn = false
-	gui.IgnoreGuiInset = true
-	gui.DisplayOrder = 6
-	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	local gui = CloudUI.NewScreenGui("NimbusDamageFx", 5) -- below the HUD (10)
 
 	local holder = Instance.new("Frame")
 	holder.Name = "Vignette"
@@ -158,21 +164,20 @@ local function buildScreenGui()
 		table.insert(edges, edge)
 	end
 
-	-- full-screen white-ish flash used for lightning
+	-- faint warm wash used for lightning (never a white-out)
 	local flash = Instance.new("Frame")
 	flash.Name = "Flash"
 	flash.BorderSizePixel = 0
 	flash.Size = UDim2.fromScale(1, 1)
-	flash.BackgroundColor3 = Color3.fromRGB(255, 250, 225)
+	flash.BackgroundColor3 = Color3.fromRGB(240, 228, 190)
 	flash.BackgroundTransparency = 1
 	flash.Visible = false
 	flash.Parent = gui
 
-	gui.Parent = playerGui
 	vignette = { holder = holder, edges = edges, tweens = {}, flash = flash, flashTween = nil, token = 0 }
 end
 
--- Fade the red (or kind-coloured) edges from startT to invisible over 'seconds'.
+-- Fade the kind-coloured edges from startT to invisible over 'seconds'.
 local function flashVignette(color, startT, seconds)
 	local v = vignette
 	if not v then
@@ -337,15 +342,15 @@ local function spawnFloat(cfg)
 	scale.Parent = root
 
 	local texts = {}
-	local textSize = cfg.TextSize or 46
+	local textSize = cfg.TextSize or 34
 	local number = Theme.Label(cfg.Text, "Accent", {
 		Size = textSize,
 		Color = cfg.Color,
-		Stroke = 0.15,
+		Stroke = 0.1,
 		Props = {
 			Name = "Number",
-			Size = UDim2.new(1, 0, 0, 64),
-			Position = UDim2.new(0, 0, 0.5, -26),
+			Size = UDim2.new(1, 0, 0, 48),
+			Position = UDim2.new(0, 0, 0.5, -20),
 			TextXAlignment = Enum.TextXAlignment.Center,
 			TextYAlignment = Enum.TextYAlignment.Center,
 		},
@@ -354,19 +359,19 @@ local function spawnFloat(cfg)
 	table.insert(texts, number)
 	if cfg.Gradient then
 		-- UIGradient multiplies the text colour, so the label itself must be white
-		number.TextColor3 = Theme.Colors.White
+		number.TextColor3 = Colors.White
 		Theme.Gradient(number, cfg.Gradient[1], cfg.Gradient[2], 90)
 	end
 
 	if cfg.Word then
 		local word = Theme.Label(cfg.Word, "Accent", {
-			Size = 26,
+			Size = 18,
 			Color = cfg.WordColor or cfg.Color,
 			Stroke = 0.15,
 			Props = {
 				Name = "Word",
-				Size = UDim2.new(1, 0, 0, 32),
-				Position = UDim2.new(0, 0, 0.5, -52),
+				Size = UDim2.new(1, 0, 0, 24),
+				Position = UDim2.new(0, 0, 0.5, -42),
 				TextXAlignment = Enum.TextXAlignment.Center,
 				TextYAlignment = Enum.TextYAlignment.Center,
 			},
@@ -400,31 +405,33 @@ end
 local function spawnDamageNumber(amount, kind)
 	local style = KIND_STYLE[kind] or KIND_STYLE.Other
 	local n = math.max(1, math.floor(amount + 0.5))
-	local size = 46
+	local size = 34
 	if n >= 25 then
-		size = 60
+		size = 42
 	end
 	spawnFloat({
 		Text = "-" .. n,
 		Word = style.Word,
 		Color = style.Color,
-		WordColor = style.Color:Lerp(Theme.Colors.White, 0.35),
+		WordColor = Theme.Lighten(style.Color, 0.3),
 		TextSize = size,
-		Rise = 3.2,
-		Life = 1.1,
+		Rise = 3,
+		Life = 1.05,
 		StartX = rng:NextNumber(-1.1, 1.1),
 		StartY = 2.6,
 	})
 end
 
 local function spawnTokenPop(delta)
+	local golden = delta >= (Config.Tokens.GoldenValue or 5)
 	spawnFloat({
 		Text = "+" .. delta .. " ☁",
-		Color = Theme.Colors.Token,
-		Gradient = { Theme.Colors.TokenGlow, Theme.Colors.Token },
-		TextSize = 40,
-		Rise = 3.4,
-		Life = 1.25,
+		Color = Colors.Token,
+		Gradient = golden and { Colors.White:Lerp(Colors.TokenGlow, 0.4), Colors.TokenGlow }
+			or { Colors.TokenGlow, Colors.Token },
+		TextSize = golden and 38 or 30,
+		Rise = 3.2,
+		Life = 1.2,
 		StartX = rng:NextNumber(-1.4, 1.4),
 		StartY = 3.4,
 	})
@@ -471,16 +478,17 @@ local function onDamageTaken(amount, kind)
 	end
 	local style = KIND_STYLE[kind]
 
+	-- subtle: even the hardest hit only reaches a medium tint at the very edge
 	local strength = Util.Clamp(amount / 30, 0.2, 1)
-	local startT = Util.Lerp(0.72, 0.12, strength)
-	local seconds = 0.5 + strength * 0.4
+	local startT = Util.Lerp(0.82, 0.4, strength)
+	local seconds = 0.45 + strength * 0.35
 	if style.Soft then
-		startT = 0.8
-		seconds = 0.45
+		startT = 0.86
+		seconds = 0.4
 	end
 	flashVignette(style.Vignette, startT, seconds)
 	if style.Flash then
-		flashScreen(0.55, 0.3)
+		flashScreen(0.78, 0.25)
 	end
 	addShake(style.Shake * Util.Clamp(0.5 + amount / 40, 0.5, 1.2))
 

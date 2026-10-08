@@ -13,6 +13,8 @@
 --     player can never run or dash, and the server can still change the speed at any time.
 --   * The dash is velocity-based: for DashDuration seconds the horizontal velocity of the
 --     HumanoidRootPart is re-asserted every physics step while the vertical velocity is left alone.
+--   * v2: stamina regenerates (1 + player attribute PerkStaminaRegen) times as fast (pet perk), and the mobile
+--     RUN / DASH buttons are laid out around Roblox's jump button, the hotbar and the raised HP bar.
 -- Plain Lua 5.1-compatible syntax only.
 
 local Players = game:GetService("Players")
@@ -75,6 +77,7 @@ local ctx = nil -- active character context, nil when there is none
 local bindToken = 0 -- bumps on every bind/unbind so stale async binds can abort
 
 local stamina = P.MaxStamina
+local regenMul = 1 -- 1 + attribute PerkStaminaRegen (pet perk, written by the server)
 local lastMirrored = nil
 local exhausted = false -- hit 0 stamina; blocked from running until EXHAUST_RESUME
 
@@ -128,6 +131,16 @@ local function applyCameraSettings()
 	pcall(function()
 		LocalPlayer.CameraMaxZoomDistance = ZOOM_MAX
 	end)
+end
+
+-- Pet perk: stamina regenerates (1 + PerkStaminaRegen) times as fast. Sanitised because attributes can
+-- hold anything; the server already caps the value (Config.Pets.PerkCaps.StaminaRegen).
+local function refreshRegenPerk()
+	local value = LocalPlayer:GetAttribute(ATTR.PerkStaminaRegen)
+	if type(value) ~= "number" or value ~= value then
+		value = 0
+	end
+	regenMul = 1 + Util.Clamp(value, 0, 5)
 end
 
 local function tween(instance, seconds, goal, style, direction)
@@ -337,20 +350,91 @@ local function toggleRun()
 	runToggled = not runToggled
 end
 
--- Mirrors Roblox's default TouchJump footprint: 70px when min(axis) <= 500, else 120px.
--- jumpRight = distance of the jump button's LEFT edge from the screen's right edge.
--- jumpTop   = distance of the jump button's TOP edge from the screen's bottom edge.
+-- Footprints of the other things that live at the bottom of a touch screen. KEEP IN SYNC with
+-- HotbarController.lua (SLOT/GAP/TOUCH_BOTTOM, scale 0.75..1.2) and HudController.lua (VITALS_W/H,
+-- TOUCH_EDGE, TOUCH_RAISE_SMALL/LARGE, scale 0.7..1.25). Only used to keep our buttons clear of them.
+local HOTBAR_W, HOTBAR_H, HOTBAR_BOTTOM = 280, 64, 16
+local VITALS_W, VITALS_H, VITALS_LEFT = 300, 54, 20
+local VITALS_RAISE_SMALL, VITALS_RAISE_LARGE = 150, 220
+
+-- Rectangles are { left, bottom, right, top } in pixels from the screen's left / BOTTOM edge.
+local function rectsOverlap(a, b)
+	return a[1] < b[3] and b[1] < a[3] and a[2] < b[4] and b[2] < a[4]
+end
+
+-- Places DASH and RUN around Roblox's own jump button without covering it, the hotbar (bottom centre)
+-- or the raised HP bar (bottom left).
+--
+-- Roblox's default TouchJump is a J x J square (J = 70 when min(screen axis) <= 500, else 120) whose left edge
+-- is 1.5 J + 10 px and whose right edge is 0.5 J + 10 px from the screen's right edge; its bottom edge is
+-- 20 px (small) or 0.75 J (large) above the screen's bottom.
+--   * DASH goes straight above the jump button (the thumb's natural "up" flick);
+--   * RUN prefers the spot left of the jump button; on narrow phones that spot runs into the hotbar, so it
+--     moves to the diagonal above-left, and as a last resort onto the top of the DASH button.
 local function layoutMobileControls(m)
 	local camera = workspace.CurrentCamera
 	local vp = camera and camera.ViewportSize or Vector2.new(1280, 720)
-	local small = math.min(vp.X, vp.Y) <= 500
+	local w, h = vp.X, vp.Y
+	local small = math.min(w, h) <= 500
+
 	local jump = small and 70 or 120
-	local jumpRight = jump * 1.5 - 10 -- 95 small / 170 large
-	local jumpTop = small and (jump + 20) or (jump * 1.75) -- 90 small / 210 large
-	-- DASH sits above the jump button; RUN sits to its left. The max() keeps the phone layout
-	-- (-175 / -120) and only moves the buttons on big screens (tablets, unfolded foldables).
-	m.dash.Button.Position = UDim2.new(1, -30, 1, -math.max(175, jumpTop + 16))
-	m.run.Button.Position = UDim2.new(1, -math.max(120, jumpRight + 20), 1, -150)
+	local jumpRight = jump * 0.5 + 10
+	local jumpLeft = jump * 1.5 + 10
+	local jumpBottom = small and 20 or jump * 0.75
+	local jumpTop = jumpBottom + jump
+
+	local hotbarScale = Util.Clamp(math.min(w / 1280, h / 720), 0.75, 1.2)
+	local hotbarHalf = HOTBAR_W * hotbarScale * 0.5 + 8
+	local hotbar = {
+		w * 0.5 - hotbarHalf,
+		HOTBAR_BOTTOM - 4,
+		w * 0.5 + hotbarHalf,
+		HOTBAR_BOTTOM + HOTBAR_H * hotbarScale + 8,
+	}
+	local vitalsScale = Util.Clamp(math.min(w / 1280, h / 720), 0.7, 1.25)
+	local raise = small and VITALS_RAISE_SMALL or VITALS_RAISE_LARGE
+	local vitals = {
+		VITALS_LEFT - 4,
+		raise - 6,
+		VITALS_LEFT + VITALS_W * vitalsScale + 8,
+		raise + VITALS_H * vitalsScale + 6,
+	}
+	local jumpRect = { w - jumpLeft - 4, jumpBottom - 4, w - jumpRight + 4, jumpTop + 4 }
+
+	-- DASH
+	local dashSize = small and 66 or 84
+	local dashRight = math.max(14, jump + 10 - dashSize * 0.5) -- centred over the jump button
+	local dashBottom = jumpTop + 10
+	local dashRect = { w - dashRight - dashSize, dashBottom, w - dashRight, dashBottom + dashSize }
+
+	-- RUN: first candidate that touches nothing wins
+	local runSize = small and 58 or 72
+	local candidates = {
+		{ jumpLeft + 12, jumpBottom + 4 }, -- beside the jump button
+		{ dashRight + dashSize + 12, jumpTop + 6 }, -- diagonal: above-left of the jump button
+		{ dashRight, dashBottom + dashSize + 10 }, -- on top of DASH
+	}
+	local runRight, runBottom = candidates[3][1], candidates[3][2]
+	for _, c in ipairs(candidates) do
+		local rect = { w - c[1] - runSize, c[2], w - c[1], c[2] + runSize }
+		local onScreen = rect[1] >= 6 and rect[4] <= h - 80
+		if onScreen
+			and not rectsOverlap(rect, hotbar)
+			and not rectsOverlap(rect, vitals)
+			and not rectsOverlap(rect, jumpRect)
+			and not rectsOverlap(rect, dashRect)
+		then
+			runRight, runBottom = c[1], c[2]
+			break
+		end
+	end
+
+	m.dash.Button.Size = UDim2.fromOffset(dashSize, dashSize)
+	m.dash.Label.TextSize = math.floor(dashSize * 0.26)
+	m.dash.Button.Position = UDim2.new(1, -dashRight, 1, -dashBottom)
+	m.run.Button.Size = UDim2.fromOffset(runSize, runSize)
+	m.run.Label.TextSize = math.floor(runSize * 0.26)
+	m.run.Button.Position = UDim2.new(1, -runRight, 1, -runBottom)
 end
 
 local function buildMobileControls(playerGui)
@@ -362,8 +446,8 @@ local function buildMobileControls(playerGui)
 	gui.Enabled = false
 	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 
-	-- an arc above-left of the default jump button, within thumb reach; the exact offsets depend
-	-- on the size of Roblox's jump button, so layoutMobileControls places them below
+	-- an arc above / left of the default jump button, within thumb reach; the exact offsets depend on the
+	-- size of Roblox's jump button and on the HUD, so layoutMobileControls places (and sizes) them below
 	local dashButton = makeCircleButton(gui, "DashButton", "DASH", 76, UDim2.new(1, -30, 1, -175), Theme.Colors.Stamina, function()
 		tryDash()
 	end)
@@ -854,7 +938,7 @@ local function step(dt)
 			running = false
 		end
 	elseif now >= regenBlockedUntil then
-		stamina = math.min(P.MaxStamina, stamina + P.StaminaRegen * dt)
+		stamina = math.min(P.MaxStamina, stamina + P.StaminaRegen * regenMul * dt)
 	end
 	if exhausted and stamina >= EXHAUST_RESUME then
 		exhausted = false
@@ -1127,6 +1211,9 @@ function MovementController.Init()
 	mirrorStamina(true)
 	applyCameraSettings()
 	bindInput()
+
+	refreshRegenPerk()
+	LocalPlayer:GetAttributeChangedSignal(ATTR.PerkStaminaRegen):Connect(refreshRegenPerk)
 
 	-- Remotes.Get yields until the folder replicates, so never block Init on it
 	task.spawn(function()
