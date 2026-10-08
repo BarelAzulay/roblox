@@ -845,13 +845,11 @@ local function lampPost(parent, ground, withLight)
 	end
 end
 
--- Plump cloud cushion (a squashed ball) for cosy corners.
+-- Plump cloud cushion for cosy corners: a uniform ball sunk into the floor so only a soft dome
+-- shows (balls are always built with equal sides, which Roblox keeps as a true sphere).
 local function cushion(parent, pos, size, color)
-	return mk(parent, {
+	return ball(parent, pos + Vector3.new(0, size * 0.2, 0), size, {
 		Name = "Cushion",
-		Shape = Enum.PartType.Ball,
-		Size = Vector3.new(size, size * 0.6, size),
-		CFrame = CFrame.new(pos + Vector3.new(0, size * 0.3, 0)),
 		Color = color,
 		CanCollide = false,
 	})
@@ -1427,7 +1425,7 @@ local function buildHowToBoard(root, L)
 	keyRow(panel, 0.56, 0.1, "SPACE", "Jump")
 	keyRow(panel, 0.68, 0.1, "1 - 4", "Use items (in a climb)")
 
-	local footer = makeLabel("Stand in a glowing gate to form a party, then climb together!", "Body", {
+	local footer = makeLabel("Stand in a glowing portal to form a party, then climb together!", "Body", {
 		Scaled = true,
 		Color = COL.TextGold,
 		Props = {
@@ -1892,16 +1890,24 @@ local function buildRoads(root, L)
 			Color = COL.Side,
 			CanCollide = false,
 		})
-		-- One soft puff per plank, alternating inner / outer edge.
+		-- One soft puff per plank, alternating inner / outer edge (skipped where the road runs
+		-- underneath the shop island, so no puff pokes through the shop floor).
 		local side = 1
 		if i % 2 == 1 then
 			side = -1
 		end
-		ball(f, centre + radial * (side * (ROAD_W / 2 - 0.6)) - Vector3.new(0, 1.9, 0), rng:Float(4.2, 6), {
-			Name = "RingPuff",
-			Color = COL.Puff:Lerp(COL.Side, rng:Float(0, 0.4)),
-			CanCollide = false,
-		})
+		local puffPos = centre + radial * (side * (ROAD_W / 2 - 0.6)) - Vector3.new(0, 1.9, 0)
+		local puffSize = rng:Float(4.2, 6)
+		local sdx = puffPos.X - L.ShopCenter.X
+		local sdz = puffPos.Z - L.ShopCenter.Z
+		local clearOfShop = L.ShopR + puffSize * 0.5 + 1
+		if sdx * sdx + sdz * sdz > clearOfShop * clearOfShop then
+			ball(f, puffPos, puffSize, {
+				Name = "RingPuff",
+				Color = COL.Puff:Lerp(COL.Side, rng:Float(0, 0.4)),
+				CanCollide = false,
+			})
+		end
 	end
 
 	-- Lamp posts on the ring road, between the spot ramps.
@@ -2179,6 +2185,11 @@ end
 -- Shop island: four roulette machines, the item stall, a rarity guide
 ----------------------------------------------------------------------
 
+-- Size (studs) of the name + price card floating above every roulette machine; the machines are
+-- spaced from MACHINE_CARD_W so neighbouring cards never overlap.
+local MACHINE_CARD_W = 14
+local MACHINE_CARD_H = 7.6
+
 -- Rarities (in Config order) that a roulette can actually pay out.
 local function oddsRarities(roulette)
 	local list = {}
@@ -2309,12 +2320,14 @@ local function buildMachine(parent, cf, roulette)
 	end
 
 	-- Big readable name + price billboard.
-	local anchor = anchorPart(model, "PriceAnchor", at(0, 13.4, 0))
-	local bb = newBillboard(anchor, 13, 6.4, 0, 120)
+	-- The name may wrap onto two lines (so it can be big); the price gets the bottom half.
+	local anchor = anchorPart(model, "PriceAnchor", at(0, 10.8 + MACHINE_CARD_H * 0.5, 0))
+	local bb = newBillboard(anchor, MACHINE_CARD_W, MACHINE_CARD_H, 0, 140)
 	bb.Name = "PriceBillboard"
-	local card = cardPanel(bb, color, 0.14)
-	fitLabel(card, roulette.DisplayName or roulette.Id, "Title", light, "NameLabel", 0.04, 0.05, 0.92, 0.42)
-	fitLabel(card, priceText(roulette.Price or 0), "Display", COL.TextGold, "PriceLabel", 0.04, 0.5, 0.92, 0.44)
+	local card = cardPanel(bb, color, 0.12)
+	local nameLabel = fitLabel(card, roulette.DisplayName or roulette.Id, "Title", light, "NameLabel", 0.05, 0.05, 0.9, 0.46)
+	nameLabel.TextWrapped = true
+	fitLabel(card, priceText(roulette.Price or 0), "Display", COL.TextGold, "PriceLabel", 0.05, 0.54, 0.9, 0.4)
 
 	-- Invisible spot in front where PetService hangs the ProximityPrompt.
 	local prompt = block(model, frame(0, 2.0, -5.3), Vector3.new(5, 4, 3), {
@@ -2552,7 +2565,7 @@ local function buildShop(root, L)
 		disc(f, S + Vector3.new(0, mStack + 0.05, 0), layer.d, 0.1, { Name = "ShopMedallion", Color = layer.color, CanCollide = false })
 		mStack = mStack + 0.1
 	end
-	tokenShowcase(f, S + Vector3.new(0, 0.3, 0), "Cloud Shop", "Spend tokens on pets & items")
+	tokenShowcase(f, S + Vector3.new(0, 0.3, 0), "Cloud Tokens", "Earn them on every climb")
 
 	-- Entrance sign facing the plaza.
 	local signPos = shopPoint(entrance, R - 10)
@@ -2564,15 +2577,18 @@ local function buildShop(root, L)
 	fitLabel(spanel, "pets & items", "Script", COL.Text, "Sub", 0.04, 0.66, 0.92, 0.28)
 	sgui.Parent = signBoard
 
-	-- Roulette machines on the far arc, cheapest on the left as the customer walks in.
-	local thetas = { -42, -14, 14, 42 }
+	-- Roulette machines on an arc across the far side of the island, cheapest on the left as the
+	-- customer walks in. The angular step makes neighbouring machines one billboard width apart.
 	local roulettes = {}
+	local machineCount = #Config.Roulettes
+	local arcR = math.max(14, math.min(24, R - 8))
+	local thetaStep = math.deg(2 * math.asin(math.min(1, (MACHINE_CARD_W + 1) / (2 * arcR))))
+	if machineCount > 1 then
+		thetaStep = math.min(thetaStep, 150 / (machineCount - 1))
+	end
 	for i, roulette in ipairs(Config.Roulettes) do
-		local theta = thetas[i]
-		if theta == nil then
-			theta = (i - (#Config.Roulettes + 1) / 2) * 28
-		end
-		local pos = shopPoint(sd + theta, 22)
+		local theta = (i - (machineCount + 1) / 2) * thetaStep
+		local pos = shopPoint(sd + theta, arcR)
 		local cf = lookAtCentre(pos)
 		local info
 		local ok, result = pcall(buildMachine, f, cf, roulette)

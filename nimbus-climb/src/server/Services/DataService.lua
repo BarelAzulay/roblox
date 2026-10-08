@@ -1,12 +1,22 @@
--- DataService: persists each player's lifetime Cloud Tokens.
+-- DataService: persistent player profile (tokens, pets, items, stats) for Nimbus Climb v2.
 --
--- * Everything works from an in-memory cache, so the game is fully playable when DataStores are
---   unavailable (Studio without "Enable Studio Access to API Services", Roblox outages, ...).
--- * Writes use UpdateAsync with a *delta* (tokens earned since the last confirmed save) instead
---   of overwriting the stored total. A failed load can therefore never wipe a player's saved
---   progress, and two servers touching the same player can never clobber each other.
--- * Public API is the one in ARCHITECTURE.md (Load/Save/StartAutosave/BindToClose/AddTokens/
---   GetTokens). Release() is an extra used by PlayerService to free the cache entry on leave.
+-- Profile shape (ARCHITECTURE_V2.md section 1):
+--   { Version = 2, Tokens, Pets = {[petId]=count}, Equipped = {petId...}, Items = {[itemId]=count},
+--     Stats = { Matches, Wins, TokensEarned, Spins, BestTimes = {[difficultyId]=seconds} }, SpotIndex }
+--
+-- Design notes
+--   * Everything runs from an in-memory cache, so the game is fully playable when DataStores are
+--     unavailable (Studio without "Enable Studio Access to API Services", Roblox outages, ...).
+--   * Saves are DELTA based. The cache remembers `Base` (what the store is known to contain);
+--     a save sends only "live minus base" and merges it into whatever is stored right now inside
+--     UpdateAsync. A failed load can therefore never wipe a saved profile and two servers touching
+--     the same player cannot clobber each other. After a failed load, the next save (or a
+--     background retry) re-reads the store and merges the session on top of it.
+--   * v1 saves ({Tokens = n} in Config.Tokens.LegacyDataStoreName) are migrated once: when the v2
+--     key is empty, the legacy key is read and its tokens become the starting balance. The legacy
+--     store is never written.
+--   * Extras beyond the documented API (used by PlayerService / PetService, harmless otherwise):
+--     Release(player), Init(), ComputePerks(equippedIds), signal ProfileRebased(player, profile).
 --
 -- Plain Lua 5.1-compatible syntax only.
 
@@ -17,49 +27,510 @@ local RunService = game:GetService("RunService")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Config = require(Shared.Config)
+local Util = require(Shared.Util)
+local Remotes = require(Shared.Remotes)
 
 local DataService = {}
 
-local RETRY_DELAY = 1.5 -- seconds between the two attempts of a load/save
-local MAX_TOKENS = 1000000000 -- sanity cap so a bug can never overflow the counter
+-- Fired after a profile finished loading: (player, profile). Handlers run on their own thread.
+DataService.ProfileLoaded = Util.Signal()
+-- Fired when the live profile was replaced by newer stored data (recovered failed load, or another
+-- server changed the save): (player, profile). PetService re-validates its attributes on this.
+DataService.ProfileRebased = Util.Signal()
+
+local PROFILE_VERSION = 2
+local RETRY_DELAY = 1.5 -- seconds between the two attempts of a read/write
+local MAX_COUNT = 1000000000 -- sanity cap for tokens and stats
+local MAX_KEY_LENGTH = 48
+local REQUEST_COOLDOWN = 0.5 -- RequestProfile rate limit (seconds per player)
 local IS_STUDIO = RunService:IsStudio()
+local STAT_KEYS = { "Matches", "Wins", "TokensEarned", "Spins" }
 
 -- cache[userId] = {
---   Tokens = number,     -- current lifetime total (what the player sees)
---   Saved = number,      -- the part of Tokens the store is known to contain
---   Loaded = bool,       -- Load() finished
---   LoadFailed = bool,   -- the read failed; the next successful save adopts the stored total
---   Saving = bool,       -- a write is in flight (simple per-entry lock)
+--   Profile = live profile table (what every other module reads and mutates),
+--   Base = profile the store is known to contain (delta reference),
+--   Owner = the Player instance the entry was last announced to (a quick rejoin gets a new one),
+--   Loaded, Loading, LoadFailed, Saving, Dirty, RecoveryScheduled = bool flags
 -- }
 local cache = {}
 local store = nil
 local storeResolved = false
+local legacyStore = nil
+local legacyResolved = false
 local storeDisabled = false -- true once the DataStore API is known to be unusable (Studio)
 local autosaveStarted = false
 local closeBound = false
 local shuttingDown = false
+local playerHooked = false
+local requestHooked = false
+local remoteCache = {}
+local lastRequest = {} -- [userId] = os.clock() of the last accepted RequestProfile
 
 ----------------------------------------------------------------------
--- Helpers
+-- Small helpers
 ----------------------------------------------------------------------
 
 local function keyFor(userId)
 	return "u_" .. tostring(userId)
 end
 
+local function isFinite(n)
+	return type(n) == "number" and n == n and n ~= math.huge and n ~= -math.huge
+end
+
 -- Any value -> non-negative integer within sane bounds.
 local function sanitize(n)
-	if type(n) ~= "number" or n ~= n then
+	if not isFinite(n) or n < 0 then
 		return 0
 	end
-	if n < 0 then
-		return 0
-	end
-	if n > MAX_TOKENS then
-		return MAX_TOKENS
+	if n > MAX_COUNT then
+		return MAX_COUNT
 	end
 	return math.floor(n)
 end
+
+local function clampCount(n, maxCount)
+	local value = sanitize(n)
+	if value > maxCount then
+		return maxCount
+	end
+	return value
+end
+
+-- Seconds for BestTimes: finite, > 0, rounded to 1/100 s. Returns nil when unusable.
+local function sanitizeSeconds(n)
+	if not isFinite(n) or n <= 0 or n > 10000000 then
+		return nil
+	end
+	return math.floor(n * 100 + 0.5) / 100
+end
+
+local function validKey(key)
+	return type(key) == "string" and #key > 0 and #key <= MAX_KEY_LENGTH
+end
+
+local function copyMap(map)
+	local out = {}
+	for key, value in pairs(map) do
+		out[key] = value
+	end
+	return out
+end
+
+local function copyList(list)
+	local out = {}
+	for i, value in ipairs(list) do
+		out[i] = value
+	end
+	return out
+end
+
+local function mapsEqual(a, b)
+	for key, value in pairs(a) do
+		if b[key] ~= value then
+			return false
+		end
+	end
+	for key in pairs(b) do
+		if a[key] == nil then
+			return false
+		end
+	end
+	return true
+end
+
+local function listsEqual(a, b)
+	if #a ~= #b then
+		return false
+	end
+	for i = 1, #a do
+		if a[i] ~= b[i] then
+			return false
+		end
+	end
+	return true
+end
+
+----------------------------------------------------------------------
+-- Profile construction / validation
+----------------------------------------------------------------------
+
+local function newProfile()
+	return {
+		Version = PROFILE_VERSION,
+		Tokens = 0,
+		Pets = {},
+		Equipped = {},
+		Items = {},
+		Stats = { Matches = 0, Wins = 0, TokensEarned = 0, Spins = 0, BestTimes = {} },
+		SpotIndex = nil,
+	}
+end
+
+local function copyProfile(p)
+	local out = newProfile()
+	out.Tokens = p.Tokens
+	out.Pets = copyMap(p.Pets)
+	out.Equipped = copyList(p.Equipped)
+	out.Items = copyMap(p.Items)
+	for _, key in ipairs(STAT_KEYS) do
+		out.Stats[key] = p.Stats[key]
+	end
+	out.Stats.BestTimes = copyMap(p.Stats.BestTimes)
+	out.SpotIndex = p.SpotIndex
+	return out
+end
+
+-- Drops equipped ids that are not owned, are over their owned count, or exceed the slot limit.
+local function normalizeEquipped(profile)
+	local out = {}
+	local used = {}
+	local maxEquipped = Config.Pets.MaxEquipped
+	for _, id in ipairs(profile.Equipped) do
+		if type(id) == "string" and #out < maxEquipped then
+			local owned = profile.Pets[id] or 0
+			local count = used[id] or 0
+			if count < owned then
+				used[id] = count + 1
+				table.insert(out, id)
+			end
+		end
+	end
+	profile.Equipped = out
+end
+
+-- Untrusted stored value (nil / number / v1 table / v2 table) -> clean v2 profile. Pure.
+local function normalizeProfile(raw)
+	local p = newProfile()
+	if type(raw) == "number" then
+		p.Tokens = sanitize(raw)
+		return p
+	end
+	if type(raw) ~= "table" then
+		return p
+	end
+	p.Tokens = sanitize(raw.Tokens)
+	if type(raw.Pets) == "table" then
+		for id, n in pairs(raw.Pets) do
+			if validKey(id) then
+				local count = clampCount(n, Config.Pets.MaxPerStack)
+				if count > 0 then
+					p.Pets[id] = count
+				end
+			end
+		end
+	end
+	if type(raw.Items) == "table" then
+		for id, n in pairs(raw.Items) do
+			if validKey(id) then
+				local count = clampCount(n, Config.Items.MaxCarry)
+				if count > 0 then
+					p.Items[id] = count
+				end
+			end
+		end
+	end
+	if type(raw.Equipped) == "table" then
+		for _, id in ipairs(raw.Equipped) do
+			if type(id) == "string" then
+				table.insert(p.Equipped, id)
+			end
+		end
+	end
+	if type(raw.Stats) == "table" then
+		for _, key in ipairs(STAT_KEYS) do
+			p.Stats[key] = sanitize(raw.Stats[key])
+		end
+		if type(raw.Stats.BestTimes) == "table" then
+			for id, seconds in pairs(raw.Stats.BestTimes) do
+				local clean = sanitizeSeconds(seconds)
+				if validKey(id) and clean then
+					p.Stats.BestTimes[id] = clean
+				end
+			end
+		end
+	end
+	local spot = raw.SpotIndex
+	if isFinite(spot) and spot >= 1 and spot <= Config.Lobby.SpotCount and spot == math.floor(spot) then
+		p.SpotIndex = spot
+	end
+	normalizeEquipped(p)
+	return p
+end
+
+local function profilesEqual(a, b)
+	if a.Tokens ~= b.Tokens or a.SpotIndex ~= b.SpotIndex then
+		return false
+	end
+	if not listsEqual(a.Equipped, b.Equipped) then
+		return false
+	end
+	if not mapsEqual(a.Pets, b.Pets) or not mapsEqual(a.Items, b.Items) then
+		return false
+	end
+	for _, key in ipairs(STAT_KEYS) do
+		if a.Stats[key] ~= b.Stats[key] then
+			return false
+		end
+	end
+	return mapsEqual(a.Stats.BestTimes, b.Stats.BestTimes)
+end
+
+----------------------------------------------------------------------
+-- Delta merge (the heart of the safe-save design)
+----------------------------------------------------------------------
+
+local function diffCounts(live, base)
+	local out = {}
+	for id, n in pairs(live) do
+		local delta = n - (base[id] or 0)
+		if delta ~= 0 then
+			out[id] = delta
+		end
+	end
+	for id, n in pairs(base) do
+		if live[id] == nil then
+			out[id] = -n
+		end
+	end
+	return out
+end
+
+-- What changed between `base` and `live`. Counters travel as +/- deltas, "best" values as
+-- candidates, lists / single values as replacements.
+local function diffProfiles(live, base)
+	local d = {
+		Tokens = live.Tokens - base.Tokens,
+		Pets = diffCounts(live.Pets, base.Pets),
+		Items = diffCounts(live.Items, base.Items),
+		Stats = {},
+		BestTimes = {},
+		Equipped = nil,
+		HasSpot = false,
+		SpotIndex = nil,
+	}
+	for _, key in ipairs(STAT_KEYS) do
+		local delta = live.Stats[key] - base.Stats[key]
+		if delta ~= 0 then
+			d.Stats[key] = delta
+		end
+	end
+	for id, seconds in pairs(live.Stats.BestTimes) do
+		if base.Stats.BestTimes[id] ~= seconds then
+			d.BestTimes[id] = seconds
+		end
+	end
+	if not listsEqual(live.Equipped, base.Equipped) then
+		d.Equipped = copyList(live.Equipped)
+	end
+	if live.SpotIndex ~= base.SpotIndex then
+		d.HasSpot = true
+		d.SpotIndex = live.SpotIndex
+	end
+	return d
+end
+
+local function isEmptyDelta(d)
+	return d.Tokens == 0
+		and next(d.Pets) == nil
+		and next(d.Items) == nil
+		and next(d.Stats) == nil
+		and next(d.BestTimes) == nil
+		and d.Equipped == nil
+		and not d.HasSpot
+end
+
+local function applyCounts(target, deltas, maxCount)
+	for id, delta in pairs(deltas) do
+		local value = clampCount((target[id] or 0) + delta, maxCount)
+		if value > 0 then
+			target[id] = value
+		else
+			target[id] = nil
+		end
+	end
+end
+
+-- stored profile + delta -> new profile. Pure (runs inside UpdateAsync, which may retry it).
+local function applyDelta(stored, d)
+	local out = copyProfile(stored)
+	out.Tokens = sanitize(out.Tokens + d.Tokens)
+	applyCounts(out.Pets, d.Pets, Config.Pets.MaxPerStack)
+	applyCounts(out.Items, d.Items, Config.Items.MaxCarry)
+	for key, delta in pairs(d.Stats) do
+		out.Stats[key] = sanitize(out.Stats[key] + delta)
+	end
+	for id, seconds in pairs(d.BestTimes) do
+		local current = out.Stats.BestTimes[id]
+		if current == nil or seconds < current then
+			out.Stats.BestTimes[id] = seconds
+		end
+	end
+	if d.Equipped then
+		out.Equipped = copyList(d.Equipped)
+	end
+	if d.HasSpot then
+		out.SpotIndex = d.SpotIndex
+	end
+	normalizeEquipped(out)
+	return out
+end
+
+-- Overwrites the fields of `target` with `src` IN PLACE (other modules may hold the table).
+local function replaceContents(target, src)
+	target.Version = PROFILE_VERSION
+	target.Tokens = src.Tokens
+	target.SpotIndex = src.SpotIndex
+	for _, field in ipairs({ "Pets", "Items" }) do
+		local t = target[field]
+		if type(t) ~= "table" then
+			t = {}
+			target[field] = t
+		end
+		for key in pairs(copyMap(t)) do
+			t[key] = nil
+		end
+		for key, value in pairs(src[field]) do
+			t[key] = value
+		end
+	end
+	local equipped = target.Equipped
+	if type(equipped) ~= "table" then
+		equipped = {}
+		target.Equipped = equipped
+	end
+	for i = #equipped, 1, -1 do
+		equipped[i] = nil
+	end
+	for i, id in ipairs(src.Equipped) do
+		equipped[i] = id
+	end
+	local stats = target.Stats
+	if type(stats) ~= "table" then
+		stats = {}
+		target.Stats = stats
+	end
+	for _, key in ipairs(STAT_KEYS) do
+		stats[key] = src.Stats[key]
+	end
+	local best = stats.BestTimes
+	if type(best) ~= "table" then
+		best = {}
+		stats.BestTimes = best
+	end
+	for key in pairs(copyMap(best)) do
+		best[key] = nil
+	end
+	for key, value in pairs(src.Stats.BestTimes) do
+		best[key] = value
+	end
+end
+
+-- Moves the live profile onto freshly read store data while keeping everything the session did
+-- since `fromBase`. `newBase` becomes the new "known to be in the store" reference.
+local function rebase(entry, fromBase, stored, newBase)
+	local d = diffProfiles(entry.Profile, fromBase)
+	local merged = applyDelta(stored, d)
+	replaceContents(entry.Profile, merged)
+	entry.Base = copyProfile(newBase)
+end
+
+----------------------------------------------------------------------
+-- Player mirrors + remotes
+----------------------------------------------------------------------
+
+-- Mirror a token total onto the player (attribute for the HUD, leaderstats for the leaderboard).
+local function pushToPlayer(player, value)
+	if not player or not player.Parent then
+		return
+	end
+	player:SetAttribute(Config.Attr.Tokens, value)
+	local stats = player:FindFirstChild("leaderstats")
+	local tokensValue = stats and stats:FindFirstChild("Tokens")
+	if tokensValue then
+		tokensValue.Value = value
+	end
+end
+
+local function getRemote(name)
+	local cached = remoteCache[name]
+	if cached and cached.Parent then
+		return cached
+	end
+	local ok, remote = pcall(Remotes.Get, name)
+	if ok and remote then
+		remoteCache[name] = remote
+		return remote
+	end
+	return nil
+end
+
+-- PetCatalog is written by another module; resolve it lazily and tolerate its absence.
+local catalogResolved = false
+local petCatalog = nil
+local function getPetCatalog()
+	if not catalogResolved then
+		catalogResolved = true
+		local module = Shared:FindFirstChild("PetCatalog")
+		if module then
+			local ok, result = pcall(require, module)
+			if ok and type(result) == "table" then
+				petCatalog = result
+			else
+				warn("[DataService] PetCatalog failed to load: " .. tostring(result))
+			end
+		end
+	end
+	return petCatalog
+end
+
+local PERK_KEYS = { "MaxHealth", "TokenBonus", "StaminaRegen", "CheckpointHeal" }
+
+-- Equipped pet ids -> { MaxHealth, TokenBonus, StaminaRegen, CheckpointHeal } (summed, capped).
+function DataService.ComputePerks(equipped)
+	local perks = { MaxHealth = 0, TokenBonus = 0, StaminaRegen = 0, CheckpointHeal = 0 }
+	local catalog = getPetCatalog()
+	if catalog and type(catalog.SumPerks) == "function" and type(equipped) == "table" then
+		local ok, summed = pcall(catalog.SumPerks, equipped)
+		if ok and type(summed) == "table" then
+			for _, key in ipairs(PERK_KEYS) do
+				local value = summed[key]
+				if isFinite(value) and value > 0 then
+					local cap = Config.Pets.PerkCaps[key]
+					if cap and value > cap then
+						value = cap
+					end
+					perks[key] = value
+				end
+			end
+		end
+	end
+	return perks
+end
+
+-- Plain-table snapshot for the client (no Instances, no shared references).
+local function buildSnapshot(profile)
+	local stats = profile.Stats
+	return {
+		Tokens = profile.Tokens,
+		Pets = copyMap(profile.Pets),
+		Equipped = copyList(profile.Equipped),
+		Items = copyMap(profile.Items),
+		Stats = {
+			Matches = stats.Matches,
+			Wins = stats.Wins,
+			TokensEarned = stats.TokensEarned,
+			Spins = stats.Spins,
+			BestTimes = copyMap(stats.BestTimes),
+		},
+		SpotIndex = profile.SpotIndex,
+		Perks = DataService.ComputePerks(profile.Equipped),
+	}
+end
+
+----------------------------------------------------------------------
+-- DataStore access
+----------------------------------------------------------------------
 
 -- Records a DataStore failure. Studio without API access is expected, so it stays silent there.
 local function noteFailure(what, err)
@@ -96,53 +567,35 @@ local function getStore()
 	return store
 end
 
-local function newEntry()
-	return { Tokens = 0, Saved = 0, Loaded = false, LoadFailed = false, Saving = false }
-end
-
-local function ensureEntry(userId)
-	local entry = cache[userId]
-	if not entry then
-		entry = newEntry()
-		cache[userId] = entry
+local function getLegacyStore()
+	if storeDisabled then
+		return nil
 	end
-	return entry
-end
-
--- Mirror a token total onto the player (attribute for the HUD, leaderstats for the leaderboard).
-local function pushToPlayer(player, value)
-	if not player or not player.Parent then
-		return
-	end
-	player:SetAttribute(Config.Attr.Tokens, value)
-	local stats = player:FindFirstChild("leaderstats")
-	local tokensValue = stats and stats:FindFirstChild("Tokens")
-	if tokensValue then
-		tokensValue.Value = value
-	end
-end
-
-----------------------------------------------------------------------
--- Reading
-----------------------------------------------------------------------
-
--- Returns ok:boolean, tokens:number. ok=false means "could not read the store".
-local function readTokens(userId)
-	for attempt = 1, 2 do
-		local s = getStore()
-		if not s then
-			return false, 0
+	if not legacyResolved then
+		legacyResolved = true
+		local name = Config.Tokens.LegacyDataStoreName
+		if type(name) == "string" and name ~= "" then
+			local ok, result = pcall(function()
+				return DataStoreService:GetDataStore(name)
+			end)
+			if ok then
+				legacyStore = result
+			else
+				noteFailure("GetDataStore(legacy)", result)
+			end
 		end
+	end
+	return legacyStore
+end
+
+-- GetAsync with one retry. Returns ok:boolean, value.
+local function readKey(dataStore, key)
+	for attempt = 1, 2 do
 		local ok, result = pcall(function()
-			return s:GetAsync(keyFor(userId))
+			return dataStore:GetAsync(key)
 		end)
 		if ok then
-			if type(result) == "table" then
-				return true, sanitize(result.Tokens)
-			elseif type(result) == "number" then
-				return true, sanitize(result)
-			end
-			return true, 0 -- brand-new player
+			return true, result
 		end
 		noteFailure("load", result)
 		if storeDisabled or attempt == 2 then
@@ -150,66 +603,78 @@ local function readTokens(userId)
 		end
 		task.wait(RETRY_DELAY)
 	end
-	return false, 0
+	return false, nil
 end
 
-local function loadInternal(player)
-	local userId = player.UserId
-	local existing = cache[userId]
-	if existing and existing.Loaded then
-		return { Tokens = existing.Tokens }
+-- Reads a player's stored profile.
+-- Returns ok, profile|nil, migrated. ok=false means "could not read" (nothing may be assumed).
+-- profile == nil with ok=true means a brand-new player. migrated=true means the profile was built
+-- from a v1 save and the v2 key does not exist yet.
+local function fetchProfile(userId)
+	local s = getStore()
+	if not s then
+		return false, nil, false
 	end
-
-	local ok, stored = readTokens(userId)
-
-	-- The cache entry may have been created while we were waiting on the store (AddTokens before
-	-- Load finished). Keep whatever it earned on top of the stored total.
-	local entry = cache[userId]
-	if entry then
-		entry.Tokens = sanitize(entry.Tokens + stored)
-		entry.Saved = stored
-	else
-		entry = newEntry()
-		entry.Tokens = stored
-		entry.Saved = stored
-		cache[userId] = entry
-	end
-	entry.Loaded = true
-	entry.LoadFailed = not ok
-
-	return { Tokens = entry.Tokens }
-end
-
--- Never errors. Returns { Tokens = number } (defaults to 0).
-function DataService.Load(player)
-	if not player then
-		return { Tokens = 0 }
-	end
-	local ok, result = pcall(loadInternal, player)
-	if ok and type(result) == "table" then
-		return result
-	end
+	local ok, raw = readKey(s, keyFor(userId))
 	if not ok then
-		warn("[DataService] Load failed: " .. tostring(result))
+		return false, nil, false
 	end
-	return { Tokens = 0 }
+	if raw ~= nil then
+		return true, normalizeProfile(raw), false
+	end
+	-- Nothing in v2: look for a v1 save to migrate.
+	local legacy = getLegacyStore()
+	if legacy then
+		local okLegacy, old = readKey(legacy, keyFor(userId))
+		if not okLegacy then
+			return false, nil, false
+		end
+		if old ~= nil then
+			local migrated = newProfile()
+			if type(old) == "table" then
+				migrated.Tokens = sanitize(old.Tokens)
+			else
+				migrated.Tokens = sanitize(old)
+			end
+			return true, migrated, true
+		end
+	end
+	return true, nil, false
 end
 
 ----------------------------------------------------------------------
--- Writing
+-- Cache entries, locking, loading
 ----------------------------------------------------------------------
 
--- Writes one cache entry. Returns true when the store is up to date afterwards.
-local function saveEntry(userId)
+local function ensureEntry(userId)
 	local entry = cache[userId]
 	if not entry then
-		return false
+		entry = {
+			Profile = newProfile(),
+			Base = newProfile(),
+			Loaded = false,
+			Loading = false,
+			LoadFailed = false,
+			Saving = false,
+			Dirty = false,
+			RecoveryScheduled = false,
+		}
+		cache[userId] = entry
 	end
-	if not getStore() then
-		return false -- DataStores unavailable: the in-memory cache is all we have
-	end
+	return entry
+end
 
-	-- Wait for an in-flight save of the same entry (autosave vs. PlayerRemoving vs. BindToClose).
+-- Waits (bounded) for an in-flight load to finish.
+local function waitForLoad(entry)
+	local waited = 0
+	while entry.Loading and waited < 40 do
+		task.wait(0.1)
+		waited = waited + 0.1
+	end
+end
+
+-- Simple per-entry write lock (autosave vs. PlayerRemoving vs. BindToClose vs. recovery).
+local function acquire(entry)
 	local waited = 0
 	while entry.Saving and waited < 20 do
 		task.wait(0.25)
@@ -218,72 +683,190 @@ local function saveEntry(userId)
 	if entry.Saving then
 		return false
 	end
+	entry.Saving = true
+	return true
+end
 
-	if entry.Tokens == entry.Saved and not entry.LoadFailed then
-		return true -- nothing new to write
+local function loadEntry(player)
+	local userId = player.UserId
+	local entry = ensureEntry(userId)
+	if entry.Loaded then
+		return entry, false
+	end
+	if entry.Loading then
+		waitForLoad(entry)
+		return entry, false
 	end
 
-	entry.Saving = true
-	local success = false
+	entry.Loading = true
+	local fetched, stored, migrated = false, nil, false
+	local pok, a, b, c = pcall(fetchProfile, userId)
+	if pok then
+		fetched, stored, migrated = a, b, c
+	else
+		warn("[DataService] fetch errored: " .. tostring(a))
+	end
+
+	if fetched then
+		-- Anything the session did before the load finished (early AddTokens) is kept on top.
+		local source = stored or newProfile()
+		local newBase = newProfile()
+		if stored and not migrated then
+			newBase = source
+		end
+		rebase(entry, entry.Base, source, newBase)
+		entry.LoadFailed = false
+	else
+		entry.LoadFailed = true -- play on with defaults; saves/recovery merge with the real data later
+	end
+	entry.Loaded = true
+	entry.Loading = false
+	return entry, true
+end
+
+-- Tells the player's systems that the live profile changed underneath them.
+local function announceRebase(userId, entry)
+	local player = Players:GetPlayerByUserId(userId)
+	if not player then
+		return
+	end
+	pushToPlayer(player, entry.Profile.Tokens)
+	DataService.Sync(player)
+	DataService.ProfileRebased:Fire(player, entry.Profile)
+end
+
+-- Re-reads the store for an entry whose load failed and merges the session on top of it.
+-- Caller holds the entry lock. Returns true on success.
+local function recover(entry, userId)
+	local fetched, stored, migrated = fetchProfile(userId)
+	if not fetched then
+		return false
+	end
+	local source = stored or newProfile()
+	local newBase = newProfile()
+	if stored and not migrated then
+		newBase = source
+	end
+	rebase(entry, entry.Base, source, newBase)
+	entry.LoadFailed = false
+	announceRebase(userId, entry)
+	return true
+end
+
+-- After a failed load, keep retrying in the background so the player gets their pets back.
+local function scheduleRecovery(userId)
+	local entry = cache[userId]
+	if not entry or entry.RecoveryScheduled or storeDisabled then
+		return
+	end
+	entry.RecoveryScheduled = true
+	task.spawn(function()
+		local delays = { 20, 40, 80, 160, 300 }
+		for _, seconds in ipairs(delays) do
+			task.wait(seconds)
+			if cache[userId] ~= entry or not entry.LoadFailed or shuttingDown or storeDisabled then
+				break
+			end
+			if not Players:GetPlayerByUserId(userId) then
+				break
+			end
+			if acquire(entry) then
+				local ok, err = pcall(recover, entry, userId)
+				entry.Saving = false
+				if not ok then
+					warn("[DataService] recovery errored: " .. tostring(err))
+				end
+			end
+		end
+		entry.RecoveryScheduled = false
+	end)
+end
+
+----------------------------------------------------------------------
+-- Saving
+----------------------------------------------------------------------
+
+-- Body of a save; the caller holds the entry lock. Returns true when the store is up to date.
+local function writeEntry(entry, userId)
+	if entry.LoadFailed then
+		if not recover(entry, userId) then
+			return false -- never write blind: it could hide a v1 save or a v2 profile we could not read
+		end
+	end
 
 	for attempt = 1, 2 do
 		local s = getStore()
 		if not s then
-			break
+			return false
 		end
 
-		local snapshot = entry.Tokens
-		local delta = snapshot - entry.Saved
-		local result = nil
+		local snapshot = copyProfile(entry.Profile)
+		local delta = diffProfiles(snapshot, entry.Base)
+		if isEmptyDelta(delta) then
+			entry.Dirty = false
+			return true
+		end
 
+		local result = nil
 		local ok, err = pcall(function()
 			result = s:UpdateAsync(keyFor(userId), function(old)
 				-- Must be pure and non-yielding: UpdateAsync may call it more than once.
-				local out = {}
-				local base = 0
-				if type(old) == "table" then
-					for key, value in pairs(old) do
-						out[key] = value
-					end
-					base = sanitize(old.Tokens)
-				elseif type(old) == "number" then
-					base = sanitize(old)
-				end
-				out.Tokens = sanitize(base + delta)
-				out.UpdatedAt = os.time()
-				return out
+				local merged = applyDelta(normalizeProfile(old), delta)
+				merged.UpdatedAt = os.time()
+				return merged
 			end)
 		end)
 
 		if ok then
-			local confirmed = snapshot
-			if type(result) == "table" and type(result.Tokens) == "number" then
-				confirmed = sanitize(result.Tokens)
+			entry.Dirty = false
+			if type(result) == "table" then
+				local confirmed = normalizeProfile(result)
+				if profilesEqual(confirmed, snapshot) then
+					entry.Base = snapshot
+				else
+					-- The store held something different from what we assumed (another server,
+					-- a recovered load): adopt it and re-apply whatever changed since the snapshot.
+					rebase(entry, snapshot, confirmed, confirmed)
+					announceRebase(userId, entry)
+				end
+			else
+				entry.Base = snapshot
 			end
-			local earnedSince = entry.Tokens - snapshot -- tokens collected while we were writing
-			entry.Saved = confirmed
-			if confirmed ~= snapshot then
-				-- The store held a different total than we assumed (failed load, other server):
-				-- adopt it so the player sees the real number.
-				entry.Tokens = sanitize(confirmed + earnedSince)
-				pushToPlayer(Players:GetPlayerByUserId(userId), entry.Tokens)
-			end
-			entry.LoadFailed = false
-			success = true
-			break
+			return true
 		end
 
 		noteFailure("save", err)
 		if storeDisabled then
-			break
+			return false
 		end
 		if attempt == 1 then
 			task.wait(RETRY_DELAY)
 		end
 	end
+	return false
+end
 
+local function saveEntry(userId)
+	local entry = cache[userId]
+	if not entry then
+		return false
+	end
+	waitForLoad(entry)
+	if not getStore() then
+		return false -- DataStores unavailable: the in-memory cache is all we have
+	end
+	if not acquire(entry) then
+		return false
+	end
+	local ok, result = pcall(writeEntry, entry, userId)
 	entry.Saving = false
-	return success
+	if not ok then
+		if not IS_STUDIO then
+			warn("[DataService] Save errored: " .. tostring(result))
+		end
+		return false
+	end
+	return result == true
 end
 
 -- Saves one player (pcall-safe, retries once, silent when DataStores are unavailable).
@@ -312,23 +895,169 @@ function DataService.Release(player)
 		return
 	end
 	cache[userId] = nil
+	lastRequest[userId] = nil
+end
+
+----------------------------------------------------------------------
+-- Hooks: leave handler + RequestProfile
+----------------------------------------------------------------------
+
+local function onPlayerRemoving(player)
+	-- PlayerService also saves + releases; doing it here as well means a missing call can never
+	-- lose data or leak the cache entry. Saving twice is a no-op (empty delta).
+	task.spawn(function()
+		DataService.Save(player)
+		DataService.Release(player)
+	end)
+end
+
+local function hook()
+	if not playerHooked then
+		playerHooked = true
+		Players.PlayerRemoving:Connect(onPlayerRemoving)
+	end
+	if not requestHooked then
+		local remote = getRemote("RequestProfile")
+		if remote then
+			requestHooked = true
+			remote.OnServerEvent:Connect(function(player)
+				local userId = player.UserId
+				local now = os.clock()
+				local last = lastRequest[userId]
+				if last and now - last < REQUEST_COOLDOWN then
+					return
+				end
+				lastRequest[userId] = now
+				DataService.Sync(player)
+			end)
+		end
+	end
+end
+
+-- Optional explicit init (Load / StartAutosave / BindToClose do the same lazily).
+function DataService.Init()
+	hook()
+end
+
+----------------------------------------------------------------------
+-- Public API: loading + profile access
+----------------------------------------------------------------------
+
+-- Never errors. Returns the LIVE profile (mutate, then MarkDirty + Sync).
+function DataService.Load(player)
+	if not player then
+		return newProfile()
+	end
+	hook()
+	local ok, entry, didLoad = pcall(loadEntry, player)
+	if not ok or not entry then
+		warn("[DataService] Load failed: " .. tostring(entry))
+		local fallback = ensureEntry(player.UserId)
+		fallback.Loading = false
+		fallback.Loaded = true
+		fallback.LoadFailed = true
+		return fallback.Profile
+	end
+	-- A quick rejoin can find the previous session's entry still in memory (its final save was in
+	-- flight): the profile is current, but the NEW Player instance still needs its attributes.
+	if didLoad or entry.Owner ~= player then
+		entry.Owner = player
+		pushToPlayer(player, entry.Profile.Tokens)
+		if entry.LoadFailed then
+			scheduleRecovery(player.UserId)
+		end
+		DataService.Sync(player)
+		DataService.ProfileLoaded:Fire(player, entry.Profile)
+	end
+	return entry.Profile
+end
+
+-- The live profile table, or nil until Load finished.
+function DataService.GetProfile(player)
+	local entry = player and cache[player.UserId]
+	if entry and entry.Loaded then
+		return entry.Profile
+	end
+	return nil
+end
+
+function DataService.MarkDirty(player)
+	local entry = player and cache[player.UserId]
+	if entry then
+		entry.Dirty = true
+	end
+end
+
+-- Fires ProfileSync(snapshot) to that player (no-op until the profile is loaded).
+function DataService.Sync(player)
+	if not player or not player.Parent then
+		return
+	end
+	local entry = cache[player.UserId]
+	if not entry or not entry.Loaded then
+		return
+	end
+	local remote = getRemote("ProfileSync")
+	if not remote then
+		return
+	end
+	local ok, err = pcall(function()
+		remote:FireClient(player, buildSnapshot(entry.Profile))
+	end)
+	if not ok then
+		warn("[DataService] Sync failed: " .. tostring(err))
+	end
 end
 
 ----------------------------------------------------------------------
 -- Tokens
 ----------------------------------------------------------------------
 
+-- Adds earned tokens (n > 0; spending goes through SpendTokens). Also counts Stats.TokensEarned.
 function DataService.AddTokens(player, n)
-	if not player or type(n) ~= "number" or n ~= n then
+	if not player or not isFinite(n) then
 		return
 	end
 	local amount = math.floor(n + 0.5)
-	if amount == 0 then
+	if amount <= 0 then
 		return
 	end
-	local entry = ensureEntry(player.UserId)
-	entry.Tokens = sanitize(entry.Tokens + amount)
-	pushToPlayer(player, entry.Tokens)
+	local entry = cache[player.UserId]
+	if not entry then
+		if not player.Parent then
+			return -- a player who already left (and was released) must not recreate a cache entry
+		end
+		hook()
+		entry = ensureEntry(player.UserId)
+	end
+	local profile = entry.Profile
+	profile.Tokens = sanitize(profile.Tokens + amount)
+	profile.Stats.TokensEarned = sanitize(profile.Stats.TokensEarned + amount)
+	entry.Dirty = true
+	pushToPlayer(player, profile.Tokens)
+end
+
+-- true if the tokens were taken. Never goes negative.
+function DataService.SpendTokens(player, n)
+	if not player or not isFinite(n) or n < 0 then
+		return false
+	end
+	local amount = math.ceil(n)
+	local entry = cache[player.UserId]
+	if not entry then
+		return amount == 0
+	end
+	local profile = entry.Profile
+	if amount > profile.Tokens then
+		return false
+	end
+	if amount == 0 then
+		return true
+	end
+	profile.Tokens = profile.Tokens - amount
+	entry.Dirty = true
+	pushToPlayer(player, profile.Tokens)
+	return true
 end
 
 function DataService.GetTokens(player)
@@ -337,7 +1066,7 @@ function DataService.GetTokens(player)
 	end
 	local entry = cache[player.UserId]
 	if entry then
-		return entry.Tokens
+		return entry.Profile.Tokens
 	end
 	local attr = player:GetAttribute(Config.Attr.Tokens)
 	if type(attr) == "number" then
@@ -347,10 +1076,36 @@ function DataService.GetTokens(player)
 end
 
 ----------------------------------------------------------------------
+-- Stats
+----------------------------------------------------------------------
+
+-- Called by MatchService for every member at match end. `won` = finished on a victory.
+function DataService.RecordMatch(player, difficultyId, won, seconds)
+	local entry = player and cache[player.UserId]
+	if not entry then
+		return
+	end
+	local stats = entry.Profile.Stats
+	stats.Matches = sanitize(stats.Matches + 1)
+	if won == true then
+		stats.Wins = sanitize(stats.Wins + 1)
+		local clean = sanitizeSeconds(seconds)
+		if clean and type(difficultyId) == "string" and Config.GetDifficulty(difficultyId) then
+			local best = stats.BestTimes[difficultyId]
+			if best == nil or clean < best then
+				stats.BestTimes[difficultyId] = clean
+			end
+		end
+	end
+	entry.Dirty = true
+end
+
+----------------------------------------------------------------------
 -- Autosave + shutdown
 ----------------------------------------------------------------------
 
 function DataService.StartAutosave()
+	hook()
 	if autosaveStarted then
 		return
 	end
@@ -379,6 +1134,7 @@ function DataService.StartAutosave()
 end
 
 function DataService.BindToClose()
+	hook()
 	if closeBound then
 		return
 	end

@@ -1,9 +1,13 @@
--- PortalService: forms parties on the lobby portal pads and launches matches.
+-- PortalService (v2): forms parties on the lobby portal pads and launches matches.
 --
 -- Standing inside a portal Zone (the "ready pad") puts a player in that portal's party. The first
 -- player starts a countdown; a full party shortens it. When it reaches zero the party is handed to
 -- MatchService.StartMatch. MatchService is passed in through Init (no require) so the two services
 -- never form a circular dependency.
+--
+-- v2: one party per entry of Config.Difficulties (five: Easy .. Saint), matched to
+-- lobbyInfo.Portals[difficulty.Id]. No difficulty id is hard-coded here; a difficulty without a
+-- lobby portal is skipped with a warning, a portal without a difficulty is ignored.
 -- Plain Lua 5.1-compatible syntax only.
 
 local Players = game:GetService("Players")
@@ -219,7 +223,7 @@ local function refreshLabels(party)
 	local info = party.Info
 	local n = #party.Players
 	local max = Config.Match.MaxPlayers
-	setText(info.CountLabel, string.format("%d / %d", n, max), "LastCount", party)
+	setText(info.CountLabel, string.format("%d / %d players", n, max), "LastCount", party)
 
 	local status
 	if n == 0 then
@@ -512,6 +516,10 @@ function PortalService.Init(lobbyInfo, matchServiceArg)
 	local portals = (lobbyInfo and lobbyInfo.Portals) or {}
 	for _, diff in ipairs(Config.Difficulties) do
 		local info = portals[diff.Id]
+		if info and not info.Zone then
+			warn("[PortalService] portal " .. diff.Id .. " has no Zone")
+			info = nil
+		end
 		if info then
 			parties[diff.Id] = {
 				Id = diff.Id,

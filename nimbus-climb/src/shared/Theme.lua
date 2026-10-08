@@ -1,5 +1,8 @@
 -- Theme: fonts, colours and tiny UI builders so every label in the game looks consistent.
--- Plain Lua 5.1-compatible syntax only.
+-- v2: calmer, darker, clearer palette (late-afternoon cloud world), the in-world palette
+-- `Theme.World` (used by LobbyBuilder / CourseBuilder / TokenService / HazardService) and the
+-- palette tokens the chunky "cloud" UI kit (client/UI/CloudUI.lua) is built from.
+-- Plain Lua 5.1-compatible syntax only. Safe to require on the server and on the client.
 
 local Theme = {}
 
@@ -15,40 +18,115 @@ end
 
 -- Font roles. Use roles, never raw Enum.Font, anywhere in the game.
 Theme.Fonts = {
-	Title = font("FredokaOne"), -- logo, banners, portal names
+	Title = font("FredokaOne"), -- logo, banners, portal names, window ribbons
 	Display = font("FredokaOne"), -- big numbers: timer, countdown, token count
-	Heading = font("GothamBlack", "GothamBold"), -- panel headers, buttons
-	Body = font("Nunito", "GothamMedium"), -- descriptions, toasts
+	Heading = font("GothamBlack", "GothamBold"), -- panel headers, captions, counts
+	Body = font("Nunito", "GothamMedium"), -- descriptions
 	Label = font("GothamMedium"), -- tiny captions
 	Accent = font("LuckiestGuy", "FredokaOne"), -- damage numbers, "GO!"
 	Script = font("Fondamento", "Nunito"), -- flavour text / taglines
+	-- v2 additions
+	Toast = font("LuckiestGuy", "FredokaOne"), -- small side-of-screen system messages (cool, chunky)
+	Button = font("FredokaOne", "GothamBlack"), -- text on chunky buttons and tabs
 }
 
+local function rgb(r, g, b)
+	return Color3.fromRGB(r, g, b)
+end
+
 Theme.Colors = {
-	SkyTop = Color3.fromRGB(86, 154, 255),
-	SkyBottom = Color3.fromRGB(255, 196, 214),
-	Cloud = Color3.fromRGB(250, 252, 255),
-	CloudShade = Color3.fromRGB(205, 220, 245),
-	Storm = Color3.fromRGB(78, 84, 112),
-	Ink = Color3.fromRGB(34, 40, 72), -- text outlines
-	Panel = Color3.fromRGB(28, 36, 74),
-	PanelLight = Color3.fromRGB(60, 74, 130),
-	Token = Color3.fromRGB(255, 214, 82),
-	TokenGlow = Color3.fromRGB(255, 244, 170),
-	Health = Color3.fromRGB(96, 230, 140),
-	HealthMid = Color3.fromRGB(255, 208, 84),
-	HealthLow = Color3.fromRGB(255, 92, 110),
-	Stamina = Color3.fromRGB(110, 190, 255),
-	Good = Color3.fromRGB(120, 235, 160),
-	Bad = Color3.fromRGB(255, 110, 120),
-	White = Color3.fromRGB(255, 255, 255),
+	-- Existing keys (other modules depend on every one of them) with the calmer v2 values.
+	SkyTop = rgb(66, 116, 192),
+	SkyBottom = rgb(212, 164, 184),
+	Cloud = rgb(214, 224, 240),
+	CloudShade = rgb(150, 168, 200),
+	Storm = rgb(54, 60, 88),
+	Ink = rgb(26, 32, 64), -- text outlines
+	Panel = rgb(30, 40, 80), -- dark HUD cards
+	PanelLight = rgb(64, 84, 142),
+	Token = rgb(238, 190, 62),
+	TokenGlow = rgb(250, 224, 132),
+	Health = rgb(92, 206, 128),
+	HealthMid = rgb(238, 190, 72),
+	HealthLow = rgb(236, 88, 100),
+	Stamina = rgb(98, 172, 232),
+	Good = rgb(108, 208, 144),
+	Bad = rgb(240, 102, 112),
+	White = rgb(255, 255, 255), -- text only
 	Rainbow = {
-		Color3.fromRGB(255, 107, 129),
-		Color3.fromRGB(255, 177, 94),
-		Color3.fromRGB(255, 232, 110),
-		Color3.fromRGB(120, 230, 150),
-		Color3.fromRGB(110, 190, 255),
-		Color3.fromRGB(176, 140, 255),
+		rgb(232, 104, 120),
+		rgb(240, 160, 88),
+		rgb(240, 208, 98),
+		rgb(104, 200, 142),
+		rgb(98, 168, 232),
+		rgb(160, 130, 232),
+	},
+
+	-- v2 UI-kit tokens (CloudUI)
+	Navy = rgb(24, 34, 78), -- thick outlines around panels, buttons, slots
+	Outline = rgb(24, 34, 78), -- alias of Navy
+	FrameTop = rgb(176, 212, 244), -- outer window frame, top colour
+	FrameBottom = rgb(112, 158, 216), -- outer window frame, bottom colour
+	WellTop = rgb(60, 96, 164), -- inner content well, top colour
+	WellBottom = rgb(40, 68, 128), -- inner content well, bottom colour
+	WellEdge = rgb(22, 34, 82),
+	Mist = rgb(226, 234, 246), -- pale cloud used for slot fills (never pure white)
+	MistDeep = rgb(176, 196, 228),
+	Gold = rgb(244, 196, 78),
+	Muted = rgb(176, 192, 222), -- secondary text on dark wells
+}
+
+-- Base colours of the glossy button styles (CloudUI.Button / IconButton).
+Theme.Buttons = {
+	Green = rgb(96, 196, 108),
+	Pink = rgb(238, 126, 176),
+	Red = rgb(228, 90, 92),
+	Blue = rgb(90, 158, 234),
+	Gold = rgb(244, 190, 70),
+	Gray = rgb(144, 156, 180),
+}
+
+-- Pill / toast colours by kind.
+Theme.Kinds = {
+	info = rgb(90, 158, 234),
+	good = rgb(96, 196, 108),
+	bad = rgb(228, 90, 92),
+	token = rgb(240, 188, 66),
+}
+
+-- In-world palette for Parts (lobby, courses, tokens, hazards). Calm, never pure white; platform
+-- tops are clearly lighter than their sides, hazards are a distinct dark red/purple, checkpoints
+-- teal. Trim colours are per difficulty id (Config.Difficulties order) and also by index.
+Theme.World = {
+	CloudTop = rgb(202, 214, 236),
+	CloudSide = rgb(150, 168, 204),
+	CloudShadow = rgb(104, 122, 162),
+	Hazard = rgb(160, 62, 94),
+	HazardGlow = rgb(222, 100, 124),
+	Checkpoint = rgb(62, 172, 152),
+	Token = rgb(238, 194, 86),
+	Storm = rgb(58, 64, 94),
+	Wind = rgb(150, 198, 226),
+	Water = rgb(96, 156, 214),
+	Trim = {
+		Easy = rgb(96, 190, 140),
+		Medium = rgb(96, 160, 224),
+		Hard = rgb(226, 150, 74),
+		Extreme = rgb(214, 92, 104),
+		Saint = rgb(226, 190, 96),
+		rgb(96, 190, 140),
+		rgb(96, 160, 224),
+		rgb(226, 150, 74),
+		rgb(214, 92, 104),
+		rgb(226, 190, 96),
+	},
+	Rainbow = {
+		rgb(206, 96, 112),
+		rgb(214, 148, 84),
+		rgb(214, 190, 96),
+		rgb(100, 174, 128),
+		rgb(92, 150, 206),
+		rgb(142, 118, 206),
 	},
 }
 
@@ -62,13 +140,37 @@ function Theme.HealthColor(fraction)
 	return Theme.Colors.HealthLow
 end
 
+----------------------------------------------------------------------
+-- Colour helpers (shading stays navy-tinted so shadows feel cool, not muddy)
+----------------------------------------------------------------------
+local SHADE_TARGET = Color3.fromRGB(14, 20, 52)
+local LIGHT_TARGET = Color3.fromRGB(238, 244, 255)
+
+function Theme.Mix(a, b, t)
+	return a:Lerp(b, t)
+end
+
+-- k in 0..1: how far towards the dark navy shade.
+function Theme.Darken(color, k)
+	return color:Lerp(SHADE_TARGET, k)
+end
+
+-- k in 0..1: how far towards soft pale cloud (never pure white).
+function Theme.Lighten(color, k)
+	return color:Lerp(LIGHT_TARGET, k)
+end
+
+----------------------------------------------------------------------
+-- Text + small GUI builders
+----------------------------------------------------------------------
+
 -- Apply a font role + outline to any TextLabel/TextButton/TextBox.
--- opts: Size, Color, Stroke (0..1 transparency, default 0.55), Scaled (bool)
+-- opts: Size, Color, Stroke (0..1 transparency, default 0.55), StrokeColor, Scaled (bool)
 function Theme.Style(obj, role, opts)
 	opts = opts or {}
 	obj.Font = Theme.Fonts[role] or Theme.Fonts.Body
 	obj.TextColor3 = opts.Color or Theme.Colors.White
-	obj.TextStrokeColor3 = Theme.Colors.Ink
+	obj.TextStrokeColor3 = opts.StrokeColor or Theme.Colors.Ink
 	obj.TextStrokeTransparency = opts.Stroke or 0.55
 	if opts.Scaled then
 		obj.TextScaled = true
@@ -120,14 +222,14 @@ function Theme.Gradient(parent, top, bottom, rotation)
 	return g
 end
 
--- Rounded translucent panel used for every HUD card.
+-- Rounded translucent dark card used for compact HUD elements (windows use CloudUI.Panel).
 function Theme.Panel(props)
 	local frame = Instance.new("Frame")
 	frame.BackgroundColor3 = Theme.Colors.Panel
-	frame.BackgroundTransparency = 0.25
+	frame.BackgroundTransparency = 0.2
 	frame.BorderSizePixel = 0
 	Theme.Corner(frame, UDim.new(0, 14))
-	Theme.Stroke(frame, Theme.Colors.PanelLight, 2, 0.35)
+	Theme.Stroke(frame, Theme.Colors.Navy, 3, 0.15)
 	if props then
 		for key, value in pairs(props) do
 			frame[key] = value

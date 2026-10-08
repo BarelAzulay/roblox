@@ -18,8 +18,13 @@ local Workspace = game:GetService("Workspace")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Config = require(Shared.Config)
-local Theme = require(Shared.Theme)
 local Util = require(Shared.Util)
+
+-- Theme is only used for its in-world palette; a broken UI kit must never take the tokens down.
+local themeOk, Theme = pcall(require, Shared.Theme)
+if not themeOk or type(Theme) ~= "table" then
+	Theme = {}
+end
 
 local TokenService = {}
 
@@ -94,7 +99,7 @@ local LOOKS = {
 		puff = GOLDEN_PUFF,
 		glow = GOLDEN_GLOW,
 		haloScale = 1.25,
-		haloTransparency = 0.82,
+		haloTransparency = 0.85,
 		lightBrightness = 2.0,
 		lightRange = 17,
 		sparkleRate = 16,
@@ -157,12 +162,14 @@ local function stepTokens()
 	end
 
 	for token, rec in pairs(animated) do
-		if token.Parent == nil then
-			-- removed from the tree (destroyed): forget it. Never-parented tokens just wait.
+		if token.Parent == nil or not token:IsDescendantOf(Workspace) then
+			-- Not in the world. Never-parented tokens just wait; one that WAS in the world and is gone
+			-- (destroyed, or its course folder was: that leaves Parent set) is forgotten so this table
+			-- never keeps dead tokens alive.
 			if rec.parented then
 				animated[token] = nil
 			end
-		elseif token:IsDescendantOf(Workspace) then
+		else
 			-- Welded pieces only follow the root once the token is in the workspace.
 			rec.parented = true
 			local current = token.Position
@@ -284,7 +291,7 @@ function TokenService.MakeTokenPart(position, parent, value)
 	if golden then
 		-- a big thin flare disc behind the coin and a four-point glint star across its face
 		addPiece(token, "Flare", Enum.PartType.Cylinder, Vector3.new(0.12, 8.4, 8.4), CFrame.new(0, 0, 0),
-			GOLDEN_GLOW, Enum.Material.Neon, 0.8)
+			GOLDEN_GLOW, Enum.Material.Neon, 0.84)
 		addPiece(token, "GlintVertical", Enum.PartType.Block, Vector3.new(0.1, 7.4, 0.28), CFrame.new(0, 0, 0),
 			GOLDEN_GLOW, Enum.Material.Neon, 0.5)
 		addPiece(token, "GlintHorizontal", Enum.PartType.Block, Vector3.new(0.1, 0.28, 7.4), CFrame.new(0, 0, 0),

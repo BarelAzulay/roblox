@@ -1,5 +1,13 @@
--- LightingService: owns the sky, atmosphere and global workspace settings.
--- Golden-hour candy sky: warm sun, lavender haze, soft bloom. No asset ids anywhere.
+-- LightingService: owns the sky, atmosphere, post effects and global workspace rules.
+--
+-- v2 look ("late-afternoon calm"): the old golden-hour setup was blown out (bright ambient,
+-- strong bloom, strong colour shifts). Everything here is tuned the other way round so that
+-- cloud platforms, hazards and UI-in-the-world stay readable:
+--   * lower sun brightness and ambient, slightly negative exposure,
+--   * a blue-grey atmosphere with a soft peach horizon (no white-out haze),
+--   * bloom only on genuinely bright accents (neon trims, tokens), tiny sun rays,
+--   * a little extra contrast, a hint of saturation, a cool tint, depth of field off.
+-- No asset ids anywhere: the stock sky textures stay, only the celestial bodies are tuned.
 -- Plain Lua 5.1-compatible syntax only.
 
 local Lighting = game:GetService("Lighting")
@@ -11,6 +19,68 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Config = require(Shared.Config)
 
 local LightingService = {}
+
+-- The tuned values live in one table so the whole mood can be adjusted in one place.
+local LOOK = {
+	Lighting = {
+		ClockTime = 15.2, -- mid-late afternoon: the sun is still up but already soft
+		GeographicLatitude = 28, -- lowers the sun a little, which gives longer, clearer shadows
+		Brightness = 1.5,
+		Ambient = Color3.fromRGB(84, 96, 128),
+		OutdoorAmbient = Color3.fromRGB(108, 120, 152),
+		-- Colour shifts are added on top of the lit / shaded sides. Keep them very dim: the old
+		-- values (hundreds of points) were a big part of the "way too bright" problem.
+		ColorShift_Top = Color3.fromRGB(34, 26, 16),
+		ColorShift_Bottom = Color3.fromRGB(8, 14, 30),
+		EnvironmentDiffuseScale = 0.5,
+		EnvironmentSpecularScale = 0.4,
+		ExposureCompensation = -0.3,
+		GlobalShadows = true,
+		ShadowSoftness = 0.25,
+		FogStart = 0,
+		FogEnd = 100000, -- the Atmosphere does the distance haze instead of classic fog
+	},
+	Atmosphere = {
+		Density = 0.3,
+		Offset = 0.25,
+		Color = Color3.fromRGB(158, 172, 200), -- blue-grey air
+		Decay = Color3.fromRGB(226, 182, 160), -- soft peach horizon
+		Glare = 0.2,
+		Haze = 1.2,
+	},
+	Sky = {
+		StarCount = 2500,
+		CelestialBodiesShown = true,
+		SunAngularSize = 14,
+		MoonAngularSize = 9,
+	},
+	Bloom = {
+		Enabled = true,
+		Intensity = 0.12,
+		Size = 16,
+		Threshold = 1.8, -- only the brightest accents (neon, tokens) glow
+	},
+	SunRays = {
+		Enabled = true,
+		Intensity = 0.04,
+		Spread = 0.6,
+	},
+	ColorCorrection = {
+		Enabled = true,
+		Brightness = -0.03,
+		Contrast = 0.14,
+		Saturation = 0.08,
+		TintColor = Color3.fromRGB(232, 240, 255), -- soft cool tint
+	},
+	-- Depth of field is kept switched off (it blurs the course edges players need to read).
+	DepthOfField = {
+		Enabled = false,
+		FarIntensity = 0.05,
+		NearIntensity = 0,
+		FocusDistance = 200,
+		InFocusRadius = 160,
+	},
+}
 
 -- Assign every property in `props` to `inst`; a property that does not exist (or is not
 -- scriptable on this engine version) only produces a warning instead of breaking boot.
@@ -37,88 +107,28 @@ local function ensure(className, name)
 	return inst
 end
 
-function LightingService.Init()
-	-- Core lighting: golden hour with a pink/blue split ambient.
-	setProps(Lighting, {
-		ClockTime = 17.5,
-		GeographicLatitude = 15,
-		Brightness = 2.3,
-		Ambient = Color3.fromRGB(128, 112, 150),
-		OutdoorAmbient = Color3.fromRGB(152, 142, 188),
-		ColorShift_Top = Color3.fromRGB(255, 208, 172),
-		ColorShift_Bottom = Color3.fromRGB(150, 170, 255),
-		EnvironmentDiffuseScale = 0.7,
-		EnvironmentSpecularScale = 0.45,
-		ExposureCompensation = 0.1,
-		GlobalShadows = true,
-		ShadowSoftness = 0.4,
-		FogStart = 0,
-		FogEnd = 100000, -- the Atmosphere does the distance haze instead
-	})
-
-	-- Atmosphere: lavender air that fades into a pink horizon.
-	local atmosphere = ensure("Atmosphere", "NimbusAtmosphere")
-	setProps(atmosphere, {
-		Density = 0.3,
-		Offset = 0.22,
-		Color = Color3.fromRGB(214, 198, 255),
-		Decay = Color3.fromRGB(255, 166, 184),
-		Glare = 0.45,
-		Haze = 1.5,
-	})
-
-	-- Sky: keep the stock skybox textures (no asset ids), only tune the celestial bodies.
-	local sky = ensure("Sky", "NimbusSky")
-	setProps(sky, {
-		StarCount = 3000,
-		CelestialBodiesShown = true,
-		SunAngularSize = 20,
-		MoonAngularSize = 11,
-	})
-
-	-- Post effects, all kept gentle so the pastel clouds stay readable.
-	local bloom = ensure("BloomEffect", "NimbusBloom")
-	setProps(bloom, {
-		Enabled = true,
-		Intensity = 0.5,
-		Size = 30,
-		Threshold = 0.95,
-	})
-
-	local sunRays = ensure("SunRaysEffect", "NimbusSunRays")
-	setProps(sunRays, {
-		Enabled = true,
-		Intensity = 0.16,
-		Spread = 0.85,
-	})
-
-	local colorCorrection = ensure("ColorCorrectionEffect", "NimbusColor")
-	setProps(colorCorrection, {
-		Enabled = true,
-		Brightness = 0.02,
-		Contrast = 0.1,
-		Saturation = 0.18,
-		TintColor = Color3.fromRGB(255, 246, 240),
-	})
-
-	-- Very subtle far blur: distant clouds soften, everything near the player stays sharp.
-	local dof = ensure("DepthOfFieldEffect", "NimbusDepthOfField")
-	setProps(dof, {
-		Enabled = true,
-		FarIntensity = 0.15,
-		NearIntensity = 0,
-		FocusDistance = 120,
-		InFocusRadius = 90,
-	})
-
-	-- Global physics / world rules. StreamingEnabled is deliberately left alone (false).
+-- Global physics / world rules. StreamingEnabled is deliberately left alone (false).
+function LightingService.ApplyWorldRules()
 	setProps(Workspace, {
 		Gravity = Config.Physics.Gravity,
-		FallenPartsDestroyHeight = -2000,
+		FallenPartsDestroyHeight = -2000, -- far below the lobby kill plane and every course kill plane
 	})
 	setProps(Players, {
 		CharacterAutoLoads = true,
 	})
+end
+
+function LightingService.Init()
+	setProps(Lighting, LOOK.Lighting)
+
+	setProps(ensure("Atmosphere", "NimbusAtmosphere"), LOOK.Atmosphere)
+	setProps(ensure("Sky", "NimbusSky"), LOOK.Sky)
+	setProps(ensure("BloomEffect", "NimbusBloom"), LOOK.Bloom)
+	setProps(ensure("SunRaysEffect", "NimbusSunRays"), LOOK.SunRays)
+	setProps(ensure("ColorCorrectionEffect", "NimbusColor"), LOOK.ColorCorrection)
+	setProps(ensure("DepthOfFieldEffect", "NimbusDepthOfField"), LOOK.DepthOfField)
+
+	LightingService.ApplyWorldRules()
 end
 
 return LightingService

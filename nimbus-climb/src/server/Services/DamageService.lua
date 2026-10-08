@@ -8,6 +8,10 @@
 --   "granted" invulnerability (spawn, revive, finished pad). IgnoreIFrames bypasses only the hit
 --   window (damage-over-time such as storms), never granted invulnerability.
 -- * Extra (not in the ARCHITECTURE contract, used by PlayerService): ClearDowned(player).
+-- * v2: damage kinds come straight from Config.Damage.Kinds (Void, Lightning, SpinBar, Storm,
+--   Pendulum, Other); anything unknown is reported as "Other". Max health is owned by
+--   PlayerService (pet perks raise it), so this module never writes Humanoid.MaxHealth: heals,
+--   revives and health fractions are all relative to whatever the humanoid currently has.
 --
 -- Plain Lua 5.1-compatible syntax only.
 
@@ -44,8 +48,8 @@ local states = {}
 local initialized = false
 local damageRemote = nil
 
-local kindSet = {}
-for _, kind in ipairs(Config.Damage.Kinds) do
+local kindSet = { Other = true }
+for _, kind in ipairs(Config.Damage.Kinds or {}) do
 	kindSet[kind] = true
 end
 
@@ -520,7 +524,7 @@ function DamageService.Revive(player)
 	local humanoid = Util.GetHumanoid(player)
 	if humanoid and humanoid.Health > 0 then
 		restoreMovement(humanoid)
-		humanoid.MaxHealth = Config.Physics.MaxHealth
+		-- MaxHealth stays as PlayerService set it (it includes pet perks).
 		humanoid.Health = humanoid.MaxHealth * Config.Damage.ReviveHealthFraction
 	end
 	DamageService.GrantInvulnerability(player, REVIVE_IFRAMES)

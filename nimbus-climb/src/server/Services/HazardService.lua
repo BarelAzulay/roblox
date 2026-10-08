@@ -28,9 +28,14 @@ local Workspace = game:GetService("Workspace")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Config = require(Shared.Config)
-local Theme = require(Shared.Theme)
 local Util = require(Shared.Util)
 local DamageService = require(script.Parent.DamageService)
+
+-- Theme is only used for its in-world palette; a broken UI kit must never take the hazards down.
+local themeOk, Theme = pcall(require, Shared.Theme)
+if not themeOk or type(Theme) ~= "table" then
+	Theme = {}
+end
 
 local HazardService = {}
 
@@ -52,6 +57,7 @@ local PLATE_FADE_OUT = 0.45
 local PLATE_PRESS_DEPTH = 0.18 -- how far a plate sinks when stood on
 local HITTER_DEBOUNCE = 0.35 -- per player, per bar (DamageService i-frames do the rest)
 local HITTER_MARGIN = 0.3 -- studs the overlap poll grows a bar by
+local HITTER_NEAR_MARGIN = 10 -- bars with no player this close (beyond their own radius) are not polled
 local SPINBAR_KNOCKBACK = 55
 local PENDULUM_KNOCKBACK = 55
 local BOUNCE_DEBOUNCE = 0.3
@@ -60,12 +66,12 @@ local BOLT_HEIGHT = 90
 local BOLT_SEGMENTS = 8
 
 -- WindGust
-local WIND_BLOW_TIME = 1.5 -- seconds the push lasts after the warning
+local WIND_BLOW_TIME = 1.5 -- default seconds the push lasts after the warning (optional Duration attribute)
 local WIND_RAMP_IN = 0.3 -- push strength fades in over this long ...
 local WIND_RAMP_OUT = 0.4 -- ... and out over this long
 local WIND_MAX_FORCE = 40 -- hard cap on the Force attribute (studs/s)
-local WIND_MAX_ACCEL = 260 -- studs/s^2; strong enough to beat the Humanoid's ground grip
-local WIND_GAIN = 9 -- 1/s: acceleration = (ceiling - speed along wind) * gain, then clamped
+local WIND_MAX_ACCEL = 480 -- studs/s^2; has to beat the Humanoid's ground controller to shove a standing player
+local WIND_GAIN = 18 -- 1/s: acceleration = (ceiling - speed along wind) * gain, then clamped
 local WIND_STREAKS = 10 -- pooled streak parts per gust volume
 local WIND_WARN_STREAKS = 4 -- how many of them show during the warning
 
@@ -76,6 +82,7 @@ local CANNON_STAND_SLACK = 5 -- still counts as "on the pad" this far beyond its
 local CANNON_LANDING_GRACE = 0.8 -- extra protection after FlightTime for the touchdown
 local CANNON_MAX_SPEED = 260 -- sanity cap for a broken Target / FlightTime
 local CANNON_DEFAULT_FLIGHT = 1.6
+local CANNON_MAX_LATENCY = 0.3 -- seconds of lag the launch compensates for at most
 
 ----------------------------------------------------------------------
 -- Palette: calm, readable colours (Theme.World when present, local fallbacks otherwise)
@@ -89,8 +96,19 @@ local function colorOr(value, fallback)
 	return fallback
 end
 
+-- Pulls a colour away from full saturation / full brightness (hazard glows must stay calm).
+local function calm(color)
+	local ok, h, s, v = pcall(function()
+		return color:ToHSV()
+	end)
+	if not ok then
+		return color
+	end
+	return Color3.fromHSV(h, math.min(s, 0.72), math.min(v, 0.86))
+end
+
 local PAL = {}
-PAL.Warn = colorOr(WORLD.HazardGlow, Color3.fromRGB(204, 84, 100))
+PAL.Warn = calm(colorOr(WORLD.HazardGlow, Color3.fromRGB(204, 84, 100)))
 PAL.WarnFill = PAL.Warn:Lerp(Color3.fromRGB(236, 170, 160), 0.3)
 PAL.BoltCore = Color3.fromRGB(210, 222, 244) -- soft blue-white, never pure white
 PAL.BoltGlow = Color3.fromRGB(118, 110, 204)
@@ -514,12 +532,37 @@ local function registerHit(ctx, hitter, player)
 end
 
 local function pollHitters(ctx)
+	-- Cheap early-out: collect the living roots once, then only run the (relatively expensive) box
+	-- query for bars that have a player within reach.
+	local roots = {}
+	for _, player in ipairs(Players:GetPlayers()) do
+		local root = getLivingRoot(player)
+		if root then
+			table.insert(roots, root.Position)
+		end
+	end
+	if #roots == 0 then
+		return
+	end
 	for _, hitter in ipairs(ctx.hitters) do
 		local part = hitter.part
 		if part.Parent then
-			local size = part.Size + Vector3.new(HITTER_MARGIN, HITTER_MARGIN, HITTER_MARGIN)
-			for _, player in ipairs(playersInBox(ctx, part.CFrame, size)) do
-				registerHit(ctx, hitter, player)
+			local reach = part.Size.Magnitude / 2 + HITTER_NEAR_MARGIN
+			local reach2 = reach * reach
+			local near = false
+			local centre = part.Position
+			for _, position in ipairs(roots) do
+				local d = position - centre
+				if d:Dot(d) <= reach2 then
+					near = true
+					break
+				end
+			end
+			if near then
+				local size = part.Size + Vector3.new(HITTER_MARGIN, HITTER_MARGIN, HITTER_MARGIN)
+				for _, player in ipairs(playersInBox(ctx, part.CFrame, size)) do
+					registerHit(ctx, hitter, player)
+				end
 			end
 		end
 	end
@@ -738,7 +781,7 @@ local function windEnvelope(ctx, wind)
 		return 0
 	end
 	local t = ctx.clock - wind.phaseClock
-	local env = math.min(1, t / WIND_RAMP_IN, (WIND_BLOW_TIME - t) / WIND_RAMP_OUT)
+	local env = math.min(1, t / WIND_RAMP_IN, (wind.blow - t) / WIND_RAMP_OUT)
 	if env < 0 then
 		env = 0
 	end
@@ -1332,7 +1375,7 @@ end
 -- Behaviour: WindGust
 --   Tagged part = invisible volume. Attributes: Force (studs/s the gust can reach), Direction
 --   (unit vector, used horizontally), Interval (s between gust starts), Warning (s of faint
---   streaks before the push). Cycle: idle -> warning (hint streaks) -> blow (WIND_BLOW_TIME s of
+--   streaks before the push). Cycle: idle -> warning (hint streaks) -> blow (Duration attr, default 1.5 s, of
 --   push + dense streaks) -> idle. No damage, ever. See the push note above releasePush.
 ----------------------------------------------------------------------
 local function windCycle(ctx, wind)
@@ -1344,7 +1387,7 @@ local function windCycle(ctx, wind)
 		return false
 	end
 	setWindPhase(ctx, wind, "blow")
-	if not waitActive(ctx, WIND_BLOW_TIME) then
+	if not waitActive(ctx, wind.blow) then
 		return false
 	end
 	setWindPhase(ctx, wind, "idle")
@@ -1367,7 +1410,7 @@ local function runWind(ctx, wind)
 		elseif result == false then
 			return
 		end
-		local rest = wind.interval + ctx.rng:NextNumber(-0.4, 0.4) - wind.warning - WIND_BLOW_TIME
+		local rest = wind.interval + ctx.rng:NextNumber(-0.4, 0.4) - wind.warning - wind.blow
 		if rest < 0.8 then
 			rest = 0.8
 		end
@@ -1391,6 +1434,7 @@ local function attachWindGust(ctx, part)
 		force = force,
 		interval = math.max(2.5, attrNumber(part, "Interval", 5)),
 		warning = math.max(0.5, attrNumber(part, "Warning", 1.5)),
+		blow = Util.Clamp(attrNumber(part, "Duration", WIND_BLOW_TIME), 0.6, 3), -- optional extra attribute
 		center = part.Position,
 		halfLen = halfLen,
 		phase = "idle",
@@ -1502,10 +1546,26 @@ local function releaseCannon(ctx, cannon)
 		Enum.EasingStyle.Elastic, Enum.EasingDirection.Out)
 end
 
+-- Where the rider's root really is when our velocity write reaches their client: the server sees a
+-- position that is up to one round trip old, and a walking rider keeps moving until the write lands.
+local function launchOrigin(player, root)
+	local position = root.Position
+	local ok, ping = pcall(function()
+		return player:GetNetworkPing()
+	end)
+	if ok and type(ping) == "number" and ping == ping then
+		ping = Util.Clamp(ping, 0, CANNON_MAX_LATENCY)
+		local v = root.AssemblyLinearVelocity
+		position = position + Vector3.new(v.X, 0, v.Z) * ping
+	end
+	return position
+end
+
 local function launchPlayer(ctx, cannon, player, root)
 	local gravity = Workspace.Gravity
 	local flight = cannon.flight
-	local velocity = (cannon.target - root.Position) / flight + Vector3.new(0, gravity * flight / 2, 0)
+	local origin = launchOrigin(player, root)
+	local velocity = (cannon.target - origin) / flight + Vector3.new(0, gravity * flight / 2, 0)
 	if velocity.Magnitude > CANNON_MAX_SPEED then
 		velocity = velocity.Unit * CANNON_MAX_SPEED
 	end

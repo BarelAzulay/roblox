@@ -1,18 +1,25 @@
--- CourseBuilder: procedural co-op sky parkour for Nimbus Climb.
+-- CourseBuilder (v2): turns a CourseLayout layout into real, tagged, anchored Parts.
 --
---   Part 1  PURE layout generator  (Vector3 math + Config + Util.NewRng only, no Instances)
---   Part 2  Layout validator       (a proof that every hop is traversable)
---   Part 3  Builder                (turns a Layout into real, tagged Parts)
+--   CourseBuilder.GenerateLayout(difficultyId, seed) -> Layout        (re-exported from CourseLayout)
+--   CourseBuilder.ValidateLayout(layout) -> ok, problems              (re-exported from CourseLayout)
+--   CourseBuilder.Build(layout, origin, parent) -> CourseInfo
 --
+-- CourseInfo = {
+--   Folder, StartCFrame, Checkpoints = { [i] = { Part, Index, SpawnCFrame, Stage } }, Finish, KillY,
+--   TotalTokens (token VALUE total), TotalSteps, Archetype, Themes
+-- }
+--
+-- The layout schema is documented at the top of CourseLayout.lua; this file codes against it:
+--   * every layout position is origin-relative, so world = origin + position (Cannon Target, Pendulum
+--     Hinge, Moving EndOffset (a pure offset), Span / Plate / Zone positions ...)
+--   * a step's CFrame is CFrame.new(origin + Pos) * CFrame.Angles(0, rad(Yaw), 0), its local +Z is the
+--     direction of travel, and Pos is the centre of the TOP surface (the solid fills [Pos.Y - Size.Y, Pos.Y])
+--
+-- Look: a calm, slightly dim cloud world (Theme.World when it exists, own muted fallbacks otherwise).
+-- Platform tops are lighter than their sides, trims use the difficulty colour with a per-stage tint,
+-- every stage theme gets its own material/tint, every step kind its own props, and every stage a
+-- floating landmark. Neon is only used for small accents. Everything is Anchored; decor never collides.
 -- Plain Lua 5.1-compatible syntax only.
---
--- Physics model used by the generator AND the validator (so they can never disagree):
---   * a full-power jump from the edge of a platform to one `rise` studs higher stays airborne
---       airTime(rise) = (JumpPower + sqrt(JumpPower^2 - 2 g rise)) / g
---   * running (RunSpeed) covers  RunSpeed * airTime  studs, we keep a 10% safety factor and
---     1.5 studs of takeoff/landing margin:  runReach(rise) = 0.9 * RunSpeed * airTime - 1.5
---   * a dash adds Config.Physics.DashBonus studs, again with a 15% safety factor:
---       dashReach(rise) = 0.85 * (RunSpeed * airTime + DashBonus)
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CollectionService = game:GetService("CollectionService")
@@ -21,1372 +28,341 @@ local Workspace = game:GetService("Workspace")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Config = require(Shared.Config)
 local Theme = require(Shared.Theme)
-local Util = require(Shared.Util)
+local CourseLayout = require(script.Parent.CourseLayout)
 
 local CourseBuilder = {}
+CourseBuilder.GenerateLayout = CourseLayout.GenerateLayout
+CourseBuilder.ValidateLayout = CourseLayout.ValidateLayout
+CourseBuilder.Stats = CourseLayout.Stats
 
-local P = Config.Physics
 local Tags = Config.Tags
+local Phys = Config.Physics
+
+local rad, sin, cos, pi = math.rad, math.sin, math.cos, math.pi
+local floor, ceil, max, min, abs, sqrt = math.floor, math.ceil, math.max, math.min, math.abs, math.sqrt
+local atan2 = math.atan2 or function(y, x)
+	return math.atan(y, x)
+end
+
+local PART_LIMIT = 2450 -- total parts we aim for (tokens included); decor shrinks to stay below it
+local TOKEN_PARTS = 7 -- rough number of parts one TokenService token is made of
+local MIN_SIZE = 0.05 -- smallest part dimension Roblox accepts everywhere
+local EMPTY = {}
+local SMOOTH = Enum.SurfaceType.Smooth
+local MAT = Enum.Material
 
 ----------------------------------------------------------------------
--- Constants
+-- Palette (Theme.World when present, muted fallbacks otherwise)
 ----------------------------------------------------------------------
-local TH = 2 -- thickness (Size.Y) of every platform
-local START_SIZE = 28
-local CHECKPOINT_SIZE = 16
-local FINISH_SIZE = 32
-local LATERAL_LIMIT = 35 -- hard limit for |Pos.X| (validator)
-local LATERAL_SOFT = 32 -- generator keeps centres inside this
-local MIN_OVERLAP = 3 -- straight hops keep at least this much X overlap
-local PLATE_OVERLAP = 5.5 -- plate bridges need a wider straight overlap for the span
-local MAX_DROP = 4
-local SIDE_SIZE = 7 -- plate side platforms are SIDE_SIZE wide
-local SPAN_WIDTH = 4.5
-local SPAN_THICKNESS = 1
-local PLATE_SIZE = 4
-local PLATE_HEIGHT = 0.5
-local EPS = 0.01
+local function rgb(r, g, b)
+	return Color3.fromRGB(r, g, b)
+end
 
--- Stage theme schedules (index = stage). The last stage is always the "mix" finale.
-local SCHEDULES = {
-	Breeze = { "plain", "bounce", "moving", "mix" },
-	Gale = { "plain", "bounce", "moving", "spin", "plates", "mix" },
-	Thunderstorm = { "plain", "vanish", "moving", "spin", "storm", "plates", "lightning", "mix" },
+local WORLD = Theme.World
+if type(WORLD) ~= "table" then
+	WORLD = {}
+end
+
+local function worldColor(key, fallback)
+	local v = WORLD[key]
+	if typeof(v) == "Color3" then
+		return v
+	end
+	return fallback
+end
+
+local C = {
+	Top = worldColor("CloudTop", rgb(206, 218, 238)), -- platform tops
+	Side = worldColor("CloudSide", rgb(148, 166, 204)), -- platform bodies
+	Shadow = worldColor("CloudShadow", rgb(102, 120, 160)),
+	Hazard = worldColor("Hazard", rgb(158, 64, 92)),
+	HazardGlow = worldColor("HazardGlow", rgb(214, 100, 120)),
+	Checkpoint = worldColor("Checkpoint", rgb(66, 172, 154)),
+	Token = worldColor("Token", rgb(238, 196, 88)),
+	Ink = rgb(30, 38, 70), -- text outlines, sign strokes
+	Panel = rgb(34, 44, 86), -- sign boards
+	Storm = rgb(58, 64, 94), -- rain clouds
+	Text = rgb(242, 246, 252), -- soft white for text only
+	Gold = rgb(222, 184, 98), -- dash hints, finish
+	Brass = rgb(196, 156, 82),
+	Iron = rgb(74, 80, 104),
+	Rock = rgb(88, 84, 104),
+	Lava = rgb(236, 120, 70),
+	Wind = rgb(176, 214, 232),
+	Rainbow = {
+		rgb(222, 112, 126),
+		rgb(228, 160, 96),
+		rgb(226, 204, 108),
+		rgb(112, 196, 140),
+		rgb(104, 168, 224),
+		rgb(160, 130, 222),
+	},
 }
 
-local THEME_NAMES = {
-	plain = "Cloud Steps",
-	bounce = "Bouncy Meadow",
-	moving = "Drifting Clouds",
-	vanish = "Fading Puffs",
-	spin = "Whirlwind Alley",
-	storm = "Rain Run",
-	lightning = "Thunder Ridge",
-	plates = "Teamwork Chasm",
-	mix = "Skybreaker",
+-- per-stage tint index 1..8 (CourseLayout.Stages[k].Tint); trims lean towards it
+local STAGE_TINTS = {
+	rgb(112, 184, 214),
+	rgb(214, 140, 164),
+	rgb(226, 184, 104),
+	rgb(150, 128, 208),
+	rgb(108, 190, 152),
+	rgb(224, 128, 102),
+	rgb(104, 148, 224),
+	rgb(188, 150, 214),
 }
 
--- Per-tier (1 = Breeze, 2 = Gale, 3 = Thunderstorm) hazard numbers.
-local MIX_FEATURES = {
-	{ "Bounce", "Moving", "Vanishing" },
-	{ "Bounce", "Moving", "SpinBarPlatform", "Vanishing", "StormPlatform" },
-	{ "Moving", "SpinBarPlatform", "Vanishing", "StormPlatform", "LightningPlatform", "Bounce" },
+-- colours of the co-op bridges (BridgeNumber picks one)
+local BRIDGE_COLORS = {
+	rgb(214, 120, 176),
+	rgb(104, 196, 222),
+	rgb(132, 204, 130),
+	rgb(226, 178, 84),
 }
-local SPIN_SPEED = { { 55, 75 }, { 70, 100 }, { 95, 135 } } -- deg/s
-local SPIN_DAMAGE = { 10, 15, 20 }
-local STORM_DPS = { 5, 8, 12 }
-local LIGHTNING_DAMAGE = { 18, 24, 30 }
-local LIGHTNING_INTERVAL = { 5.5, 4.5, 3.8 }
-local LIGHTNING_WARNING = { 1.6, 1.3, 1.1 }
-local VANISH_DELAY = { 1.4, 1.0, 0.8 }
-local VANISH_RETURN = { 3.0, 3.5, 4.0 }
-local BOUNCE_POWER = { 70, 74, 78 }
--- Fixed horizontal speed (studs/s) a moving player leaves a pad with, so walkers and runners
--- cover the same distance. HazardService applies it along the player's heading.
-local BOUNCE_SPEED = { 27, 24, 22 }
-local MOVE_WIDTH = { { 5, 7 }, { 6, 9 }, { 7, 10 } } -- studs of travel
-local MOVE_PERIOD = { { 3.5, 4.2 }, { 2.8, 3.6 }, { 2.6, 3.2 } } -- seconds, one way
 
-local STATIC_PREV = { Platform = true, Checkpoint = true, Start = true }
-local FREE_FORM = { -- kinds that may be placed on a diagonal hop
-	Platform = true,
-	Bounce = true,
-	Vanishing = true,
-	SpinBarPlatform = true,
-	StormPlatform = true,
-	LightningPlatform = true,
-	Checkpoint = true,
-	Finish = true,
-}
-local REGULAR_KINDS = {
-	Platform = true,
-	Moving = true,
-	Vanishing = true,
-	Bounce = true,
-	SpinBarPlatform = true,
-	StormPlatform = true,
-	LightningPlatform = true,
-	PlateBridge = true,
-	DashGap = true,
+-- how each stage theme dresses its platforms: Hue = tint pulled into the cloud colours (Top / Side are
+-- the pull strengths), Mat = side material, TopMat = top material
+local THEME_LOOK = {
+	Plain = { Hue = rgb(190, 200, 224), Top = 0.0, Side = 0.0 },
+	Stones = { Hue = rgb(178, 198, 226), Top = 0.12, Side = 0.2 },
+	Beams = { Hue = rgb(210, 172, 128), Top = 0.42, Side = 0.5, Mat = MAT.WoodPlanks, TopMat = MAT.WoodPlanks },
+	Bounce = { Hue = rgb(122, 204, 164), Top = 0.28, Side = 0.34 },
+	Moving = { Hue = rgb(116, 184, 232), Top = 0.28, Side = 0.34 },
+	Spin = { Hue = rgb(196, 124, 156), Top = 0.26, Side = 0.34 },
+	Storm = { Hue = rgb(70, 78, 108), Top = 0.5, Side = 0.58, Mat = MAT.Slate },
+	Lightning = { Hue = rgb(142, 120, 196), Top = 0.4, Side = 0.5, Mat = MAT.Slate },
+	Vanish = { Hue = rgb(196, 212, 236), Top = 0.2, Side = 0.2 },
+	Cannon = { Hue = rgb(148, 150, 164), Top = 0.4, Side = 0.5, Mat = MAT.Concrete },
+	Wind = { Hue = rgb(176, 218, 230), Top = 0.3, Side = 0.3 },
+	Pendulum = { Hue = rgb(206, 170, 112), Top = 0.32, Side = 0.4 },
+	Plates = { Hue = rgb(132, 150, 214), Top = 0.3, Side = 0.38 },
+	DashGap = { Hue = rgb(224, 192, 112), Top = 0.3, Side = 0.36 },
+	Gauntlet = { Hue = rgb(104, 96, 112), Top = 0.46, Side = 0.55, Mat = MAT.Slate },
 }
 
 ----------------------------------------------------------------------
--- Pure helpers
+-- Small geometry helpers
 ----------------------------------------------------------------------
-local function snap(v)
-	return math.floor(v * 2 + 0.5) / 2
-end
-
-local function tierOf(diff)
-	for i, d in ipairs(Config.Difficulties) do
-		if d.Id == diff.Id then
-			return math.min(i, 3)
-		end
+-- CFrame whose local X axis points along `dir` (cylinder axis), keeping a stable roll.
+local function axisCF(pos, dir)
+	local d = dir.Unit
+	local up = Vector3.new(0, 1, 0)
+	if abs(d.Y) > 0.98 then
+		up = Vector3.new(0, 0, 1)
 	end
-	return 1
+	local u = (up - d * d:Dot(up)).Unit
+	return CFrame.fromMatrix(pos, d, u)
 end
 
--- Seconds a full jump lands `rise` studs higher (descending branch). Drops are treated as flat.
-local function airTime(rise)
-	if rise < 0 then
-		rise = 0
-	end
-	local disc = P.JumpPower * P.JumpPower - 2 * P.Gravity * rise
-	if disc < 0 then
-		return 0
-	end
-	return (P.JumpPower + math.sqrt(disc)) / P.Gravity
+local function stepFrame(ctx, step)
+	return CFrame.new(ctx.Origin + step.Pos) * CFrame.Angles(0, rad(step.Yaw or 0), 0)
 end
 
-local function runReach(rise)
-	return 0.9 * P.RunSpeed * airTime(rise) - 1.5
+local function forwardOf(step)
+	local a = rad(step.Yaw or 0)
+	return Vector3.new(sin(a), 0, cos(a))
 end
 
-local function dashReach(rise)
-	return 0.85 * (P.RunSpeed * airTime(rise) + P.DashBonus)
+local function yawOf(dir)
+	return atan2(dir.X, dir.Z)
 end
 
--- Allowed dash-gap range for a difficulty (defaults for difficulties that do not define one).
-local function dashRange(diff)
-	local lo = diff.DashGapMin or 15
-	local hi = diff.DashGapMax or 19
-	hi = math.min(hi, 0.85 * P.MaxDashGap)
-	lo = math.max(lo, P.MaxRunGap * 0.75 + 0.5)
-	if lo > hi then
-		lo = hi
-	end
-	return lo, hi
-end
-
--- Shortest time a vanishing cloud must stay solid so a player can cross it and jump on.
-local function minVanishDelay(size)
-	local diag = math.sqrt(size.X * size.X + size.Z * size.Z)
-	return 0.3 + diag / P.RunSpeed
-end
-
--- Axis-aligned box of a step including the sweep of moving clouds (X only).
-local function stepBox(step)
-	local x0 = step.Pos.X
-	local x1 = x0
-	local h = step.Hazard
-	if step.Kind == "Moving" and h and h.EndOffset then
-		x1 = x0 + h.EndOffset.X
-	end
-	if x1 < x0 then
-		x0, x1 = x1, x0
-	end
-	local hx = step.Size.X / 2
-	local hz = step.Size.Z / 2
-	return {
-		x0 = x0 - hx,
-		x1 = x1 + hx,
-		z0 = step.Pos.Z - hz,
-		z1 = step.Pos.Z + hz,
-		y0 = step.Pos.Y - step.Size.Y,
-		y1 = step.Pos.Y,
-		cx0 = x0,
-		cx1 = x1,
-	}
-end
-
--- Box of a plain slab given the centre of its top surface.
-local function slabBox(pos, sx, sy, sz)
-	return {
-		x0 = pos.X - sx / 2,
-		x1 = pos.X + sx / 2,
-		z0 = pos.Z - sz / 2,
-		z1 = pos.Z + sz / 2,
-		y0 = pos.Y - sy,
-		y1 = pos.Y,
-		cx0 = pos.X,
-		cx1 = pos.X,
-	}
-end
-
--- Signed gap along one axis: > 0 separated by that much, <= 0 overlapping.
-local function axisGap(a0, a1, b0, b1)
-	if b0 >= a1 then
-		return b0 - a1
-	elseif a0 >= b1 then
-		return a0 - b1
-	end
-	return -(math.min(a1, b1) - math.max(a0, b0))
-end
-
--- Euclidean edge-to-edge gap between two footprints in the XZ plane (0 when they overlap).
-local function footGap(a, b)
-	local dx = math.max(0, axisGap(a.x0, a.x1, b.x0, b.x1))
-	local dz = math.max(0, axisGap(a.z0, a.z1, b.z0, b.z1))
-	return math.sqrt(dx * dx + dz * dz)
-end
-
--- Box of a step if it were frozen with its centre at x (used to test the ends of a sweep).
-local function boxAtX(step, x)
-	local hx = step.Size.X / 2
-	local hz = step.Size.Z / 2
-	return {
-		x0 = x - hx,
-		x1 = x + hx,
-		z0 = step.Pos.Z - hz,
-		z1 = step.Pos.Z + hz,
-		y0 = step.Pos.Y - step.Size.Y,
-		y1 = step.Pos.Y,
-	}
-end
-
--- X range a step's centre travels over (equal ends for static steps).
-local function centreRange(step)
-	local lo = step.Pos.X
-	local hi = lo
-	if step.Kind == "Moving" and step.Hazard and step.Hazard.EndOffset then
-		hi = lo + step.Hazard.EndOffset.X
-	end
-	if hi < lo then
-		lo, hi = hi, lo
-	end
-	return lo, hi
+local function tintOf(index)
+	local n = #STAGE_TINTS
+	return STAGE_TINTS[(((index or 1) - 1) % n) + 1]
 end
 
 ----------------------------------------------------------------------
--- Part 1: layout generator
+-- Part factory
 ----------------------------------------------------------------------
-local function featuresFor(themeId, tier)
-	if themeId == "bounce" then
-		return { "Bounce" }
-	elseif themeId == "moving" then
-		return { "Moving" }
-	elseif themeId == "vanish" then
-		return { "Vanishing" }
-	elseif themeId == "spin" then
-		return { "SpinBarPlatform" }
-	elseif themeId == "storm" then
-		return { "StormPlatform" }
-	elseif themeId == "lightning" then
-		return { "LightningPlatform" }
-	elseif themeId == "plates" then
-		if tier >= 3 then
-			return { "Vanishing", "Moving" }
-		end
-		return { "Moving", "Bounce" }
-	elseif themeId == "mix" then
-		return MIX_FEATURES[tier] or MIX_FEATURES[1]
-	end
-	return {}
-end
-
-function CourseBuilder.GenerateLayout(difficultyId, seed)
-	local diff = Config.GetDifficulty(difficultyId) or Config.Difficulties[1]
-	seed = seed or 0
-	local rng = Util.NewRng(seed)
-	local tier = tierOf(diff)
-
-	local function F(a, b)
-		if b - a < 1e-6 then
-			return a
-		end
-		return rng:Float(a, b)
-	end
-	local function I(a, b)
-		if b <= a then
-			return a
-		end
-		return rng:Int(a, b)
-	end
-
-	local riseCap = math.min(diff.RiseMax, P.JumpHeight * 0.7)
-	local dashLo, dashHi = dashRange(diff)
-	local schedule = SCHEDULES[diff.Id] or SCHEDULES.Breeze
-	local stageCount = diff.Stages
-	local stepsLo = diff.StepsPerStage[1]
-	local stepsHi = diff.StepsPerStage[2]
-
-	local steps = {}
-	local layout = {
-		DifficultyId = diff.Id,
-		Seed = seed,
-		Steps = steps,
-		Checkpoints = {},
-		Stages = {},
-		TotalTokens = 0,
-	}
-
-	steps[1] = {
-		Index = 1,
-		Stage = 0,
-		Kind = "Start",
-		Pos = Vector3.new(0, 0, 0),
-		Size = Vector3.new(START_SIZE, TH, START_SIZE),
-	}
-
-	-- Sizes -----------------------------------------------------------
-	local function sizeFor(kind, forceLo)
-		local pmin, pmax = diff.PlatformMin, diff.PlatformMax
-		local lo = pmin
-		if kind == "Moving" or kind == "Bounce" or kind == "SpinBarPlatform" or kind == "StormPlatform" then
-			lo = pmin + (pmax - pmin) * 0.45
-		elseif kind == "LightningPlatform" then
-			lo = pmin + (pmax - pmin) * 0.3
-		end
-		if forceLo and forceLo > lo then
-			lo = forceLo
-		end
-		if lo > pmax then
-			lo = pmax
-		end
-		local function pick()
-			return Util.Clamp(snap(F(lo, pmax)), lo, pmax)
-		end
-		return pick(), pick()
-	end
-
-	-- Vertical step ---------------------------------------------------
-	local function pickRise(kind, prevY)
-		if kind == "PlateBridge" then
-			return 0
-		elseif kind == "DashGap" then
-			if rng:Chance(0.5) then
-				return F(0, 1.5)
-			end
-			return 0
-		end
-		local roll = F(0, 1)
-		local r
-		if roll < 0.2 then
-			r = 0
-		elseif roll < 0.72 then
-			r = F(0.6, riseCap * 0.75)
-		elseif roll < 0.93 then
-			r = F(riseCap * 0.6, riseCap)
-		else
-			r = -F(0.5, 3)
-		end
-		if kind == "Moving" or kind == "SpinBarPlatform" or kind == "Vanishing" then
-			r = math.min(r, 2.5)
-		elseif kind == "Finish" then
-			r = Util.Clamp(r, 0, 2)
-		end
-		if r < 0 and prevY < 3 then
-			r = 0
-		end
-		if prevY + r < -6 then
-			r = 0
-		end
-		if r < -MAX_DROP then
-			r = -MAX_DROP
-		end
-		-- keep the planned gap range reachable
-		while r > 0 and runReach(r) - 0.3 < diff.GapMin do
-			r = r - 0.25
-		end
-		if r < 0.05 and r > 0 then
-			r = 0
-		end
-		return r
-	end
-
-	local function pickGap(kind, rise, progress)
-		if kind == "DashGap" or kind == "PlateBridge" then
-			return F(dashLo, dashHi)
-		end
-		local hi = math.min(diff.GapMax, runReach(rise) - 0.3)
-		local lo = diff.GapMin
-		if hi < lo then
-			hi = lo
-		end
-		local t = F(0.05, 0.55 + 0.45 * progress)
-		if kind == "Vanishing" or kind == "Moving" then
-			t = t * 0.8
-		end
-		return lo + (hi - lo) * t
-	end
-
-	-- Placement -------------------------------------------------------
-	-- spec: kind, stage, sx, sz, rise, gap, mode ("straight"|"diag"), sweep (signed X travel),
-	--       minOv, pull (bias towards the centre line)
-	local function appendStep(spec)
-		local prev = steps[#steps]
-		local pbox = stepBox(prev)
-		local sx, sz = spec.sx, spec.sz
-		local gap = spec.gap
-		local width = math.abs(spec.sweep or 0)
-		local x, z
-		local placed = false
-
-		if spec.mode == "diag" and width == 0 and prev.Kind ~= "Moving" and FREE_FORM[spec.kind] then
-			local theta = F(0.15, 0.6)
-			local gx = gap * math.sin(theta)
-			local gz = gap * math.cos(theta)
-			local off = prev.Size.X / 2 + gx + sx / 2
-			local sgn = 1
-			if rng:Chance(0.5) then
-				sgn = -1
-			end
-			if math.abs(prev.Pos.X + sgn * off) > LATERAL_SOFT then
-				sgn = -sgn
-			end
-			if math.abs(prev.Pos.X + sgn * off) <= LATERAL_SOFT then
-				x = prev.Pos.X + sgn * off
-				z = prev.Pos.Z + prev.Size.Z / 2 + gz + sz / 2
-				placed = true
-			end
-		end
-
-		if not placed then
-			z = prev.Pos.Z + prev.Size.Z / 2 + gap + sz / 2
-			local minOv = spec.minOv or MIN_OVERLAP
-			local W = (prev.Size.X + sx) / 2 - minOv
-			local lo = math.max(pbox.cx1 - W, -LATERAL_SOFT)
-			local hi = math.min(pbox.cx0 + W - width, LATERAL_SOFT - width)
-			if hi < lo then
-				local m = (lo + hi) / 2
-				lo, hi = m, m
-			end
-			local target = F(lo, hi)
-			local centre = Util.Clamp(0, lo, hi)
-			if spec.pull then
-				target = target * 0.3 + centre * 0.7
-			elseif math.abs(prev.Pos.X) > 16 then
-				target = target * 0.5 + centre * 0.5
-			end
-			x = target
-			if (spec.sweep or 0) < 0 then
-				x = target + width -- start at the right-hand end, travel left
-			end
-		end
-
-		local step = {
-			Index = #steps + 1,
-			Stage = spec.stage,
-			Kind = spec.kind,
-			Pos = Vector3.new(x, prev.Pos.Y + spec.rise, z),
-			Size = Vector3.new(sx, TH, sz),
-			Gap = gap,
-		}
-		steps[#steps + 1] = step
-		return step
-	end
-
-	-- Hazard parameter builders --------------------------------------
-	local function hazardFor(step)
-		local kind = step.Kind
-		local minDim = math.min(step.Size.X, step.Size.Z)
-		if kind == "SpinBarPlatform" then
-			local speed = F(SPIN_SPEED[tier][1], SPIN_SPEED[tier][2])
-			if rng:Chance(0.5) then
-				speed = -speed
-			end
-			local count = 1
-			if tier >= 3 and minDim >= 8 and rng:Chance(0.35) then
-				count = 2
-			end
-			return {
-				Speed = math.floor(speed),
-				Damage = SPIN_DAMAGE[tier],
-				Length = math.max(4, math.floor((minDim - 3) * 2) / 2),
-				Count = count,
-			}
-		elseif kind == "StormPlatform" then
-			return { DPS = STORM_DPS[tier], Height = 10 }
-		elseif kind == "LightningPlatform" then
-			local radius = Util.Clamp(minDim * 0.34, 2.2, 4.2)
-			local maxOffX = math.max(0, step.Size.X / 2 - radius - 0.3)
-			local maxOffZ = math.max(0, step.Size.Z / 2 - radius - 0.3)
-			return {
-				Damage = LIGHTNING_DAMAGE[tier],
-				Interval = LIGHTNING_INTERVAL[tier],
-				Warning = LIGHTNING_WARNING[tier],
-				Radius = radius,
-				ZoneOffset = Vector3.new(F(-maxOffX, maxOffX), 0, F(-maxOffZ, maxOffZ)),
-			}
-		elseif kind == "Vanishing" then
-			local delay = math.max(VANISH_DELAY[tier], minVanishDelay(step.Size) + 0.05)
-			return { VanishDelay = math.ceil(delay * 20) / 20, ReturnDelay = VANISH_RETURN[tier] }
-		elseif kind == "Bounce" then
-			return {
-				Power = BOUNCE_POWER[tier],
-				LaunchSpeed = BOUNCE_SPEED[tier],
-				PadSize = Util.Clamp(minDim * 0.42, 3, 4.6),
-			}
-		end
-		return nil
-	end
-
-	-- Plate bridge geometry (span + two side platforms with plates) ---
-	local bridgeCount = 0
-	local function attachBridge(step, prev)
-		bridgeCount = bridgeCount + 1
-		local ovLo = math.max(prev.Pos.X - prev.Size.X / 2, step.Pos.X - step.Size.X / 2)
-		local ovHi = math.min(prev.Pos.X + prev.Size.X / 2, step.Pos.X + step.Size.X / 2)
-		local spanX = (ovLo + ovHi) / 2
-		local zFront = prev.Pos.Z + prev.Size.Z / 2
-		local zBack = step.Pos.Z - step.Size.Z / 2
-		local hazard = {
-			BridgeNumber = bridgeCount,
-			Span = {
-				Pos = Vector3.new(spanX, prev.Pos.Y, (zFront + zBack) / 2),
-				Size = Vector3.new(SPAN_WIDTH, SPAN_THICKNESS, (zBack - zFront) + 0.6),
-			},
-			Sides = {},
-		}
-		local sideLo = diff.GapMin
-		local sideHi = math.max(sideLo, math.min(diff.GapMax, runReach(0)) - 1)
-		local prevSign = nil
-		for _, anchor in ipairs({ prev, step }) do
-			local sgap = F(sideLo, sideHi)
-			local sgn
-			if anchor.Pos.X > 8 then
-				sgn = -1
-			elseif anchor.Pos.X < -8 then
-				sgn = 1
-			else
-				sgn = 1
-				if rng:Chance(0.5) then
-					sgn = -1
-				end
-				if prevSign then
-					sgn = -prevSign -- put the two plates on opposite sides
-				end
-			end
-			prevSign = sgn
-			local sideZ = Util.Clamp(anchor.Size.Z, 6, 9)
-			local sx = anchor.Pos.X + sgn * (anchor.Size.X / 2 + sgap + SIDE_SIZE / 2)
-			local side = {
-				Pos = Vector3.new(sx, anchor.Pos.Y, anchor.Pos.Z),
-				Size = Vector3.new(SIDE_SIZE, TH, sideZ),
-				From = anchor.Index,
-				Gap = sgap,
-				Plate = {
-					Pos = Vector3.new(sx, anchor.Pos.Y + PLATE_HEIGHT, anchor.Pos.Z),
-					Size = Vector3.new(PLATE_SIZE, PLATE_HEIGHT, PLATE_SIZE),
-				},
-			}
-			hazard.Sides[#hazard.Sides + 1] = side
-		end
-		step.Hazard = hazard
-	end
-
-	-- Stages ----------------------------------------------------------
-	for stage = 1, stageCount do
-		local progress = 0
-		if stageCount > 1 then
-			progress = (stage - 1) / (stageCount - 1)
-		end
-		local themeId = schedule[((stage - 1) % #schedule) + 1]
-		if stage == stageCount and stageCount > 1 then
-			themeId = "mix"
-		end
-		local n = I(stepsLo, stepsHi)
-
-		-- 1. plan the kinds
-		local kinds = {}
-		for j = 1, n do
-			kinds[j] = "Platform"
-		end
-		local features = featuresFor(themeId, tier)
-		if #features > 0 and n >= 3 then
-			local p = Util.Clamp(0.25 + diff.HazardChance * 1.2, 0.3, 0.9)
-			if themeId == "plates" then
-				p = p * 0.45
-			elseif themeId == "mix" then
-				p = math.min(0.9, p + 0.1)
-			end
-			local count = 0
-			for j = 2, n do
-				if rng:Chance(p) then
-					kinds[j] = rng:Pick(features)
-					count = count + 1
-				end
-			end
-			local want = 2
-			if themeId == "plates" then
-				want = 1
-			end
-			local tries = 0
-			while count < want and tries < 30 do
-				local j = I(2, n)
-				if kinds[j] == "Platform" then
-					kinds[j] = rng:Pick(features)
-					count = count + 1
-				end
-				tries = tries + 1
-			end
-		end
-		for j = 2, n do
-			local k, pk = kinds[j], kinds[j - 1]
-			local stormy = (k == "StormPlatform" or k == "LightningPlatform")
-			local prevStormy = (pk == "StormPlatform" or pk == "LightningPlatform")
-			if (k == "Moving" and pk == "Moving")
-				or (stormy and prevStormy)
-				or (k == "SpinBarPlatform" and pk == "SpinBarPlatform" and tier < 3) then
-				kinds[j] = "Platform"
-			end
-		end
-		local wantPlate = false
-		if tier >= 2 and n >= 3 then
-			if themeId == "plates" then
-				wantPlate = true
-			elseif themeId == "mix" and rng:Chance(0.6) then
-				wantPlate = true
-			end
-		end
-		if wantPlate then
-			local k = I(2, n)
-			kinds[k] = "PlateBridge"
-			kinds[k - 1] = "Platform"
-		end
-		if stage >= 2 and (diff.DashGapChance or 0) > 0 then
-			for j = 1, n do
-				local prevOk = (j == 1) or kinds[j - 1] == "Platform"
-				if kinds[j] == "Platform" and prevOk and kinds[j + 1] ~= "PlateBridge"
-					and rng:Chance(diff.DashGapChance) then
-					kinds[j] = "DashGap"
-				end
-			end
-		end
-
-		-- 2. plan the sizes
-		local sizes = {}
-		for j = 1, n do
-			local forceLo = nil
-			if kinds[j] == "PlateBridge" or kinds[j + 1] == "PlateBridge" then
-				forceLo = 7
-			elseif kinds[j + 1] == "DashGap" then
-				forceLo = 6
-			end
-			local a, b = sizeFor(kinds[j], forceLo)
-			sizes[j] = { a, b }
-		end
-		sizes[n + 1] = { CHECKPOINT_SIZE, CHECKPOINT_SIZE }
-
-		-- 3. place
-		local firstIndex = #steps + 1
-		for j = 1, n + 1 do
-			local kind = "Checkpoint"
-			if j <= n then
-				kind = kinds[j]
-			end
-			local prev = steps[#steps]
-			local sx, sz = sizes[j][1], sizes[j][2]
-			local rise = pickRise(kind, prev.Pos.Y)
-			if kind == "Checkpoint" then
-				rise = Util.Clamp(rise, 0, riseCap * 0.7)
-			end
-			local sweep = nil
-
-			if kind == "Moving" then
-				local nxt = sizes[j + 1]
-				local pb = stepBox(prev)
-				local W = (prev.Size.X + sx) / 2 - MIN_OVERLAP
-				local Wn = (sx + nxt[1]) / 2 - MIN_OVERLAP
-				local maxW = math.min(2 * W - (pb.cx1 - pb.cx0), 2 * Wn) - 0.3
-				local wLo, wHi = MOVE_WIDTH[tier][1], MOVE_WIDTH[tier][2]
-				wHi = math.min(wHi, maxW)
-				if wHi < 3.5 then
-					kind = "Platform"
-				else
-					local w = F(math.min(wLo, wHi), wHi)
-					sweep = w
-					if rng:Chance(0.5) then
-						sweep = -w
-					end
-				end
-			end
-
-			local gap = pickGap(kind, rise, progress)
-			local mode = "straight"
-			if FREE_FORM[kind] and kind ~= "Checkpoint" and rng:Chance(0.45) then
-				mode = "diag"
-			end
-			local minOv = nil
-			if kind == "PlateBridge" then
-				minOv = PLATE_OVERLAP
-			end
-			local step = appendStep({
-				kind = kind,
-				stage = stage,
-				sx = sx,
-				sz = sz,
-				rise = rise,
-				gap = gap,
-				mode = mode,
-				sweep = sweep,
-				minOv = minOv,
-				pull = (kind == "Checkpoint"),
-			})
-
-			if kind == "Moving" then
-				step.Hazard = {
-					EndOffset = Vector3.new(sweep, 0, 0),
-					Period = F(MOVE_PERIOD[tier][1], MOVE_PERIOD[tier][2]),
-				}
-			elseif kind == "PlateBridge" then
-				attachBridge(step, prev)
-			else
-				step.Hazard = hazardFor(step)
-			end
-			if kind == "Checkpoint" then
-				layout.Checkpoints[stage] = step.Index
-			end
-		end
-		layout.Stages[stage] = {
-			Index = stage,
-			Theme = themeId,
-			Name = THEME_NAMES[themeId] or "Sky Climb",
-			FirstStep = firstIndex,
-			LastStep = #steps,
-		}
-	end
-
-	-- Finish ----------------------------------------------------------
-	do
-		local prev = steps[#steps]
-		local rise = pickRise("Finish", prev.Pos.Y)
-		local gap = pickGap("Finish", rise, 1)
-		local step = appendStep({
-			kind = "Finish",
-			stage = stageCount,
-			sx = FINISH_SIZE,
-			sz = FINISH_SIZE,
-			rise = rise,
-			gap = gap,
-			mode = "straight",
-			pull = true,
-		})
-		step.Hazard = nil
-	end
-
-	CourseBuilder._PlaceTokens(layout, rng, diff)
-	CourseBuilder._ComputeBounds(layout)
-	return layout
-end
-
-----------------------------------------------------------------------
--- Tokens + bounds (called at the end of GenerateLayout)
-----------------------------------------------------------------------
--- Every box that counts as solid geometry: steps (swept), plate spans and plate side platforms.
-local function collectBoxes(layout)
-	local boxes = {}
-	for i, s in ipairs(layout.Steps) do
-		local b = stepBox(s)
-		b.Tag = "step"
-		b.Id = i
-		boxes[#boxes + 1] = b
-		local h = s.Hazard
-		if s.Kind == "PlateBridge" and h then
-			if h.Span then
-				local sp = slabBox(h.Span.Pos, h.Span.Size.X, h.Span.Size.Y, h.Span.Size.Z)
-				sp.Tag = "span"
-				sp.Id = i
-				boxes[#boxes + 1] = sp
-			end
-			for _, side in ipairs(h.Sides or {}) do
-				local sb = slabBox(side.Pos, side.Size.X, side.Size.Y, side.Size.Z)
-				sb.Tag = "side"
-				sb.Id = i
-				sb.From = side.From
-				boxes[#boxes + 1] = sb
-			end
-		end
-	end
-	return boxes
-end
-
-function CourseBuilder._PlaceTokens(layout, rng, diff)
-	local steps = layout.Steps
-	local function F(a, b)
-		if b - a < 1e-6 then
-			return a
-		end
-		return rng:Float(a, b)
-	end
-	local function I(a, b)
-		if b <= a then
-			return a
-		end
-		return rng:Int(a, b)
-	end
-
-	local function tokenOffsets(step, risky)
-		local sx, sz = step.Size.X, step.Size.Z
-		local kind = step.Kind
-		local list = {}
-		local function add(x, y, z)
-			list[#list + 1] = Vector3.new(x, Util.Clamp(y, 3.1, 4.4), z)
-		end
-		if kind == "Bounce" then
-			add(0, 3.8, 0) -- right above the pad: the bounce carries you through it
-			return list
-		elseif kind == "Moving" then
-			add(step.Hazard.EndOffset.X / 2 + F(-1, 1), F(3.2, 4.2), F(-sz * 0.2, sz * 0.2))
-			return list
-		elseif (kind == "DashGap" or kind == "PlateBridge") and rng:Chance(0.65) then
-			-- a token hanging in the middle of the chasm
-			local prev = steps[step.Index - 1]
-			local ovLo = math.max(prev.Pos.X - prev.Size.X / 2, step.Pos.X - step.Size.X / 2)
-			local ovHi = math.min(prev.Pos.X + prev.Size.X / 2, step.Pos.X + step.Size.X / 2)
-			add((ovLo + ovHi) / 2 - step.Pos.X, F(3.6, 4.3), -(sz / 2 + step.Gap / 2))
-			return list
-		end
-		local y0 = F(3.2, 4.0)
-		if risky then
-			local side = I(1, 3)
-			if side == 1 then
-				add(F(-sx * 0.3, sx * 0.3), y0, sz / 2 - 0.5) -- forward edge
-			elseif side == 2 then
-				add(sx / 2 - 0.5, y0, F(-sz * 0.3, sz * 0.3))
-			else
-				add(-(sx / 2 - 0.5), y0, F(-sz * 0.3, sz * 0.3))
-			end
-			return list
-		end
-		local count = 1
-		if rng:Chance(0.3) then
-			count = I(2, 3)
-		end
-		local x0 = F(-sx * 0.2, sx * 0.2)
-		local z0 = F(-sz * 0.15, sz * 0.15)
-		for k = 1, count do
-			local z = Util.Clamp(z0 + (k - (count + 1) / 2) * 2.4, -(sz / 2 - 0.8), sz / 2 - 0.8)
-			local bump = 0
-			if count == 3 and k == 2 then
-				bump = 0.3
-			end
-			add(x0, y0 + bump, z)
-		end
-		return list
-	end
-
-	local total = 0
-	for stage = 1, #layout.Stages do
-		local info = layout.Stages[stage]
-		local cands = {}
-		for i = info.FirstStep, info.LastStep do
-			local s = steps[i]
-			if s.Kind ~= "Checkpoint" then
-				cands[#cands + 1] = s
-			end
-		end
-		if #cands < diff.TokensPerStage then
-			cands[#cands + 1] = steps[info.LastStep] -- tiny stages: the checkpoint carries one too
-		end
-		for i = #cands, 2, -1 do
-			local j = I(1, i)
-			cands[i], cands[j] = cands[j], cands[i]
-		end
-		local want = math.min(#cands, diff.TokensPerStage + I(0, 2))
-		local riskyCount = math.ceil(want * 0.4)
-		for k = 1, want do
-			local s = cands[k]
-			s.Tokens = tokenOffsets(s, k <= riskyCount)
-			total = total + #s.Tokens
-		end
-	end
-	layout.TotalTokens = total
-end
-
-function CourseBuilder._ComputeBounds(layout)
-	local minX, minY, minZ = math.huge, math.huge, math.huge
-	local maxX, maxY, maxZ = -math.huge, -math.huge, -math.huge
-	for _, b in ipairs(collectBoxes(layout)) do
-		minX = math.min(minX, b.x0)
-		minY = math.min(minY, b.y0)
-		minZ = math.min(minZ, b.z0)
-		maxX = math.max(maxX, b.x1)
-		maxY = math.max(maxY, b.y1)
-		maxZ = math.max(maxZ, b.z1)
-	end
-	-- headroom for arches, storm volumes and cloud puffs
-	layout.Bounds = {
-		Min = Vector3.new(minX, minY - 6, minZ),
-		Max = Vector3.new(maxX, maxY + 16, maxZ),
-	}
-end
-
-----------------------------------------------------------------------
--- Part 2: validator
-----------------------------------------------------------------------
-local KNOWN_KINDS = { Start = true, Finish = true, Checkpoint = true }
-for kind in pairs(REGULAR_KINDS) do
-	KNOWN_KINDS[kind] = true
-end
-
-function CourseBuilder.ValidateLayout(layout)
-	local problems = {}
-	local function bad(fmt, ...)
-		if #problems < 60 then
-			problems[#problems + 1] = string.format(fmt, ...)
-		end
-	end
-
-	if type(layout) ~= "table" or type(layout.Steps) ~= "table" then
-		return false, { "layout has no Steps table" }
-	end
-	local diff = Config.GetDifficulty(layout.DifficultyId)
-	if not diff then
-		return false, { "unknown difficulty " .. tostring(layout.DifficultyId) }
-	end
-	local steps = layout.Steps
-	local n = #steps
-	if n < 3 then
-		return false, { "layout has fewer than 3 steps" }
-	end
-
-	local riseCap = math.min(diff.RiseMax, P.JumpHeight * 0.7)
-	local dashLo, dashHi = dashRange(diff)
-
-	-- 1. structure + sizes --------------------------------------------
-	if steps[1].Kind ~= "Start" then
-		bad("first step must be Start, got %s", tostring(steps[1].Kind))
-	end
-	if steps[n].Kind ~= "Finish" then
-		bad("last step must be Finish, got %s", tostring(steps[n].Kind))
-	end
-	for i, s in ipairs(steps) do
-		if s.Index ~= i then
-			bad("step %d has Index %s", i, tostring(s.Index))
-		end
-		if not KNOWN_KINDS[s.Kind] then
-			bad("step %d has unknown Kind %s", i, tostring(s.Kind))
-		end
-		if not s.Pos or not s.Size then
-			bad("step %d is missing Pos/Size", i)
-			return false, problems
-		end
-		local sx, sz = s.Size.X, s.Size.Z
-		if s.Kind == "Start" then
-			if sx < 24 or sz < 24 then
-				bad("Start platform %.1fx%.1f is smaller than 24x24", sx, sz)
-			end
-		elseif s.Kind == "Finish" then
-			if sx < 28 or sz < 28 then
-				bad("Finish platform %.1fx%.1f is smaller than 28x28", sx, sz)
-			end
-		elseif s.Kind == "Checkpoint" then
-			if sx < 14 or sz < 14 then
-				bad("Checkpoint %d platform %.1fx%.1f is smaller than 14x14", i, sx, sz)
-			end
-		else
-			if sx < diff.PlatformMin - EPS or sx > diff.PlatformMax + EPS
-				or sz < diff.PlatformMin - EPS or sz > diff.PlatformMax + EPS then
-				bad("step %d (%s) size %.1fx%.1f outside [%s, %s]", i, s.Kind, sx, sz,
-					tostring(diff.PlatformMin), tostring(diff.PlatformMax))
-			end
-			if s.Kind == "PlateBridge" and (sx < 7 - EPS or sz < 7 - EPS) then
-				bad("PlateBridge step %d is smaller than 7x7", i)
-			end
-		end
-		if s.Pos.Y < -10 - EPS then
-			bad("step %d is lower than origin.Y - 10 (%.1f)", i, s.Pos.Y)
-		end
-		local lo, hi = centreRange(s)
-		if math.abs(lo) > LATERAL_LIMIT + EPS or math.abs(hi) > LATERAL_LIMIT + EPS then
-			bad("step %d wanders laterally to %.1f / %.1f (limit %d)", i, lo, hi, LATERAL_LIMIT)
-		end
-	end
-
-	-- 2. every consecutive pair is traversable -------------------------
-	for i = 2, n do
-		local prev, s = steps[i - 1], steps[i]
-		local pb, sb = stepBox(prev), stepBox(s)
-		if s.Pos.Z <= prev.Pos.Z or sb.z0 < pb.z1 + 0.5 then
-			bad("step %d does not progress towards +Z", i)
-		end
-
-		local pLo, pHi = centreRange(prev)
-		local sLo, sHi = centreRange(s)
-		local worst, best = 0, math.huge
-		for _, px in ipairs({ pLo, pHi }) do
-			for _, sx in ipairs({ sLo, sHi }) do
-				local g = footGap(boxAtX(prev, px), boxAtX(s, sx))
-				worst = math.max(worst, g)
-				best = math.min(best, g)
-			end
-		end
-		if worst - best > 0.05 then
-			bad("step %d: gap to step %d varies from %.2f to %.2f while clouds move", i, i - 1, best, worst)
-		end
-		if type(s.Gap) ~= "number" or math.abs(s.Gap - worst) > 0.05 then
-			bad("step %d: Gap field %s does not match geometry (%.2f)", i, tostring(s.Gap), worst)
-		end
-
-		local rise = s.Pos.Y - prev.Pos.Y
-		if rise > riseCap + EPS then
-			bad("step %d rises %.2f (cap %.2f)", i, rise, riseCap)
-		end
-		if rise < -MAX_DROP - EPS then
-			bad("step %d drops %.2f (limit -%d)", i, rise, MAX_DROP)
-		end
-
-		if s.Kind == "DashGap" or s.Kind == "PlateBridge" then
-			if worst < dashLo - EPS or worst > dashHi + EPS then
-				bad("step %d dash gap %.2f outside [%.1f, %.1f]", i, worst, dashLo, dashHi)
-			end
-			if worst > 0.85 * P.MaxDashGap + EPS then
-				bad("step %d dash gap %.2f exceeds 0.85 * MaxDashGap", i, worst)
-			end
-			if worst <= P.MaxRunGap * 0.75 then
-				bad("step %d dash gap %.2f does not need a dash", i, worst)
-			end
-			if rise < -EPS or rise > 2 + EPS then
-				bad("step %d dash gap rise %.2f outside [0, 2]", i, rise)
-			end
-			if worst > dashReach(rise) + EPS then
-				bad("step %d dash gap %.2f exceeds dash reach %.2f", i, worst, dashReach(rise))
-			end
-			if not STATIC_PREV[prev.Kind] then
-				bad("step %d needs a static run-up platform, got %s", i, tostring(prev.Kind))
-			end
-			if math.min(prev.Size.X, prev.Size.Z) < 5 then
-				bad("step %d run-up platform is too small for the DASH sign", i)
-			end
-		else
-			if worst < diff.GapMin - EPS or worst > diff.GapMax + EPS then
-				bad("step %d gap %.2f outside [%s, %s]", i, worst, tostring(diff.GapMin), tostring(diff.GapMax))
-			end
-			if worst > runReach(rise) + EPS then
-				bad("step %d gap %.2f exceeds run-jump reach %.2f for rise %.2f", i, worst, runReach(rise), rise)
-			end
-		end
-	end
-
-	-- 3. hazards ---------------------------------------------------------
-	for i, s in ipairs(steps) do
-		local h = s.Hazard
-		local minDim = math.min(s.Size.X, s.Size.Z)
-		if s.Kind == "Moving" then
-			if not h or not h.EndOffset or type(h.Period) ~= "number" then
-				bad("Moving step %d lacks EndOffset/Period", i)
-			else
-				local dx = h.EndOffset.X
-				if math.abs(dx) < 3.5 or math.abs(h.EndOffset.Y) > EPS or math.abs(h.EndOffset.Z) > EPS then
-					bad("Moving step %d must travel >= 3.5 studs along X only", i)
-				end
-				if h.Period < 2 or math.abs(dx) / h.Period > 4.2 then
-					bad("Moving step %d is too fast (%.1f studs in %.1fs)", i, math.abs(dx), h.Period)
-				end
-			end
-		elseif s.Kind == "SpinBarPlatform" then
-			if not h or type(h.Speed) ~= "number" or h.Speed == 0 or math.abs(h.Speed) > 150
-				or type(h.Damage) ~= "number" or h.Damage <= 0 or type(h.Length) ~= "number" then
-				bad("SpinBar step %d has bad Speed/Damage/Length", i)
-			else
-				if h.Length > minDim - 2.5 + EPS or h.Length < 3 then
-					bad("SpinBar step %d length %.1f does not fit a %.1f platform", i, h.Length, minDim)
-				end
-				if h.Count ~= 1 and h.Count ~= 2 then
-					bad("SpinBar step %d has bad Count", i)
-				end
-			end
-		elseif s.Kind == "StormPlatform" then
-			if not h or type(h.DPS) ~= "number" or h.DPS <= 0 then
-				bad("Storm step %d lacks DPS", i)
-			end
-		elseif s.Kind == "LightningPlatform" then
-			if not h or type(h.Damage) ~= "number" or type(h.Interval) ~= "number"
-				or type(h.Warning) ~= "number" or type(h.Radius) ~= "number" or not h.ZoneOffset then
-				bad("Lightning step %d lacks parameters", i)
-			else
-				if h.Interval < 2.5 or h.Warning < 0.8 or h.Warning >= h.Interval then
-					bad("Lightning step %d has unfair timing (%.1f / %.1f)", i, h.Interval, h.Warning)
-				end
-				if math.abs(h.ZoneOffset.X) + h.Radius > s.Size.X / 2 + EPS
-					or math.abs(h.ZoneOffset.Z) + h.Radius > s.Size.Z / 2 + EPS then
-					bad("Lightning step %d zone leaves the platform", i)
-				end
-			end
-		elseif s.Kind == "Vanishing" then
-			if not h or type(h.VanishDelay) ~= "number" or type(h.ReturnDelay) ~= "number" then
-				bad("Vanishing step %d lacks delays", i)
-			else
-				if h.VanishDelay < minVanishDelay(s.Size) - EPS then
-					bad("Vanishing step %d vanishes after %.2fs but crossing needs %.2fs", i, h.VanishDelay,
-						minVanishDelay(s.Size))
-				end
-				if h.ReturnDelay < h.VanishDelay + 1 then
-					bad("Vanishing step %d returns too quickly", i)
-				end
-			end
-		elseif s.Kind == "Bounce" then
-			if not h or type(h.Power) ~= "number" or h.Power < 50 or h.Power > 90
-				or type(h.PadSize) ~= "number" or h.PadSize > minDim * 0.5 + EPS then
-				bad("Bounce step %d has bad Power/PadSize", i)
-			end
-			if h then
-				local speed = h.LaunchSpeed
-				if type(speed) ~= "number" or speed < 18 or speed > 30 then
-					bad("Bounce step %d has bad LaunchSpeed %s (need a number in [18, 30])", i, tostring(speed))
-				elseif type(h.Power) == "number" then
-					-- The pad launches from the step centre at LaunchSpeed, so the next static step's
-					-- nearest point must be inside the airtime reach (no overshoot check on purpose).
-					local nxt = steps[i + 1]
-					if nxt and nxt.Kind ~= "Moving" and nxt.Pos and nxt.Size then
-						local nxtRise = nxt.Pos.Y - s.Pos.Y
-						local disc = h.Power * h.Power - 2 * P.Gravity * (nxtRise - 0.7)
-						if disc < 0 then
-							bad("Bounce step %d cannot reach the top of step %d (rise %.2f)", i, i + 1, nxtRise)
-						else
-							local t = (h.Power + math.sqrt(disc)) / P.Gravity
-							local nb = stepBox(nxt)
-							local dx = math.max(nb.x0 - s.Pos.X, 0, s.Pos.X - nb.x1)
-							local dz = math.max(nb.z0 - s.Pos.Z, 0, s.Pos.Z - nb.z1)
-							local dist = math.sqrt(dx * dx + dz * dz)
-							if dist > speed * t + EPS then
-								bad("Bounce step %d launch reaches %.2f but step %d starts %.2f from the pad",
-									i, speed * t, i + 1, dist)
-							end
-						end
-					end
-				end
-			end
-		elseif s.Kind == "PlateBridge" then
-			if not h or not h.Span or not h.Sides or #h.Sides ~= 2 or type(h.BridgeNumber) ~= "number" then
-				bad("PlateBridge step %d lacks Span/Sides", i)
-			else
-				local prev = steps[i - 1]
-				local zFront = prev.Pos.Z + prev.Size.Z / 2
-				local zBack = s.Pos.Z - s.Size.Z / 2
-				local spanBox = slabBox(h.Span.Pos, h.Span.Size.X, h.Span.Size.Y, h.Span.Size.Z)
-				if spanBox.z0 > zFront + EPS or spanBox.z1 < zBack - EPS then
-					bad("PlateBridge %d span does not reach both platforms", i)
-				end
-				if math.abs(h.Span.Pos.Y - prev.Pos.Y) > EPS or math.abs(prev.Pos.Y - s.Pos.Y) > EPS then
-					bad("PlateBridge %d span is not level", i)
-				end
-				local px0 = math.max(prev.Pos.X - prev.Size.X / 2, s.Pos.X - s.Size.X / 2)
-				local px1 = math.min(prev.Pos.X + prev.Size.X / 2, s.Pos.X + s.Size.X / 2)
-				if spanBox.x0 < px0 - EPS or spanBox.x1 > px1 + EPS then
-					bad("PlateBridge %d span is wider than the overlap of its platforms", i)
-				end
-				local seenFrom = {}
-				for _, side in ipairs(h.Sides) do
-					local anchor = steps[side.From]
-					if not anchor or (side.From ~= i - 1 and side.From ~= i) then
-						bad("PlateBridge %d side platform has a bad anchor", i)
-					else
-						seenFrom[side.From] = true
-						local sbx = slabBox(side.Pos, side.Size.X, side.Size.Y, side.Size.Z)
-						local g = footGap(sbx, stepBox(anchor))
-						if g < diff.GapMin - EPS or g > diff.GapMax + EPS or g > runReach(0) + EPS then
-							bad("PlateBridge %d side platform gap %.2f is not reachable without the bridge", i, g)
-						end
-						if math.abs(side.Pos.Y - anchor.Pos.Y) > EPS then
-							bad("PlateBridge %d side platform is not level with its anchor", i)
-						end
-						if math.abs(side.Pos.X) > LATERAL_LIMIT + SIDE_SIZE then
-							bad("PlateBridge %d side platform wanders too far", i)
-						end
-						local pl = side.Plate
-						if not pl or math.abs(pl.Pos.X - side.Pos.X) > side.Size.X / 2 - pl.Size.X / 2 + EPS
-							or math.abs(pl.Pos.Z - side.Pos.Z) > side.Size.Z / 2 - pl.Size.Z / 2 + EPS then
-							bad("PlateBridge %d plate is not on its side platform", i)
-						end
-					end
-				end
-				if not seenFrom[i - 1] or not seenFrom[i] then
-					bad("PlateBridge %d needs one plate before and one after the chasm", i)
-				end
-			end
-		end
-	end
-
-	-- 4. checkpoints + stages ------------------------------------------
-	local cpCount = 0
-	for _, s in ipairs(steps) do
-		if s.Kind == "Checkpoint" then
-			cpCount = cpCount + 1
-		end
-	end
-	if cpCount ~= diff.Stages then
-		bad("expected %d checkpoints, found %d", diff.Stages, cpCount)
-	end
-	local cps = layout.Checkpoints or {}
-	local lastCp = 0
-	for k = 1, diff.Stages do
-		local idx = cps[k]
-		local s = idx and steps[idx]
-		if not s or s.Kind ~= "Checkpoint" or s.Stage ~= k then
-			bad("Checkpoints[%d] does not point at that stage's checkpoint", k)
-		else
-			if idx <= lastCp then
-				bad("Checkpoints[%d] is out of order", k)
-			end
-			lastCp = idx
-		end
-	end
-	if lastCp ~= n - 1 then
-		bad("the last checkpoint (step %d) must sit right before the Finish (step %d)", lastCp, n)
-	end
-	local perStage = {}
-	for _, s in ipairs(steps) do
-		if REGULAR_KINDS[s.Kind] then
-			perStage[s.Stage] = (perStage[s.Stage] or 0) + 1
-		end
-	end
-	for k = 1, diff.Stages do
-		local c = perStage[k] or 0
-		if c < diff.StepsPerStage[1] or c > diff.StepsPerStage[2] then
-			bad("stage %d has %d steps (expected %d-%d)", k, c, diff.StepsPerStage[1], diff.StepsPerStage[2])
-		end
-	end
-	for i = 2, n do
-		if steps[i].Stage < steps[i - 1].Stage then
-			bad("step %d goes back to an earlier stage", i)
-		end
-	end
-
-	-- 5. separation (nothing intersects, 2 stud clearance) ------------------
-	local boxes = collectBoxes(layout)
-	for a = 1, #boxes do
-		for b = a + 1, #boxes do
-			local A, B = boxes[a], boxes[b]
-			local exempt = false
-			if A.Tag == "step" and B.Tag == "step" and math.abs(A.Id - B.Id) == 1 then
-				exempt = true -- adjacent hops are covered by the gap rules above
-			elseif A.Tag == "span" and B.Tag == "step" and (B.Id == A.Id or B.Id == A.Id - 1) then
-				exempt = true -- the span deliberately touches its two platforms
-			elseif B.Tag == "span" and A.Tag == "step" and (A.Id == B.Id or A.Id == B.Id - 1) then
-				exempt = true
-			elseif A.Tag == "side" and B.Tag == "step" and B.Id == A.From then
-				exempt = true -- side platform gap is validated above
-			elseif B.Tag == "side" and A.Tag == "step" and A.Id == B.From then
-				exempt = true
-			end
-			if not exempt then
-				local gx = axisGap(A.x0, A.x1, B.x0, B.x1)
-				local gy = axisGap(A.y0, A.y1, B.y0, B.y1)
-				local gz = axisGap(A.z0, A.z1, B.z0, B.z1)
-				if math.max(gx, gy, gz) < 2 - EPS then
-					bad("%s %d and %s %d are closer than 2 studs", A.Tag, A.Id, B.Tag, B.Id)
-				end
-			end
-		end
-	end
-
-	-- 6. tokens ------------------------------------------------------------
-	local counted = 0
-	local stageSteps = {}
-	for i, s in ipairs(steps) do
-		if s.Tokens and #s.Tokens > 0 then
-			stageSteps[s.Stage] = (stageSteps[s.Stage] or 0) + 1
-			local lo, hi = centreRange(s)
-			for _, t in ipairs(s.Tokens) do
-				counted = counted + 1
-				if t.Y < 3 - EPS or t.Y > 4.5 + EPS then
-					bad("step %d token height %.2f outside [3, 4.5]", i, t.Y)
-				end
-				local zMin = -s.Size.Z / 2 - 0.3
-				if s.Kind == "DashGap" or s.Kind == "PlateBridge" then
-					zMin = -(s.Size.Z / 2 + (s.Gap or 0)) - 0.3
-				end
-				if (s.Pos.X + t.X) < lo - s.Size.X / 2 - 0.3 or (s.Pos.X + t.X) > hi + s.Size.X / 2 + 0.3
-					or t.Z < zMin or t.Z > s.Size.Z / 2 + 0.3 then
-					bad("step %d token (%.1f, %.1f) is outside the platform", i, t.X, t.Z)
-				end
-				local wx, wy, wz = s.Pos.X + t.X, s.Pos.Y + t.Y, s.Pos.Z + t.Z
-				for _, b in ipairs(boxes) do
-					if wx > b.x0 - 0.3 and wx < b.x1 + 0.3 and wz > b.z0 - 0.3 and wz < b.z1 + 0.3
-						and wy > b.y0 - 0.3 and wy < b.y1 + 0.3 then
-						bad("step %d token is inside %s %d", i, b.Tag, b.Id)
-						break
-					end
-				end
-			end
-		end
-	end
-	if counted ~= layout.TotalTokens then
-		bad("TotalTokens %s does not match %d placed tokens", tostring(layout.TotalTokens), counted)
-	end
-	for k = 1, diff.Stages do
-		if (stageSteps[k] or 0) < diff.TokensPerStage then
-			bad("stage %d has tokens on %d steps (need %d)", k, stageSteps[k] or 0, diff.TokensPerStage)
-		end
-	end
-
-	-- 7. bounds --------------------------------------------------------------
-	local bnd = layout.Bounds
-	if not bnd or not bnd.Min or not bnd.Max then
-		bad("layout has no Bounds")
-	else
-		for _, b in ipairs(boxes) do
-			if b.x0 < bnd.Min.X - EPS or b.x1 > bnd.Max.X + EPS or b.y0 < bnd.Min.Y - EPS
-				or b.y1 > bnd.Max.Y + EPS or b.z0 < bnd.Min.Z - EPS or b.z1 > bnd.Max.Z + EPS then
-				bad("%s %d lies outside Bounds", b.Tag, b.Id)
-				break
-			end
-		end
-	end
-
-	return #problems == 0, problems
-end
-
-----------------------------------------------------------------------
--- Part 3: builder
-----------------------------------------------------------------------
-local PART_BUDGET = 1000 -- ambient decoration is skipped once this many parts exist (tokens add ~300 more)
-
-local CLOUD_TINTS = {
-	Color3.fromRGB(250, 252, 255),
-	Color3.fromRGB(255, 243, 248),
-	Color3.fromRGB(240, 247, 255),
-	Color3.fromRGB(255, 250, 240),
-}
-local PLATE_COLORS = {
-	Color3.fromRGB(255, 120, 200),
-	Color3.fromRGB(110, 230, 255),
-	Color3.fromRGB(150, 255, 160),
-	Color3.fromRGB(255, 214, 90),
-}
-local BAR_RED = Color3.fromRGB(255, 96, 118)
-local DASH_GOLD = Color3.fromRGB(255, 196, 70)
-local STORM_DARK = Color3.fromRGB(58, 62, 86)
-
--- Create one anchored Part inside a group folder.
--- opts: Shape, Collide (default true), Decor (no collide/touch/query/shadow), Transparency
-local function mk(ctx, group, name, size, cf, color, material, opts)
-	opts = opts or {}
-	local p = Instance.new("Part")
+-- group: name of a sub-folder of the course folder. opts: Shape, Transparency, Solid (collides),
+-- Trigger (no collision but touchable: hazard volumes), Shadow, Free (ignore ctx.Attach).
+-- While ctx.Attach is set, decor is either parented under ctx.Attach.Root ("child": it fades / swings
+-- with it) or welded to it ("weld": it follows a part moved by CFrame).
+local function mk(ctx, group, name, className, size, cf, color, material, opts)
+	opts = opts or EMPTY
+	local p = Instance.new(className or "Part")
 	p.Name = name
-	if opts.Shape then
+	if opts.Shape and (className == nil or className == "Part") then
 		p.Shape = opts.Shape
+	end
+	if size.X < MIN_SIZE or size.Y < MIN_SIZE or size.Z < MIN_SIZE then
+		size = Vector3.new(max(size.X, MIN_SIZE), max(size.Y, MIN_SIZE), max(size.Z, MIN_SIZE))
 	end
 	p.Size = size
 	p.Anchored = true
-	p.TopSurface = Enum.SurfaceType.Smooth
-	p.BottomSurface = Enum.SurfaceType.Smooth
+	p.TopSurface = SMOOTH
+	p.BottomSurface = SMOOTH
 	p.Color = color
-	p.Material = material or Enum.Material.SmoothPlastic
-	p.Transparency = opts.Transparency or 0
-	if opts.Decor then
-		p.CanCollide = false
-		p.CanTouch = false
-		p.CanQuery = false
-		p.CastShadow = false
+	p.Material = material or MAT.SmoothPlastic
+	if opts.Transparency then
+		p.Transparency = opts.Transparency
+	end
+	if opts.Solid then
+		p.CanCollide = true
 	else
-		p.CanCollide = (opts.Collide ~= false)
+		p.CanCollide = false
+		p.CanQuery = false -- decor and hazard volumes are invisible to raycasts (camera, pets ...)
+		if not opts.Trigger then
+			p.CanTouch = false
+		end
+	end
+	if not (opts.Solid or opts.Shadow) then
+		p.CastShadow = false
 	end
 	p.CFrame = cf
-	p.Parent = ctx.Groups[group]
+	local parent = ctx.Groups[group]
+	local attach = ctx.Attach
+	if attach and not opts.Free and not opts.Solid and not opts.Trigger then
+		if attach.Mode == "child" then
+			parent = attach.Root
+		else
+			ctx.Welds[#ctx.Welds + 1] = { attach.Root, p }
+		end
+	end
+	p.Parent = parent
 	ctx.Parts = ctx.Parts + 1
 	return p
 end
 
--- An invisible, tiny anchor for BillboardGuis.
-local function mkAnchor(ctx, group, pos)
-	return mk(ctx, group, "SignAnchor", Vector3.new(0.4, 0.4, 0.4), CFrame.new(pos), Theme.Colors.White,
-		Enum.Material.SmoothPlastic, { Decor = true, Transparency = 1 })
+local function blk(ctx, group, name, size, cf, color, material, trans)
+	return mk(ctx, group, name, "Part", size, cf, color, material, { Transparency = trans })
 end
 
--- Cylinder helpers. Roblox cylinders have their axis along X, so we roll them upright.
-local function upright(pos)
-	return CFrame.new(pos) * CFrame.Angles(0, 0, math.pi / 2)
+-- Sphere, or an ellipsoid (a block with a Sphere SpecialMesh) when the size is not uniform.
+local function ball(ctx, group, name, size, cf, color, material, trans)
+	if type(size) == "number" then
+		size = Vector3.new(size, size, size)
+	end
+	if abs(size.X - size.Y) > 0.01 or abs(size.X - size.Z) > 0.01 then
+		local p = mk(ctx, group, name, "Part", size, cf, color, material, { Transparency = trans })
+		local mesh = Instance.new("SpecialMesh")
+		mesh.MeshType = Enum.MeshType.Sphere
+		mesh.Parent = p
+		return p
+	end
+	return mk(ctx, group, name, "Part", size, cf, color, material,
+		{ Shape = Enum.PartType.Ball, Transparency = trans })
 end
 
-local function tintFor(index)
-	return CLOUD_TINTS[(index % #CLOUD_TINTS) + 1]
+-- upright cylinder: its axis is the Y axis of `cf`
+local function cyl(ctx, group, name, height, diameter, cf, color, material, trans)
+	return mk(ctx, group, name, "Part", Vector3.new(height, diameter, diameter), cf * CFrame.Angles(0, 0, pi / 2),
+		color, material, { Shape = Enum.PartType.Cylinder, Transparency = trans })
+end
+
+-- thin cylinder between two world points
+local function rod(ctx, group, name, a, b, thick, color, material, trans)
+	local d = b - a
+	local len = d.Magnitude
+	if len < 0.05 then
+		return nil
+	end
+	return mk(ctx, group, name, "Part", Vector3.new(len, thick, thick), axisCF((a + b) / 2, d), color, material,
+		{ Shape = Enum.PartType.Cylinder, Transparency = trans })
+end
+
+local function addLight(part, color, range, brightness)
+	local light = Instance.new("PointLight")
+	light.Color = color
+	light.Range = range
+	light.Brightness = brightness
+	light.Parent = part
+	return light
+end
+
+local function addSparkles(parent, color, rate, speed, lifetime, size)
+	local e = Instance.new("ParticleEmitter")
+	e.Texture = "rbxasset://textures/particles/sparkles_main.dds"
+	e.Color = ColorSequence.new(color)
+	e.Rate = rate
+	e.Lifetime = NumberRange.new(lifetime * 0.6, lifetime)
+	e.Speed = NumberRange.new(speed * 0.5, speed)
+	e.SpreadAngle = Vector2.new(180, 180)
+	e.Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, size), NumberSequenceKeypoint.new(1, 0) })
+	e.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.3), NumberSequenceKeypoint.new(1, 1) })
+	e.LightEmission = 0.6
+	e.Parent = parent
+	return e
+end
+
+local function addSmoke(parent, color, rate, size)
+	local e = Instance.new("ParticleEmitter")
+	e.Texture = "rbxasset://textures/particles/smoke_main.dds"
+	e.Color = ColorSequence.new(color)
+	e.Rate = rate
+	e.Lifetime = NumberRange.new(3, 5)
+	e.Speed = NumberRange.new(3, 6)
+	e.SpreadAngle = Vector2.new(25, 25)
+	e.EmissionDirection = Enum.NormalId.Top
+	e.Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, size * 0.5), NumberSequenceKeypoint.new(1, size * 1.6) })
+	e.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.45), NumberSequenceKeypoint.new(1, 1) })
+	e.LightEmission = 0
+	e.Parent = parent
+	return e
+end
+
+-- Decor on parts that move (moving clouds, spin bars) is welded to the moving root once the whole
+-- course is parented into the world.
+local function applyWelds(ctx)
+	for _, pair in ipairs(ctx.Welds) do
+		local root, part = pair[1], pair[2]
+		if root.Parent and part.Parent then
+			part.Anchored = false
+			part.Massless = true
+			local weld = Instance.new("WeldConstraint")
+			weld.Part0 = root
+			weld.Part1 = part
+			weld.Parent = part
+		end
+	end
+	ctx.Welds = {}
+end
+
+----------------------------------------------------------------------
+-- GUI helpers (all text through Theme roles)
+----------------------------------------------------------------------
+local function styledLabel(text, role, color, props)
+	local ok, made = pcall(Theme.Label, text, role, { Scaled = true, Color = color, Stroke = 0.35, Props = props })
+	if ok and made then
+		return made
+	end
+	local label = Instance.new("TextLabel")
+	label.BackgroundTransparency = 1
+	label.Text = text
+	label.TextScaled = true
+	label.TextColor3 = color
+	pcall(Theme.Style, label, role, { Scaled = true, Color = color })
+	if props then
+		for k, v in pairs(props) do
+			label[k] = v
+		end
+	end
+	return label
+end
+
+-- label filling a horizontal band (y, h are 0..1 fractions of the parent)
+local function addText(parent, text, role, color, y, h, props)
+	local p = { Size = UDim2.new(1, 0, h, 0), Position = UDim2.new(0, 0, y, 0), TextWrapped = true }
+	if props then
+		for k, v in pairs(props) do
+			p[k] = v
+		end
+	end
+	local label = styledLabel(text, role, color, p)
+	label.Parent = parent
+	return label
+end
+
+local function addGradient(target, top, bottom)
+	local g = Instance.new("UIGradient")
+	g.Color = ColorSequence.new(top, bottom)
+	g.Rotation = 90
+	g.Parent = target
+	return g
 end
 
 -- World-space-sized BillboardGui (scale units are studs).
-local function billboard(part, widthStuds, heightStuds, yOffset, maxDistance)
+local function billboardOn(part, widthStuds, heightStuds, yOffset, maxDistance)
 	local gui = Instance.new("BillboardGui")
 	gui.Size = UDim2.new(widthStuds, 0, heightStuds, 0)
 	gui.StudsOffset = Vector3.new(0, yOffset or 0, 0)
@@ -1397,7 +373,7 @@ local function billboard(part, widthStuds, heightStuds, yOffset, maxDistance)
 	return gui
 end
 
-local function surfaceGui(part, face, pixelsPerStud)
+local function surfaceOn(part, face, pixelsPerStud)
 	local gui = Instance.new("SurfaceGui")
 	gui.Face = face
 	gui.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud
@@ -1407,600 +383,925 @@ local function surfaceGui(part, face, pixelsPerStud)
 	return gui
 end
 
--- Themed text label filling a fraction of its parent. yScale/hScale are 0..1.
-local function addText(parent, text, role, color, yScale, hScale, extraProps)
-	local props = {
-		Size = UDim2.new(1, 0, hScale, 0),
-		Position = UDim2.new(0, 0, yScale, 0),
-		TextWrapped = true,
+-- chunky dark sign panel for SurfaceGuis
+local function panelFrame(parent, transparency)
+	local f = Instance.new("Frame")
+	f.Size = UDim2.new(1, 0, 1, 0)
+	f.BackgroundColor3 = C.Panel
+	f.BackgroundTransparency = transparency or 0.06
+	f.BorderSizePixel = 0
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 18)
+	corner.Parent = f
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = C.Ink
+	stroke.Thickness = 3
+	stroke.Parent = f
+	f.Parent = parent
+	return f
+end
+
+----------------------------------------------------------------------
+-- Look of a step (colours / materials from stage theme, stage tint and step kind)
+----------------------------------------------------------------------
+local function lookFor(ctx, step)
+	local layout = ctx.Layout
+	local theme = layout.Themes and layout.Themes[step.Stage]
+	local stage = layout.Stages and layout.Stages[step.Stage]
+	local tint = tintOf(stage and stage.Tint)
+	local base = THEME_LOOK[theme] or THEME_LOOK.Plain
+	local look = {
+		Top = C.Top:Lerp(base.Hue, base.Top):Lerp(tint, 0.06),
+		Side = C.Side:Lerp(base.Hue, base.Side),
+		Trim = ctx.Trim:Lerp(tint, 0.42),
+		Mat = base.Mat or MAT.SmoothPlastic,
+		TopMat = base.TopMat or MAT.SmoothPlastic,
+		Tint = tint,
+		Theme = theme,
 	}
-	if extraProps then
-		for k, v in pairs(extraProps) do
-			props[k] = v
-		end
+	local kind = step.Kind
+	if kind == "Start" or kind == "Finish" then
+		look.Mat = MAT.SmoothPlastic
+		look.TopMat = MAT.SmoothPlastic
+		look.Top = C.Top
+		look.Side = C.Side
+		look.Trim = ctx.Trim
+	elseif kind == "Checkpoint" then
+		look.Mat = MAT.SmoothPlastic
+		look.TopMat = MAT.SmoothPlastic
+		look.Top = C.Top:Lerp(C.Checkpoint, 0.16)
+		look.Side = C.Side:Lerp(C.Checkpoint, 0.18)
+		look.Trim = C.Checkpoint
+	elseif kind == "DashGap" then
+		look.Trim = C.Gold
+	elseif kind == "SpinBarPlatform" then
+		look.Trim = C.Hazard:Lerp(look.Trim, 0.25)
+	elseif kind == "StormPlatform" then
+		look.Trim = rgb(124, 138, 190)
+	elseif kind == "LightningPlatform" then
+		look.Trim = rgb(222, 196, 96)
+	elseif kind == "Moving" then
+		look.Trim = rgb(116, 200, 232):Lerp(look.Trim, 0.25)
+	elseif kind == "PendulumPlatform" then
+		look.Trim = C.Brass:Lerp(look.Trim, 0.3)
+	elseif kind == "WindPlatform" then
+		look.Trim = C.Wind:Lerp(look.Trim, 0.3)
 	end
-	local label = Theme.Label(text, role, { Scaled = true, Color = color, Stroke = 0.35, Props = props })
-	label.Parent = parent
-	return label
+	return look
 end
 
-local function sparkles(parent, color, rate, speed, lifetime, size)
-	local e = Instance.new("ParticleEmitter")
-	e.Texture = "rbxasset://textures/particles/sparkles_main.dds"
-	e.Color = ColorSequence.new(color)
-	e.Rate = rate
-	e.Lifetime = NumberRange.new(lifetime * 0.6, lifetime)
-	e.Speed = NumberRange.new(speed * 0.5, speed)
-	e.SpreadAngle = Vector2.new(180, 180)
-	e.Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, size), NumberSequenceKeypoint.new(1, 0) })
-	e.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.2), NumberSequenceKeypoint.new(1, 1) })
-	e.LightEmission = 0.8
-	e.Parent = parent
-	return e
-end
-
--- Decor on parts that move (moving clouds, spin bars) is welded to the moving root once the
--- whole course is parented into the world; `weldLater` just remembers the pair.
-local function weldLater(ctx, root, part)
-	ctx.Welds[#ctx.Welds + 1] = { root, part }
-end
-
-local function applyWelds(ctx)
-	for _, pair in ipairs(ctx.Welds) do
-		local root, part = pair[1], pair[2]
-		if root.Parent and part.Parent then
-			part.Anchored = false
-			part.Massless = true
-			local weld = Instance.new("WeldConstraint")
-			weld.Part0 = root
-			weld.Part1 = part
-			weld.Parent = root
-		end
+----------------------------------------------------------------------
+-- Platform base: slab (tagged by the callers), top plate, trim, puffy underside
+----------------------------------------------------------------------
+-- A ">" painted on the floor: tip at the origin of `cf`, pointing along its local +Z.
+local function chevron(ctx, group, name, cf, armLen, width, color, material, trans)
+	local phi = pi / 4
+	for _, sgn in ipairs({ -1, 1 }) do
+		local centre = Vector3.new(sgn * sin(phi) * armLen / 2, 0, -cos(phi) * armLen / 2)
+		blk(ctx, group, name, Vector3.new(width, 0.1, armLen), cf * CFrame.new(centre) * CFrame.Angles(0, -sgn * phi, 0),
+			color, material, trans)
 	end
 end
 
--- A cloud platform: walkable slab + glowing difficulty-colour trim + puffy underside.
--- opts: Name, Color, TrimColor, Single (slab only), Dynamic (decor welded to the slab)
-local function buildCloud(ctx, step, opts)
-	opts = opts or {}
+-- Four trim strips on the top edges (long edges only for beams).
+local function addTrim(ctx, step, F, color, longOnly)
 	local sx, sz = step.Size.X, step.Size.Z
-	local top = ctx.Origin + step.Pos
-	local main = mk(ctx, "Platforms", opts.Name or ("Step_" .. step.Index), Vector3.new(sx, TH, sz),
-		CFrame.new(top - Vector3.new(0, TH / 2, 0)), opts.Color or tintFor(step.Index),
-		Enum.Material.SmoothPlastic)
+	local w, h, y = 0.5, 0.14, 0.17
+	blk(ctx, "Decor", "Trim", Vector3.new(w, h, sz - 0.3), F * CFrame.new(sx / 2 - w / 2 - 0.1, y, 0), color)
+	blk(ctx, "Decor", "Trim", Vector3.new(w, h, sz - 0.3), F * CFrame.new(-sx / 2 + w / 2 + 0.1, y, 0), color)
+	if not longOnly then
+		blk(ctx, "Decor", "Trim", Vector3.new(sx - 1.3, h, w), F * CFrame.new(0, y, sz / 2 - w / 2 - 0.1), color)
+		blk(ctx, "Decor", "Trim", Vector3.new(sx - 1.3, h, w), F * CFrame.new(0, y, -sz / 2 + w / 2 + 0.1), color)
+	end
+end
+
+-- Puffs / stalactites that hang under (or round the rim of) a platform. They never rise above the top.
+-- Variant 1 = under-balls, 2 = stalactite, 3 = rim puffs, 4 = belly, big = belly + stalactite.
+local function underside(ctx, step, look, F, big, lite)
+	local sx, th, sz = step.Size.X, step.Size.Y, step.Size.Z
+	local hx, hz = sx / 2, sz / 2
+	local rng = ctx.Rng
+	local v = step.Variant or 1
+	local small = min(sx, sz)
+	local puff = look.Side:Lerp(C.Top, 0.3)
+	local deep = look.Side:Lerp(C.Shadow, 0.4)
+	if lite then
+		v = 0
+	end
+	if big then
+		v = 5
+	end
+	if v == 0 or v == 1 then
+		local n = 3
+		if v == 0 then
+			n = 1
+		end
+		for _ = 1, n do
+			local d = rng:NextNumber(2.6, 4.6)
+			local px = rng:NextNumber(-1, 1) * max(0, hx - d * 0.4)
+			local pz = rng:NextNumber(-1, 1) * max(0, hz - d * 0.4)
+			ball(ctx, "Decor", "Puff", d, F * CFrame.new(px, -th - d * 0.28, pz), puff)
+		end
+	elseif v == 2 then
+		local d = small * 0.7
+		local h = 1.3
+		for k = 1, 3 do
+			cyl(ctx, "Decor", "Stalactite", h, d, F * CFrame.new(0, -th - h * (k - 0.5) + 0.05, 0),
+				puff:Lerp(deep, k / 3))
+			d = d * 0.6
+		end
+	elseif v == 3 then
+		local d = max(2.0, min(small * 0.3, 3.4))
+		local spots = { { -1, -1 }, { 1, -1 }, { 1, 1 }, { -1, 1 } }
+		if sz > sx * 1.4 then
+			spots[#spots + 1] = { -1, 0 }
+			spots[#spots + 1] = { 1, 0 }
+		elseif sx > sz * 1.4 then
+			spots[#spots + 1] = { 0, -1 }
+			spots[#spots + 1] = { 0, 1 }
+		end
+		for _, s in ipairs(spots) do
+			ball(ctx, "Decor", "RimPuff", d, F * CFrame.new(s[1] * (hx - d * 0.2), -d / 2 - 0.1, s[2] * (hz - d * 0.2)), puff)
+		end
+	elseif v == 4 then
+		ball(ctx, "Decor", "Belly", Vector3.new(sx * 0.82, 2.4, sz * 0.82), F * CFrame.new(0, -th - 0.5, 0), puff)
+		ball(ctx, "Decor", "Belly", Vector3.new(sx * 0.46, 2.2, sz * 0.46),
+			F * CFrame.new(rng:NextNumber(-1, 1) * hx * 0.2, -th - 1.7, rng:NextNumber(-1, 1) * hz * 0.2), deep)
+	else
+		ball(ctx, "Decor", "Belly", Vector3.new(sx * 0.86, 3.0, sz * 0.86), F * CFrame.new(0, -th - 0.4, 0), puff)
+		local d = small * 0.6
+		local h = 1.8
+		for k = 1, 3 do
+			cyl(ctx, "Decor", "Stalactite", h, d, F * CFrame.new(0, -th - 1.5 - h * (k - 0.5), 0), puff:Lerp(deep, k / 3))
+			d = d * 0.6
+		end
+	end
+end
+
+-- Builds the walkable slab plus its dressing and returns (slab, frame).
+-- opts: Name, Slab (slab only), Attach ("weld"|"child": see mk), Lite, Under (false = no underside),
+--       LongTrim, Big, Transparency
+local function buildBase(ctx, step, look, opts)
+	opts = opts or EMPTY
+	local F = stepFrame(ctx, step)
+	local sx, th, sz = step.Size.X, step.Size.Y, step.Size.Z
+	local main = mk(ctx, "Platforms", opts.Name or ("Step_" .. step.Index), "Part", Vector3.new(sx, th, sz),
+		F * CFrame.new(0, -th / 2, 0), look.Side, look.Mat or MAT.SmoothPlastic,
+		{ Solid = true, Shadow = true, Transparency = opts.Transparency })
 	main:SetAttribute("StepIndex", step.Index)
 	main:SetAttribute("Stage", step.Stage)
-	local decor = {}
-	if opts.Single then
-		return main, decor
+	main:SetAttribute("StepKind", step.Kind)
+	if not ctx.CurrentMain then
+		ctx.CurrentMain = main
 	end
-
-	local trim = opts.TrimColor or ctx.Diff.Color
-	local function strip(size, offset)
-		local p = mk(ctx, "Decor", "Trim", size, CFrame.new(top + offset), trim, Enum.Material.Neon,
-			{ Decor = true, Transparency = 0.1 })
-		decor[#decor + 1] = p
+	if opts.Slab then
+		return main, F
 	end
-	strip(Vector3.new(sx, 0.22, 0.5), Vector3.new(0, 0.11, sz / 2 - 0.25))
-	strip(Vector3.new(sx, 0.22, 0.5), Vector3.new(0, 0.11, -sz / 2 + 0.25))
-	strip(Vector3.new(0.5, 0.22, sz - 1), Vector3.new(sx / 2 - 0.25, 0.11, 0))
-	strip(Vector3.new(0.5, 0.22, sz - 1), Vector3.new(-sx / 2 + 0.25, 0.11, 0))
-
-	-- puffy underside: balls whose tops stay below the walking surface
-	for k = 1, 3 do
-		local d = ctx.Rng:NextNumber(2.4, 4.4)
-		local px = ctx.Rng:NextNumber(-1, 1) * math.max(0, sx / 2 - d * 0.4)
-		local pz = ctx.Rng:NextNumber(-1, 1) * math.max(0, sz / 2 - d * 0.4)
-		local color = Theme.Colors.Cloud
-		if k % 2 == 0 then
-			color = Theme.Colors.CloudShade
-		end
-		local ball = mk(ctx, "Decor", "Puff", Vector3.new(d, d, d),
-			CFrame.new(top + Vector3.new(px, -0.7 - d * 0.35, pz)), color, Enum.Material.SmoothPlastic,
-			{ Shape = Enum.PartType.Ball, Decor = true })
-		decor[#decor + 1] = ball
+	if opts.Attach then
+		ctx.Attach = { Mode = opts.Attach, Root = main }
 	end
-
-	if opts.Dynamic then
-		for _, p in ipairs(decor) do
-			weldLater(ctx, main, p)
-		end
+	blk(ctx, "Decor", "TopPlate", Vector3.new(sx, 0.1, sz), F * CFrame.new(0, 0.05, 0), look.Top,
+		look.TopMat or MAT.SmoothPlastic)
+	addTrim(ctx, step, F, look.Trim, opts.LongTrim)
+	if opts.Under ~= false then
+		local lite = opts.Lite or ctx.Parts > ctx.UnderCap
+		underside(ctx, step, look, F, opts.Big, lite)
 	end
-	return main, decor
+	return main, F
 end
 
-local function darkPuffs(ctx, centre, count, spread, minD, maxD)
-	for _ = 1, count do
-		local d = ctx.Rng:NextNumber(minD, maxD)
-		local off = Vector3.new(ctx.Rng:NextNumber(-spread, spread), ctx.Rng:NextNumber(-0.8, 0.8),
-			ctx.Rng:NextNumber(-spread, spread))
-		mk(ctx, "Decor", "StormPuff", Vector3.new(d, d, d), CFrame.new(centre + off), STORM_DARK,
-			Enum.Material.SmoothPlastic, { Shape = Enum.PartType.Ball, Decor = true, Transparency = 0.12 })
+-- bullseye on a cannon's landing island
+local function addBullseye(ctx, step, F)
+	local prev = ctx.Layout.Steps[step.Index - 1]
+	local h = prev and prev.Hazard
+	if not (h and h.LandingPoint) then
+		return
 	end
+	local lp = F:PointToObjectSpace(ctx.Origin + h.LandingPoint)
+	cyl(ctx, "Decor", "TargetRing", 0.05, 5.6, F * CFrame.new(lp.X, 0.11, lp.Z), C.Gold, MAT.Neon, 0.35)
+	cyl(ctx, "Decor", "TargetField", 0.05, 4.4, F * CFrame.new(lp.X, 0.13, lp.Z), C.Top:Lerp(C.Hazard, 0.12))
+	cyl(ctx, "Decor", "TargetDot", 0.05, 2.4, F * CFrame.new(lp.X, 0.15, lp.Z), C.Gold, MAT.Neon, 0.3)
 end
 
 ----------------------------------------------------------------------
--- Per-kind builders
+-- Kind builders. KB.<Kind>(ctx, step, look) -> main part (the part players stand on)
 ----------------------------------------------------------------------
-local function buildMoving(ctx, step)
-	local h = step.Hazard
-	local main = buildCloud(ctx, step, {
-		Name = "MovingCloud_" .. step.Index,
-		Dynamic = true,
-		TrimColor = Color3.fromRGB(120, 230, 255),
-	})
-	CollectionService:AddTag(main, Tags.MovingCloud)
-	main:SetAttribute("EndOffset", h.EndOffset)
-	main:SetAttribute("Period", h.Period)
+local KB = {}
 
-	-- a faint glowing rail under the route shows where the cloud travels
-	local top = ctx.Origin + step.Pos
-	local dx = h.EndOffset.X
-	local railY = -TH - 3.2
-	mk(ctx, "Decor", "MoveRail", Vector3.new(math.abs(dx) + step.Size.X, 0.2, 0.5),
-		CFrame.new(top + Vector3.new(dx / 2, railY, 0)), Color3.fromRGB(120, 230, 255), Enum.Material.Neon,
-		{ Decor = true, Transparency = 0.55 })
-	for _, ex in ipairs({ 0, dx }) do
-		mk(ctx, "Decor", "MoveStop", Vector3.new(1.2, 1.2, 1.2), CFrame.new(top + Vector3.new(ex, railY, 0)),
-			Color3.fromRGB(120, 230, 255), Enum.Material.Neon,
-			{ Shape = Enum.PartType.Ball, Decor = true, Transparency = 0.3 })
+-- a little prop in one corner of a plain platform (flower lamp, crystal pair or flag), when parts allow
+local function addProp(ctx, step, look, F)
+	if ctx.Parts > ctx.UnderCap - 150 then
+		return
 	end
-	return main
-end
-
-local function buildVanishing(ctx, step)
-	local h = step.Hazard
-	local ghost = ctx.Diff.Color:Lerp(Theme.Colors.Cloud, 0.7)
-	local main = buildCloud(ctx, step, { Name = "VanishCloud_" .. step.Index, Single = true, Color = ghost })
-	main.Transparency = 0.12
-	CollectionService:AddTag(main, Tags.VanishCloud)
-	main:SetAttribute("VanishDelay", h.VanishDelay)
-	main:SetAttribute("ReturnDelay", h.ReturnDelay)
-	sparkles(main, ctx.Diff.Color, 3, 2, 1.6, 0.7)
-	return main
-end
-
-local function buildBounce(ctx, step)
-	local h = step.Hazard
-	local main = buildCloud(ctx, step, { Name = "BounceCloud_" .. step.Index })
-	local top = ctx.Origin + step.Pos
-	local pad = h.PadSize
-	local color = Theme.Colors.Rainbow[(step.Index % #Theme.Colors.Rainbow) + 1]
-	local p = mk(ctx, "Hazards", "BouncePad", Vector3.new(pad, 0.7, pad), CFrame.new(top + Vector3.new(0, 0.35, 0)),
-		color, Enum.Material.Neon)
-	CollectionService:AddTag(p, Tags.BouncePad)
-	p:SetAttribute("Power", h.Power)
-	p:SetAttribute("LaunchSpeed", h.LaunchSpeed)
-	local gui = surfaceGui(p, Enum.NormalId.Top, 60)
-	addText(gui, "▲", "Accent", Theme.Colors.White, 0.05, 0.9)
-	sparkles(p, color, 5, 6, 1.2, 0.8)
-	return main
-end
-
-local function buildSpinBars(ctx, step)
-	local h = step.Hazard
-	local main = buildCloud(ctx, step, { Name = "SpinPlatform_" .. step.Index, TrimColor = BAR_RED })
-	local top = ctx.Origin + step.Pos
-	local count = h.Count or 1
-	for k = 1, count do
-		local angle = (k - 1) * math.pi / count
-		local cf = CFrame.new(top + Vector3.new(0, 0.95, 0)) * CFrame.Angles(0, angle, 0)
-		local bar = mk(ctx, "Hazards", "SpinBar", Vector3.new(h.Length, 1.5, 1.1), cf, BAR_RED, Enum.Material.Neon)
-		CollectionService:AddTag(bar, Tags.SpinBar)
-		bar:SetAttribute("Speed", h.Speed)
-		bar:SetAttribute("Damage", h.Damage)
-		for _, sgn in ipairs({ -1, 1 }) do
-			local cap = mk(ctx, "Decor", "BarCap", Vector3.new(1.9, 1.9, 1.9),
-				cf * CFrame.new(sgn * h.Length / 2, 0, 0), Theme.Colors.White, Enum.Material.Neon,
-				{ Shape = Enum.PartType.Ball, Decor = true })
-			weldLater(ctx, bar, cap)
+	local rng = ctx.Rng
+	if rng:NextNumber(0, 1) > 0.45 then
+		return
+	end
+	local sx, sz = step.Size.X, step.Size.Z
+	local cx = (rng:NextNumber(0, 1) < 0.5 and -1 or 1) * (sx / 2 - 0.6)
+	local cz = (rng:NextNumber(0, 1) < 0.5 and -1 or 1) * (sz / 2 - 0.6)
+	local kind = (step.Variant or 1) % 3
+	if kind == 1 then
+		cyl(ctx, "Decor", "FlowerStem", 1.4, 0.18, F * CFrame.new(cx, 0.8, cz), rgb(92, 150, 110))
+		ball(ctx, "Decor", "FlowerLamp", 0.85, F * CFrame.new(cx, 1.7, cz), look.Tint:Lerp(C.Text, 0.25), MAT.Neon, 0.1)
+	elseif kind == 2 then
+		for k = 1, 2 do
+			blk(ctx, "Decor", "MiniCrystal", Vector3.new(0.45, 1.0 + 0.6 * k, 0.45),
+				F * CFrame.new(cx + 0.4 * k - 0.6, 0.5 + 0.3 * k, cz) * CFrame.Angles(0.15 * k, 0.5 * k, 0.12 * k),
+				look.Tint, MAT.SmoothPlastic, 0.2)
 		end
-		if k == 1 then
-			local hub = mk(ctx, "Decor", "BarHub", Vector3.new(2.4, 1.8, 1.8),
-				CFrame.new(top + Vector3.new(0, 1.15, 0)) * CFrame.Angles(0, 0, math.pi / 2), Theme.Colors.PanelLight,
-				Enum.Material.SmoothPlastic, { Shape = Enum.PartType.Cylinder, Decor = true })
-			weldLater(ctx, bar, hub)
-		end
-	end
-	return main
-end
-
-local function buildStorm(ctx, step)
-	local h = step.Hazard
-	local main = buildCloud(ctx, step, { Name = "StormPlatform_" .. step.Index, TrimColor = Color3.fromRGB(140, 150, 200) })
-	local top = ctx.Origin + step.Pos
-	local height = h.Height or 10
-	local vol = mk(ctx, "Hazards", "StormCloud", Vector3.new(step.Size.X + 2, height, step.Size.Z + 2),
-		CFrame.new(top + Vector3.new(0, height / 2, 0)), Theme.Colors.Storm, Enum.Material.SmoothPlastic,
-		{ Collide = false, Transparency = 0.74 })
-	vol.CastShadow = false
-	CollectionService:AddTag(vol, Tags.StormCloud)
-	vol:SetAttribute("DPS", h.DPS)
-	darkPuffs(ctx, top + Vector3.new(0, height + 1, 0), 4, math.min(step.Size.X, step.Size.Z) * 0.35, 5, 8)
-	return main
-end
-
-local function buildLightning(ctx, step)
-	local h = step.Hazard
-	local main = buildCloud(ctx, step, { Name = "LightningPlatform_" .. step.Index, TrimColor = Color3.fromRGB(255, 226, 90) })
-	local top = ctx.Origin + step.Pos
-	local zonePos = top + h.ZoneOffset
-	local d = h.Radius * 2
-	local zone = mk(ctx, "Hazards", "LightningZone", Vector3.new(d, 0.2, d), CFrame.new(zonePos + Vector3.new(0, 0.1, 0)),
-		Color3.fromRGB(255, 80, 90), Enum.Material.Neon, { Collide = false, Transparency = 1 })
-	zone.CastShadow = false
-	CollectionService:AddTag(zone, Tags.LightningZone)
-	zone:SetAttribute("Damage", h.Damage)
-	zone:SetAttribute("Interval", h.Interval)
-	zone:SetAttribute("Warning", h.Warning)
-	zone:SetAttribute("Radius", h.Radius)
-	-- a permanent faint ring so players can read where bolts land
-	mk(ctx, "Decor", "StrikeMark", Vector3.new(0.08, d, d), upright(zonePos + Vector3.new(0, 0.07, 0)),
-		Color3.fromRGB(255, 80, 90), Enum.Material.Neon, { Shape = Enum.PartType.Cylinder, Decor = true, Transparency = 0.8 })
-	darkPuffs(ctx, top + Vector3.new(0, 13, 0), 3, 3, 4.5, 6.5)
-	local anchor = mkAnchor(ctx, "Signs", top + Vector3.new(h.ZoneOffset.X, 8, h.ZoneOffset.Z))
-	local gui = billboard(anchor, 3, 3, 0, 110)
-	addText(gui, "⚡", "Accent", Color3.fromRGB(255, 226, 90), 0, 1)
-	return main
-end
-
--- Co-op chasm: a bridge that only exists while someone holds a plate on a side platform.
-local function buildPlateBridge(ctx, step)
-	local h = step.Hazard
-	local main = buildCloud(ctx, step, { Name = "BridgeLanding_" .. step.Index })
-	local color = PLATE_COLORS[(h.BridgeNumber % #PLATE_COLORS) + 1]
-	local bridgeId = "bridge" .. tostring(h.BridgeNumber)
-
-	-- the bridge span itself (HazardService fades it in and out)
-	local spanTop = ctx.Origin + h.Span.Pos
-	local span = mk(ctx, "Hazards", "PlateBridge", h.Span.Size, CFrame.new(spanTop - Vector3.new(0, h.Span.Size.Y / 2, 0)),
-		color:Lerp(Theme.Colors.White, 0.35), Enum.Material.Neon, { Transparency = 0.2 })
-	CollectionService:AddTag(span, Tags.PlateBridge)
-	span:SetAttribute("BridgeId", bridgeId)
-
-	-- ghost rails stay visible while the bridge is retracted so the route is readable
-	for _, sgn in ipairs({ -1, 1 }) do
-		mk(ctx, "Decor", "GhostRail", Vector3.new(0.3, 0.3, h.Span.Size.Z),
-			CFrame.new(spanTop + Vector3.new(sgn * (h.Span.Size.X / 2 - 0.15), 0.15, 0)), color, Enum.Material.Neon,
-			{ Decor = true, Transparency = 0.45 })
-	end
-
-	for sideIndex, side in ipairs(h.Sides) do
-		local fake = {
-			Index = step.Index,
-			Stage = step.Stage,
-			Pos = side.Pos,
-			Size = side.Size,
-		}
-		buildCloud(ctx, fake, { Name = "PlateIsland_" .. step.Index .. "_" .. sideIndex, TrimColor = color })
-		local plateTop = ctx.Origin + side.Plate.Pos
-		local plate = mk(ctx, "Hazards", "PressurePlate", side.Plate.Size,
-			CFrame.new(plateTop - Vector3.new(0, side.Plate.Size.Y / 2, 0)), color, Enum.Material.Neon)
-		CollectionService:AddTag(plate, Tags.PressurePlate)
-		plate:SetAttribute("BridgeId", bridgeId)
-		local light = Instance.new("PointLight")
-		light.Color = color
-		light.Range = 12
-		light.Brightness = 1.2
-		light.Parent = plate
-		local gui = surfaceGui(plate, Enum.NormalId.Top, 60)
-		addText(gui, "HOLD", "Heading", Theme.Colors.White, 0.2, 0.6)
-		sparkles(plate, color, 4, 5, 1.4, 0.7)
-
-		local anchor = mkAnchor(ctx, "Signs", plateTop + Vector3.new(0, 5.5, 0))
-		local sign = billboard(anchor, 9, 3.4, 0, 120)
-		if side.From == step.Index - 1 then
-			addText(sign, "HOLD THE PLATE", "Accent", color, 0, 0.6)
-			addText(sign, "so your team can cross", "Body", Theme.Colors.White, 0.62, 0.34)
-		else
-			addText(sign, "HOLD TO LET THEM CROSS", "Accent", color, 0, 0.6)
-			addText(sign, "then everyone moves on", "Body", Theme.Colors.White, 0.62, 0.34)
-		end
-	end
-	return main
-end
-
-----------------------------------------------------------------------
--- Signs, arches, flags
-----------------------------------------------------------------------
--- DASH hint: a stack of gold chevrons on the run-up platform pointing +Z plus a floating sign.
-local function buildDashHint(ctx, prev, step)
-	local top = ctx.Origin + prev.Pos
-	local frontZ = prev.Size.Z / 2
-	local targetX = step.Pos.X
-	if step.Kind == "PlateBridge" and step.Hazard and step.Hazard.Span then
-		targetX = step.Hazard.Span.Pos.X
-	end
-	local localX = Util.Clamp(targetX - prev.Pos.X, -(prev.Size.X / 2 - 1.8), prev.Size.X / 2 - 1.8)
-	local chevrons = 2
-	if prev.Size.Z >= 8 then
-		chevrons = 3
-	end
-	local armLen = 2.6
-	local phi = math.pi / 4
-	for k = 1, chevrons do
-		local tip = top + Vector3.new(localX, 0.12, frontZ - 0.9 - (k - 1) * 1.7)
-		for _, sgn in ipairs({ -1, 1 }) do
-			-- each arm runs from the tip back and outwards; its length axis is local Z
-			local dir = Vector3.new(sgn * math.sin(phi), 0, math.cos(phi))
-			local centre = tip - dir * (armLen / 2)
-			mk(ctx, "Decor", "DashArrow", Vector3.new(0.6, 0.12, armLen),
-				CFrame.new(centre) * CFrame.Angles(0, sgn * phi, 0), DASH_GOLD, Enum.Material.Neon, { Decor = true })
-		end
-	end
-	local anchor = mkAnchor(ctx, "Signs", top + Vector3.new(localX, 5, frontZ - 1.2))
-	local gui = billboard(anchor, 8, 3.4, 0, 130)
-	addText(gui, "DASH!", "Accent", DASH_GOLD, 0, 0.62)
-	if step.Kind == "PlateBridge" then
-		addText(gui, "or hold the plate for a bridge", "Body", Theme.Colors.White, 0.64, 0.32)
 	else
-		addText(gui, "press Q  or tap DASH", "Body", Theme.Colors.White, 0.64, 0.32)
+		cyl(ctx, "Decor", "MiniPole", 2.4, 0.16, F * CFrame.new(cx, 1.3, cz), C.Iron:Lerp(C.Top, 0.3))
+		blk(ctx, "Decor", "MiniFlag", Vector3.new(0.08, 0.7, 1.1), F * CFrame.new(cx, 2.1, cz + 0.55), look.Tint)
 	end
 end
 
--- Wooden-less sign board: dark rounded panel with a themed title and body text.
-local function buildBoard(ctx, centre, face, title, body, accent)
-	local board = mk(ctx, "Signs", "InfoBoard", Vector3.new(0.4, 5.6, 10.4), CFrame.new(centre), Theme.Colors.Panel,
-		Enum.Material.SmoothPlastic, { Decor = true })
-	for _, dz in ipairs({ -4.2, 4.2 }) do
-		mk(ctx, "Signs", "BoardPost", Vector3.new(2.6, 0.5, 0.5),
-			upright(Vector3.new(centre.X, centre.Y - 2.8 - 1.3 + 0.3, centre.Z + dz)), Theme.Colors.CloudShade,
-			Enum.Material.SmoothPlastic, { Shape = Enum.PartType.Cylinder, Decor = true })
+function KB.Platform(ctx, step, look)
+	local main, F = buildBase(ctx, step, look, { Name = "Cloud_" .. step.Index })
+	if step.Link == "Cannon" then
+		addBullseye(ctx, step, F)
+	else
+		addProp(ctx, step, look, F)
 	end
-	local gui = surfaceGui(board, face, 50)
-	local panel = Theme.Panel({ Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 0.05 })
-	panel.Parent = gui
-	addText(panel, title, "Title", accent, 0.04, 0.2)
-	addText(panel, body, "Body", Theme.Colors.White, 0.27, 0.68)
+	return main
 end
 
-local function buildStart(ctx, step)
-	local main = buildCloud(ctx, step, { Name = "StartPlatform", TrimColor = ctx.Diff.Color })
+-- long balance beam: planks, keel, end puffs and two lantern posts
+function KB.Beam(ctx, step, look)
+	local main, F = buildBase(ctx, step, look, { Name = "Beam_" .. step.Index, Under = false, LongTrim = true })
+	local sx, th, sz = step.Size.X, step.Size.Y, step.Size.Z
+	local seam = look.Top:Lerp(C.Shadow, 0.45)
+	local n = max(2, floor(sz / 2.6))
+	for k = 1, n do
+		local z = -sz / 2 + (k - 0.5) * sz / n
+		blk(ctx, "Decor", "Plank", Vector3.new(sx - 0.2, 0.05, 0.16), F * CFrame.new(0, 0.12, z), seam)
+	end
+	local deep = look.Side:Lerp(C.Shadow, 0.4)
+	blk(ctx, "Decor", "Keel", Vector3.new(sx * 0.55, 1.4, sz * 0.9), F * CFrame.new(0, -th - 0.7, 0), deep)
+	local puff = look.Side:Lerp(C.Top, 0.3)
+	for _, e in ipairs({ -1, 1 }) do
+		ball(ctx, "Decor", "EndPuff", Vector3.new(sx * 1.5, 2.2, sx * 1.5), F * CFrame.new(0, -th - 0.3, e * (sz / 2 - sx * 0.4)), puff)
+	end
+	for i, e in ipairs({ -1, 1 }) do
+		local side = (i == 1) and 1 or -1
+		local px, pz = side * (sx / 2 - 0.25), e * (sz / 2 - 0.5)
+		cyl(ctx, "Decor", "LanternPost", 2.2, 0.3, F * CFrame.new(px, 1.1, pz), look.Trim:Lerp(C.Shadow, 0.5))
+		ball(ctx, "Decor", "Lantern", 0.8, F * CFrame.new(px, 2.4, pz), look.Trim:Lerp(C.Text, 0.35), MAT.Neon, 0.1)
+	end
+	return main
+end
+
+-- sliding cloud: decor is welded so it rides along, a faint rail shows the route
+function KB.Moving(ctx, step, look)
+	local h = step.Hazard or EMPTY
+	local main, F = buildBase(ctx, step, look, { Name = "MovingCloud_" .. step.Index, Attach = "weld", Lite = true })
+	local eo = h.EndOffset or Vector3.new(0, 0, 6)
+	CollectionService:AddTag(main, Tags.MovingCloud)
+	main:SetAttribute("EndOffset", eo)
+	main:SetAttribute("Period", h.Period or 3.2)
+	local dir = Vector3.new(eo.X, 0, eo.Z)
+	local th = step.Size.Y
 	local top = ctx.Origin + step.Pos
-	local color = ctx.Diff.Color
+	if dir.Magnitude > 0.1 then
+		local u = dir.Unit
+		local yaw = yawOf(u)
+		local spread = min(step.Size.X, step.Size.Z) * 0.2
+		for _, s in ipairs({ 1, -1 }) do
+			local cf = CFrame.new(top + u * (s * spread) + Vector3.new(0, 0.16, 0)) * CFrame.Angles(0, yaw + (s == 1 and 0 or pi), 0)
+			chevron(ctx, "Decor", "SlideArrow", cf, 1.7, 0.4, look.Tint, MAT.SmoothPlastic, 0.1)
+		end
+	end
+	ctx.Attach = nil
+	local a = top + Vector3.new(0, -th - 5.2, 0)
+	local b = a + Vector3.new(eo.X, 0, eo.Z)
+	local railColor = rgb(116, 200, 232)
+	rod(ctx, "Decor", "MoveRail", a, b, 0.35, railColor, MAT.Neon, 0.55)
+	ball(ctx, "Decor", "MoveStop", 1.0, CFrame.new(a), railColor, MAT.Neon, 0.35)
+	ball(ctx, "Decor", "MoveStop", 1.0, CFrame.new(b), railColor, MAT.Neon, 0.35)
+	return main
+end
 
-	mk(ctx, "Decor", "StartRing", Vector3.new(0.1, 10, 10), upright(top + Vector3.new(0, 0.07, -4)), color,
-		Enum.Material.Neon, { Shape = Enum.PartType.Cylinder, Decor = true, Transparency = 0.6 })
+-- fading step: pale translucent slab, cracks, sparkles (all decor is a child, so it fades with the slab)
+function KB.Vanishing(ctx, step, look)
+	local h = step.Hazard or EMPTY
+	local ghost = look.Top:Lerp(look.Trim, 0.3)
+	local ghostLook = { Side = ghost, Mat = MAT.SmoothPlastic, Top = ghost, Trim = look.Trim:Lerp(C.Text, 0.3) }
+	local main, F = buildBase(ctx, step, ghostLook, { Name = "VanishCloud_" .. step.Index, Slab = true, Transparency = 0.2 })
+	CollectionService:AddTag(main, Tags.VanishCloud)
+	main:SetAttribute("VanishDelay", h.VanishDelay or 1)
+	main:SetAttribute("ReturnDelay", h.ReturnDelay or 3.5)
+	ctx.Attach = { Mode = "child", Root = main }
+	addTrim(ctx, step, F, ghostLook.Trim)
+	local sx, sz = step.Size.X, step.Size.Z
+	local crack = ghost:Lerp(C.Shadow, 0.55)
+	for k = 1, 3 do
+		local len = ctx.Rng:NextNumber(min(sx, sz) * 0.3, min(sx, sz) * 0.55)
+		local x = ctx.Rng:NextNumber(-1, 1) * (sx / 2 - len * 0.5 - 0.3)
+		local z = ctx.Rng:NextNumber(-1, 1) * (sz / 2 - len * 0.5 - 0.3)
+		blk(ctx, "Decor", "Crack", Vector3.new(0.14, 0.05, len),
+			F * CFrame.new(x, 0.03, z) * CFrame.Angles(0, ctx.Rng:NextNumber(0, pi), 0), crack, MAT.SmoothPlastic, 0.1)
+	end
+	addSparkles(main, look.Trim, 3, 2, 1.6, 0.7)
+	ctx.Attach = nil
+	return main
+end
 
-	-- START arch over the way forward
+-- bounce pad: round pad with a dark skirt, glow ring and an arrow
+function KB.Bounce(ctx, step, look)
+	local h = step.Hazard or EMPTY
+	local main, F = buildBase(ctx, step, look, { Name = "BounceCloud_" .. step.Index })
+	local padSize = h.PadSize or 4
+	local color = C.Rainbow[(step.Index % #C.Rainbow) + 1]
+	local pc = ctx.Origin + (h.Pos or step.Pos)
+	cyl(ctx, "Decor", "PadSkirt", 0.3, padSize + 1.4, CFrame.new(pc + Vector3.new(0, 0.15, 0)), C.Iron, MAT.Metal)
+	local pad = mk(ctx, "Hazards", "BouncePad", "Part", Vector3.new(0.7, padSize, padSize),
+		CFrame.new(pc + Vector3.new(0, 0.35, 0)) * CFrame.Angles(0, 0, pi / 2), color, MAT.SmoothPlastic,
+		{ Shape = Enum.PartType.Cylinder, Solid = true })
+	CollectionService:AddTag(pad, Tags.BouncePad)
+	pad:SetAttribute("Power", h.Power or 75)
+	pad:SetAttribute("LaunchSpeed", h.LaunchSpeed or 0)
+	cyl(ctx, "Decor", "PadGlow", 0.05, padSize * 0.68, CFrame.new(pc + Vector3.new(0, 0.72, 0)), color:Lerp(C.Text, 0.4), MAT.Neon, 0.25)
+	local glyph = blk(ctx, "Decor", "PadGlyph", Vector3.new(padSize * 0.7, 0.05, padSize * 0.7),
+		CFrame.new(pc + Vector3.new(0, 0.76, 0)), color, MAT.SmoothPlastic, 1)
+	local gui = surfaceOn(glyph, Enum.NormalId.Top, 60)
+	addText(gui, "▲", "Accent", C.Ink, 0.05, 0.9)
+	return main
+end
+
+-- spinning bar(s) over a hub, with a faint danger ring on the floor
+function KB.SpinBarPlatform(ctx, step, look)
+	local h = step.Hazard or EMPTY
+	local main, F = buildBase(ctx, step, look, { Name = "SpinPlatform_" .. step.Index })
+	local hub = ctx.Origin + (h.Pos or step.Pos)
+	local len = h.Length or 6
+	local count = h.Count or 1
+	cyl(ctx, "Decor", "DangerRing", 0.05, len + 0.4, CFrame.new(hub + Vector3.new(0, 0.11, 0)), C.HazardGlow, MAT.Neon, 0.5)
+	cyl(ctx, "Decor", "DangerFloor", 0.05, len - 0.2, CFrame.new(hub + Vector3.new(0, 0.13, 0)), main.Color:Lerp(C.Top, 0.7))
+	cyl(ctx, "Decor", "BarHub", 2.1, 2.2, CFrame.new(hub + Vector3.new(0, 1.05, 0)), C.Iron, MAT.Metal)
+	for k = 1, count do
+		local cf = CFrame.new(hub + Vector3.new(0, h.Height or 1, 0)) * CFrame.Angles(0, rad((k - 1) * 180 / count), 0)
+		local bar = mk(ctx, "Hazards", "SpinBar", "Part", Vector3.new(len, 1.5, 1.1), cf, C.Hazard, MAT.SmoothPlastic,
+			{ Solid = true })
+		CollectionService:AddTag(bar, Tags.SpinBar)
+		bar:SetAttribute("Speed", h.Speed or 70)
+		bar:SetAttribute("Damage", h.Damage or 15)
+		ctx.Attach = { Mode = "weld", Root = bar }
+		for _, sgn in ipairs({ -1, 1 }) do
+			ball(ctx, "Decor", "BarCap", 1.9, cf * CFrame.new(sgn * len / 2, 0, 0), C.HazardGlow, MAT.Neon, 0.1)
+			blk(ctx, "Decor", "BarStripe", Vector3.new(0.5, 1.56, 1.16), cf * CFrame.new(sgn * len * 0.25, 0, 0), C.Gold)
+		end
+		ctx.Attach = nil
+	end
+	return main
+end
+
+-- rain cloud: slate platform, translucent damage volume, dark puffs above (HazardService adds the rain)
+function KB.StormPlatform(ctx, step, look)
+	local h = step.Hazard or EMPTY
+	local main = buildBase(ctx, step, look, { Name = "StormPlatform_" .. step.Index })
+	local box = h.Box
+	if not box then
+		return main
+	end
+	local bsize = box.Size
+	local BF = CFrame.new(ctx.Origin + box.Pos) * CFrame.Angles(0, rad(box.Yaw or 0), 0)
+	local vol = mk(ctx, "Hazards", "StormCloud", "Part", bsize, BF * CFrame.new(0, bsize.Y / 2, 0), C.Storm,
+		MAT.SmoothPlastic, { Trigger = true, Transparency = 0.8 })
+	CollectionService:AddTag(vol, Tags.StormCloud)
+	vol:SetAttribute("DPS", h.DPS or 8)
+	local n = max(4, min(8, floor(step.Size.X * step.Size.Z / 40) + 3))
+	for _ = 1, n do
+		local d = ctx.Rng:NextNumber(4.2, 5.8)
+		local lx = ctx.Rng:NextNumber(-1, 1) * max(0, bsize.X / 2 - d * 0.3)
+		local lz = ctx.Rng:NextNumber(-1, 1) * max(0, bsize.Z / 2 - d * 0.3)
+		ball(ctx, "Decor", "StormPuff", d, BF * CFrame.new(lx, ctx.Rng:NextNumber(7.0, 7.4), lz),
+			C.Storm:Lerp(rgb(120, 130, 164), ctx.Rng:NextNumber(0, 0.4)), MAT.SmoothPlastic, 0.08)
+	end
+	return main
+end
+
+-- strike zones with permanent scorch rings, two lightning rods and thunder puffs
+function KB.LightningPlatform(ctx, step, look)
+	local h = step.Hazard or EMPTY
+	local main, F = buildBase(ctx, step, look, { Name = "LightningPlatform_" .. step.Index })
+	for i, z in ipairs(h.Zones or EMPTY) do
+		local zp = ctx.Origin + z.Pos
+		local d = z.Radius * 2
+		local zone = mk(ctx, "Hazards", "LightningZone", "Part", Vector3.new(d, 0.2, d), CFrame.new(zp + Vector3.new(0, 0.1, 0)),
+			C.HazardGlow, MAT.SmoothPlastic, { Trigger = true, Transparency = 1 })
+		CollectionService:AddTag(zone, Tags.LightningZone)
+		zone:SetAttribute("Damage", h.Damage or 28)
+		zone:SetAttribute("Interval", h.Interval or 4)
+		zone:SetAttribute("Warning", h.Warning or 1.2)
+		zone:SetAttribute("Radius", z.Radius)
+		cyl(ctx, "Decor", "StrikeRing", 0.05, d + 0.3, CFrame.new(zp + Vector3.new(0, 0.1, 0)), C.HazardGlow, MAT.Neon, 0.5)
+		cyl(ctx, "Decor", "Scorch", 0.05, d - 0.1, CFrame.new(zp + Vector3.new(0, 0.12, 0)), rgb(58, 50, 84), MAT.SmoothPlastic, 0.3)
+	end
+	local sx, sz = step.Size.X, step.Size.Z
+	for i, c in ipairs({ { 1, 1 }, { -1, -1 } }) do
+		local px, pz = c[1] * (sx / 2 - 0.8), c[2] * (sz / 2 - 0.8)
+		local base = F * CFrame.new(px, 0, pz)
+		cyl(ctx, "Decor", "RodPole", 6, 0.34, base * CFrame.new(0, 3, 0), C.Iron, MAT.Metal)
+		cyl(ctx, "Decor", "RodBase", 0.8, 1.2, base * CFrame.new(0, 0.4, 0), C.Iron, MAT.Metal)
+		ball(ctx, "Decor", "RodTip", 0.9, base * CFrame.new(0, 6.2, 0), rgb(236, 214, 120), MAT.Neon, 0.1)
+	end
+	for _ = 1, 3 do
+		local d = ctx.Rng:NextNumber(4.0, 5.5)
+		ball(ctx, "Decor", "ThunderPuff", d,
+			F * CFrame.new(ctx.Rng:NextNumber(-1, 1) * sx * 0.3, 9.0, ctx.Rng:NextNumber(-1, 1) * sz * 0.3),
+			rgb(84, 80, 118):Lerp(rgb(130, 126, 164), ctx.Rng:NextNumber(0, 0.5)), MAT.SmoothPlastic, 0.1)
+	end
+	return main
+end
+
+-- swinging plank hung from an axle on two posts
+function KB.PendulumPlatform(ctx, step, look)
+	local h = step.Hazard or EMPTY
+	local main = buildBase(ctx, step, look, { Name = "PendulumPlatform_" .. step.Index })
+	if not (h.Hinge and h.Axis) then
+		return main
+	end
+	local top = ctx.Origin + step.Pos
+	local hinge = ctx.Origin + h.Hinge
+	local axis = Vector3.new(h.Axis.X, 0, h.Axis.Z).Unit
+	local bs = h.BeamSize or Vector3.new(8, h.Length or 6, 1)
+	local len = bs.Y
+	local beamCF = CFrame.fromMatrix(hinge - Vector3.new(0, len / 2, 0), axis, Vector3.new(0, 1, 0))
+	local beam = mk(ctx, "Hazards", "PendulumBeam", "Part", bs, beamCF, C.Hazard, MAT.SmoothPlastic, { Solid = true })
+	CollectionService:AddTag(beam, Tags.Pendulum)
+	beam:SetAttribute("Hinge", hinge)
+	beam:SetAttribute("Axis", axis)
+	beam:SetAttribute("Period", h.Period or 3.4)
+	beam:SetAttribute("Arc", h.Arc or 40)
+	beam:SetAttribute("Damage", h.Damage or 20)
+	-- anchored decor parented under the beam is swung along by HazardService
+	ctx.Attach = { Mode = "child", Root = beam }
+	for k = 1, 3 do
+		blk(ctx, "Decor", "BeamStripe", Vector3.new(bs.X + 0.04, 0.9, bs.Z + 0.06),
+			beamCF * CFrame.new(0, -len / 2 + k * len * 0.22, 0), C.Gold)
+	end
+	ball(ctx, "Decor", "BeamWeight", max(2.6, bs.Z * 3), beamCF * CFrame.new(0, -len / 2 + 1.0, 0), C.Hazard:Lerp(C.Iron, 0.5), MAT.Metal)
+	ctx.Attach = nil
+	-- static frame: axle + two posts
+	local reach = bs.X / 2 + 0.9
+	local ea, eb = hinge - axis * reach, hinge + axis * reach
+	rod(ctx, "Decor", "Axle", ea, eb, 0.7, C.Iron, MAT.Metal)
+	for _, e in ipairs({ ea, eb }) do
+		ball(ctx, "Decor", "AxleCap", 1.2, CFrame.new(e), C.Brass, MAT.Metal)
+		rod(ctx, "Decor", "Post", e, Vector3.new(e.X, top.Y, e.Z), 0.6, C.Iron:Lerp(C.Brass, 0.3), MAT.Metal)
+	end
+	return main
+end
+
+-- gust zone with painted wind arrows and a flag in the calm lee
+function KB.WindPlatform(ctx, step, look)
+	local h = step.Hazard or EMPTY
+	local main, F = buildBase(ctx, step, look, { Name = "WindPlatform_" .. step.Index })
+	local z = h.Zone
+	if not z then
+		return main
+	end
+	local dir = h.Direction or forwardOf(step)
+	dir = Vector3.new(dir.X, 0, dir.Z)
+	if dir.Magnitude < 0.01 then
+		dir = forwardOf(step)
+	end
+	dir = dir.Unit
+	local zy = rad(z.Yaw or 0)
+	local lx = Vector3.new(cos(zy), 0, -sin(zy))
+	local lz = Vector3.new(sin(zy), 0, cos(zy))
+	local along = abs(dir:Dot(lx)) * z.Size.X + abs(dir:Dot(lz)) * z.Size.Z
+	local across = abs(dir:Dot(lx)) * z.Size.Z + abs(dir:Dot(lz)) * z.Size.X
+	local centre = ctx.Origin + z.Pos
+	local vol = mk(ctx, "Hazards", "WindGust", "Part", z.Size,
+		CFrame.new(centre + Vector3.new(0, z.Size.Y / 2, 0)) * CFrame.Angles(0, zy, 0), C.Wind, MAT.SmoothPlastic,
+		{ Trigger = true, Transparency = 1 })
+	CollectionService:AddTag(vol, Tags.WindGust)
+	vol:SetAttribute("Force", h.Force or 18)
+	vol:SetAttribute("Direction", dir)
+	vol:SetAttribute("Interval", h.Interval or 5)
+	vol:SetAttribute("Warning", h.Warning or 1.5)
+	local n = max(1, min(4, floor(along / 2.8)))
+	local armLen = max(1.3, min(2.4, across * 0.28))
+	for k = 1, n do
+		local off = (k - (n + 1) / 2) * (along / n)
+		chevron(ctx, "Decor", "WindArrow", CFrame.new(centre + dir * off + Vector3.new(0, 0.15, 0)) * CFrame.Angles(0, yawOf(dir), 0),
+			armLen, 0.32, C.Wind, MAT.Neon, 0.45)
+	end
+	-- flag in the lee
+	local polePos = centre + dir * (along / 2 + 2.2)
+	local top = ctx.Origin + step.Pos
+	polePos = Vector3.new(polePos.X, top.Y, polePos.Z)
+	cyl(ctx, "Decor", "FlagPole", 3.8, 0.25, CFrame.new(polePos + Vector3.new(0, 1.9, 0)), C.Iron:Lerp(C.Top, 0.4))
+	local flagCF = CFrame.new(polePos + Vector3.new(0, 3.2, 0) + dir * 1.35) * CFrame.Angles(0, yawOf(dir) + pi / 2, 0)
+	blk(ctx, "Decor", "WindFlag", Vector3.new(0.12, 0.9, 2.6), flagCF, look.Tint, MAT.SmoothPlastic)
+	ball(ctx, "Decor", "FlagTop", 0.5, CFrame.new(polePos + Vector3.new(0, 3.9, 0)), C.Gold, MAT.Metal)
+	return main
+end
+
+-- the cannon: iron plate with a brass disc (the tagged pad), a big tilted barrel behind it, wheels,
+-- a fuse and a dotted flight arc to the landing island
+function KB.CannonPad(ctx, step, look)
+	local h = step.Hazard or EMPTY
+	local main, F = buildBase(ctx, step, look, { Name = "CannonBase_" .. step.Index })
+	if not (h.Target and h.Pos) then
+		return main
+	end
+	local padR = h.PadRadius or 2.6
+	local pc = ctx.Origin + h.Pos
+	local target = ctx.Origin + h.Target
+	local aim = h.Aim
+	if not aim or aim.Magnitude < 0.01 then
+		aim = Vector3.new(target.X - pc.X, 0, target.Z - pc.Z)
+	end
+	aim = Vector3.new(aim.X, 0, aim.Z).Unit
+	local t = h.FlightTime or 1.3
+	local padH = 0.8
+	local padCF = CFrame.new(pc + Vector3.new(0, padH / 2, 0)) * CFrame.Angles(0, yawOf(aim), 0)
+	local pad = mk(ctx, "Hazards", "CloudCannon", "Part", Vector3.new(padR * 2, padH, padR * 2), padCF, C.Iron, MAT.Metal,
+		{ Solid = true })
+	CollectionService:AddTag(pad, Tags.CloudCannon)
+	pad:SetAttribute("Target", target)
+	pad:SetAttribute("FlightTime", t)
+	local deck = pc + Vector3.new(0, padH, 0)
+	cyl(ctx, "Decor", "PadDisc", 0.08, padR * 1.84, CFrame.new(deck + Vector3.new(0, 0.04, 0)), C.Brass, MAT.Metal)
+	cyl(ctx, "Decor", "PadGlowRing", 0.05, padR * 1.3, CFrame.new(deck + Vector3.new(0, 0.1, 0)), C.Gold, MAT.Neon, 0.3)
+	cyl(ctx, "Decor", "PadCore", 0.06, padR * 1.1, CFrame.new(deck + Vector3.new(0, 0.12, 0)), C.Iron:Lerp(C.Brass, 0.25), MAT.Metal)
+	for _, off in ipairs({ -0.2, 0.4 }) do
+		chevron(ctx, "Decor", "LaunchArrow", CFrame.new(deck + aim * (padR * off) + Vector3.new(0, 0.16, 0)) *
+			CFrame.Angles(0, yawOf(aim), 0), padR * 0.5, 0.3, C.Gold, MAT.Neon, 0.2)
+	end
+	addSparkles(pad, C.Gold, 4, 3, 1.4, 0.6)
+
+	-- launch arc exactly as HazardService flies it: v = (T - R)/t + (0, g t / 2, 0) from the root
+	local g = Phys.Gravity
+	local root = deck + Vector3.new(0, CourseLayout.RootHeight or 3, 0)
+	local v = (target - root) / t + Vector3.new(0, g * t / 2, 0)
+	local elev = atan2(v.Y, sqrt(v.X * v.X + v.Z * v.Z))
+	elev = max(rad(34), min(rad(62), elev))
+	local d = aim * cos(elev) + Vector3.new(0, sin(elev), 0)
+
+	-- barrel: sized to stay (almost) inside the platform behind the pad
+	local D = max(2.4, min(3.6, padR * 1.15))
+	local aimLocal = F:VectorToObjectSpace(aim)
+	local edgeBack = min((step.Size.X / 2) / max(abs(aimLocal.X), 0.001), (step.Size.Z / 2) / max(abs(aimLocal.Z), 0.001))
+	local back = padR * 0.9
+	local L = max(3.8, min(7.0, (edgeBack + 1.0 - back) / cos(elev)))
+	local mh = D * 0.45 + L * sin(elev)
+	local muzzle = pc + Vector3.new(0, mh, 0) - aim * back
+	local rear = muzzle - d * L
+	local function along(s)
+		return muzzle - d * s
+	end
+	mk(ctx, "Decor", "CannonBarrel", "Part", Vector3.new(L, D, D), axisCF(along(L / 2), d), C.Iron, MAT.Metal,
+		{ Shape = Enum.PartType.Cylinder })
+	ball(ctx, "Decor", "Breech", D * 1.08, CFrame.new(rear), C.Iron:Lerp(C.Ink, 0.4), MAT.Metal)
+	mk(ctx, "Decor", "MuzzleRing", "Part", Vector3.new(0.9, D * 1.22, D * 1.22), axisCF(along(0.35), d), C.Brass, MAT.Metal,
+		{ Shape = Enum.PartType.Cylinder })
+	mk(ctx, "Decor", "MuzzleHole", "Part", Vector3.new(0.1, D * 0.82, D * 0.82), axisCF(muzzle + d * 0.04, d), rgb(24, 24, 34),
+		MAT.SmoothPlastic, { Shape = Enum.PartType.Cylinder })
+	for _, s in ipairs({ L * 0.36, L * 0.66 }) do
+		mk(ctx, "Decor", "BarrelBand", "Part", Vector3.new(0.5, D * 1.1, D * 1.1), axisCF(along(s), d), C.Brass, MAT.Metal,
+			{ Shape = Enum.PartType.Cylinder })
+	end
+	-- fuse
+	local fuseBase = rear + Vector3.new(0, D * 0.5, 0)
+	rod(ctx, "Decor", "Fuse", fuseBase, fuseBase + Vector3.new(0, 1.0, 0), 0.22, rgb(150, 120, 90))
+	local spark = ball(ctx, "Decor", "FuseSpark", 0.6, CFrame.new(fuseBase + Vector3.new(0, 1.1, 0)), C.Lava, MAT.Neon, 0.05)
+	addSparkles(spark, C.Lava, 6, 3, 0.8, 0.5)
+	-- carriage and wheels
+	local top = ctx.Origin + step.Pos
+	local side = aim:Cross(Vector3.new(0, 1, 0)).Unit
+	local mid = along(L * 0.5)
+	local wheelY = top.Y + 1.3
+	blk(ctx, "Decor", "Carriage", Vector3.new(D * 1.3, 0.6, L * 0.55),
+		CFrame.new(mid.X, top.Y + 0.9, mid.Z) * CFrame.Angles(0, yawOf(aim), 0), C.Iron:Lerp(C.Brass, 0.2), MAT.Metal)
+	for _, sgn in ipairs({ -1, 1 }) do
+		local wp = Vector3.new(mid.X, wheelY, mid.Z) + side * (sgn * (D * 0.65 + 0.5))
+		mk(ctx, "Decor", "Wheel", "Part", Vector3.new(0.6, 2.6, 2.6), CFrame.fromMatrix(wp, side, Vector3.new(0, 1, 0)),
+			C.Iron:Lerp(C.Brass, 0.15), MAT.Metal, { Shape = Enum.PartType.Cylinder })
+		ball(ctx, "Decor", "WheelHub", 0.9, CFrame.new(wp + side * (sgn * 0.3)), C.Brass, MAT.Metal)
+	end
+	-- dotted arc
+	local dots = 7
+	if ctx.Parts > ctx.UnderCap then
+		dots = 4
+	end
+	for k = 1, dots do
+		local s = t * k / (dots + 1)
+		local p = root + v * s - Vector3.new(0, 0.5 * g * s * s, 0)
+		ball(ctx, "Decor", "ArcDot", 0.75 - 0.035 * k, CFrame.new(p), C.Wind:Lerp(C.Text, 0.3), MAT.Neon, 0.45)
+	end
+	-- label
+	local gui = billboardOn(pad, 8, 3, 6.5, 100)
+	addText(gui, "CANNON", "Accent", C.Gold, 0, 0.58)
+	addText(gui, "step on to launch!", "Body", C.Text, 0.6, 0.34)
+	return main
+end
+
+-- co-op bridge: the far platform (this step) plus the retractable span and two plate islands
+function KB.PlateBridge(ctx, step, look)
+	local h = step.Hazard or EMPTY
+	local main = buildBase(ctx, step, look, { Name = "BridgeLanding_" .. step.Index })
+	local number = h.BridgeNumber or 1
+	local color = BRIDGE_COLORS[((number - 1) % #BRIDGE_COLORS) + 1]
+	local bridgeId = "bridge" .. tostring(number)
+	local sp = h.Span
+	if sp then
+		local SF = CFrame.new(ctx.Origin + sp.Pos) * CFrame.Angles(0, rad(sp.Yaw or 0), 0)
+		local span = mk(ctx, "Hazards", "PlateBridge", "Part", sp.Size, SF * CFrame.new(0, -sp.Size.Y / 2, 0),
+			color:Lerp(C.Top, 0.3), MAT.SmoothPlastic, { Solid = true, Transparency = 0.1 })
+		CollectionService:AddTag(span, Tags.PlateBridge)
+		span:SetAttribute("BridgeId", bridgeId)
+		-- decor under the span fades with it
+		ctx.Attach = { Mode = "child", Root = span }
+		for _, sgn in ipairs({ -1, 1 }) do
+			blk(ctx, "Decor", "BridgeEdge", Vector3.new(0.25, 0.2, sp.Size.Z - 0.2), SF * CFrame.new(sgn * (sp.Size.X / 2 - 0.12), 0.1, 0),
+				color, MAT.Neon, 0.15)
+		end
+		chevron(ctx, "Decor", "BridgeArrow", SF * CFrame.new(0, 0.08, sp.Size.Z * 0.12) * CFrame.Angles(0, 0, 0), 1.4, 0.3, color:Lerp(C.Text, 0.4),
+			MAT.Neon, 0.3)
+		ctx.Attach = nil
+		-- ghost rails stay visible while the span is retracted
+		for _, sgn in ipairs({ -1, 1 }) do
+			blk(ctx, "Decor", "GhostRail", Vector3.new(0.2, 0.2, sp.Size.Z), SF * CFrame.new(sgn * (sp.Size.X / 2 - 0.1), 0.1, 0),
+				color, MAT.Neon, 0.55)
+		end
+	end
+	for i, side in ipairs(h.Sides or EMPTY) do
+		local fake = {
+			Index = step.Index, Stage = step.Stage, Kind = "Platform", Pos = side.Pos, Size = side.Size,
+			Yaw = side.Yaw or step.Yaw, Variant = ((step.Variant or 1) + i) % 4 + 1,
+		}
+		local sideLook = {
+			Top = look.Top, Side = look.Side, Mat = look.Mat, TopMat = look.TopMat, Trim = color,
+			Tint = look.Tint,
+		}
+		buildBase(ctx, fake, sideLook, { Name = "PlateIsland_" .. step.Index .. "_" .. i })
+		if side.Plate then
+			local ps = side.Plate.Size
+			local plate = mk(ctx, "Hazards", "PressurePlate", "Part", ps,
+				CFrame.new(ctx.Origin + side.Plate.Pos - Vector3.new(0, ps.Y / 2, 0)) * CFrame.Angles(0, rad(side.Yaw or 0), 0),
+				color, MAT.SmoothPlastic, { Solid = true })
+			CollectionService:AddTag(plate, Tags.PressurePlate)
+			plate:SetAttribute("BridgeId", bridgeId)
+			addLight(plate, color, 12, 0.9)
+			addSparkles(plate, color, 4, 5, 1.4, 0.7)
+			local gui = surfaceOn(plate, Enum.NormalId.Top, 60)
+			addText(gui, "HOLD", "Heading", C.Text, 0.22, 0.56)
+			local sign = billboardOn(plate, 9, 3.4, 5.5, 110)
+			if i == 1 then
+				addText(sign, "HOLD THE PLATE", "Accent", color:Lerp(C.Text, 0.3), 0, 0.58)
+				addText(sign, "so your team can cross", "Body", C.Text, 0.6, 0.34)
+			else
+				addText(sign, "HOLD TO LET THEM CROSS", "Accent", color:Lerp(C.Text, 0.3), 0, 0.58)
+				addText(sign, "then everyone moves on", "Body", C.Text, 0.6, 0.34)
+			end
+		end
+	end
+	return main
+end
+
+-- dash-only gap: gold-trimmed landing (the hint sits on the previous platform, see buildDashHint)
+function KB.DashGap(ctx, step, look)
+	local main = buildBase(ctx, step, look, { Name = "DashLanding_" .. step.Index })
+	return main
+end
+
+----------------------------------------------------------------------
+-- Start, checkpoint and finish
+----------------------------------------------------------------------
+-- dark rounded sign board standing at `localPos` (in the frame F), readable from its `face` side
+local function buildBoard(ctx, F, localPos, face, title, body, accent)
+	local cf = F * CFrame.new(localPos)
+	local board = blk(ctx, "Signs", "InfoBoard", Vector3.new(0.4, 5.6, 8.6), cf, C.Panel, MAT.SmoothPlastic)
+	for _, dz in ipairs({ -3.2, 3.2 }) do
+		cyl(ctx, "Signs", "BoardLeg", 1.0, 0.5, F * CFrame.new(localPos.X, localPos.Y - 3.3, localPos.Z + dz), C.Iron, MAT.Metal)
+	end
+	local gui = surfaceOn(board, face, 50)
+	local panel = panelFrame(gui, 0.04)
+	addText(panel, title, "Title", accent, 0.05, 0.2)
+	addText(panel, body, "Body", C.Text, 0.28, 0.66)
+end
+
+function KB.Start(ctx, step, look)
+	local main, F = buildBase(ctx, step, look, { Name = "StartPlatform", Big = true })
+	local trim = ctx.Trim
+	-- glowing ring on the floor, where the party gathers
+	cyl(ctx, "Decor", "StartRing", 0.05, 11.4, F * CFrame.new(0, 0.12, -3), trim, MAT.Neon, 0.45)
+	cyl(ctx, "Decor", "StartRingInner", 0.05, 10.2, F * CFrame.new(0, 0.14, -3), look.Top)
+	-- START arch over the way forward (local +Z is the first lane)
 	local archZ = 9
 	local half = 9.5
 	for _, sgn in ipairs({ -1, 1 }) do
-		mk(ctx, "Decor", "ArchPillar", Vector3.new(14, 1.8, 1.8), upright(top + Vector3.new(sgn * half, 7, archZ)),
-			Theme.Colors.Cloud, Enum.Material.SmoothPlastic, { Shape = Enum.PartType.Cylinder, Decor = true })
-		mk(ctx, "Decor", "ArchCap", Vector3.new(2.6, 2.6, 2.6), CFrame.new(top + Vector3.new(sgn * half, 14.4, archZ)),
-			color, Enum.Material.Neon, { Shape = Enum.PartType.Ball, Decor = true })
+		cyl(ctx, "Decor", "ArchPillar", 12.5, 1.8, F * CFrame.new(sgn * half, 6.25, archZ), C.Top:Lerp(C.Side, 0.4))
+		cyl(ctx, "Decor", "ArchBase", 1.2, 2.8, F * CFrame.new(sgn * half, 0.6, archZ), C.Side)
+		ball(ctx, "Decor", "ArchCap", 2.4, F * CFrame.new(sgn * half, 13.3, archZ), trim, MAT.Neon, 0.1)
 	end
-	local beam = mk(ctx, "Signs", "StartBeam", Vector3.new(22, 3.4, 2), CFrame.new(top + Vector3.new(0, 15.7, archZ)),
-		Theme.Colors.Panel, Enum.Material.SmoothPlastic, { Decor = true })
-	mk(ctx, "Decor", "StartGlow", Vector3.new(22, 0.25, 2.1), CFrame.new(top + Vector3.new(0, 13.95, archZ)), color,
-		Enum.Material.Neon, { Decor = true })
-	for k, c in ipairs(Theme.Colors.Rainbow) do
-		mk(ctx, "Decor", "Bunting", Vector3.new(1.2, 1.2, 1.2),
-			CFrame.new(top + Vector3.new(-9 + (k - 1) * 3.6, 17.9, archZ)), c, Enum.Material.Neon,
-			{ Shape = Enum.PartType.Ball, Decor = true })
+	local beam = blk(ctx, "Signs", "StartBeam", Vector3.new(22, 3.4, 2), F * CFrame.new(0, 14.2, archZ), C.Panel)
+	blk(ctx, "Decor", "StartGlow", Vector3.new(22, 0.25, 2.1), F * CFrame.new(0, 12.45, archZ), trim, MAT.Neon, 0.1)
+	for k, c in ipairs(C.Rainbow) do
+		ball(ctx, "Decor", "Bunting", 1.2, F * CFrame.new(-9 + (k - 1) * 3.6, 16.4, archZ), c)
 	end
+	local sub = ctx.Diff.DisplayName .. " - " .. tostring(ctx.Layout.Archetype or "Straight") .. " course"
 	for _, face in ipairs({ Enum.NormalId.Front, Enum.NormalId.Back }) do
-		local gui = surfaceGui(beam, face, 50)
-		local title = addText(gui, "START", "Title", Theme.Colors.White, 0.04, 0.62)
-		Theme.Gradient(title, Theme.Colors.White, color, 90)
-		addText(gui, ctx.Diff.DisplayName, "Script", color:Lerp(Theme.Colors.White, 0.35), 0.66, 0.3)
+		local gui = surfaceOn(beam, face, 50)
+		local title = addText(gui, "START", "Title", C.Text, 0.04, 0.62)
+		addGradient(title, C.Text, trim:Lerp(C.Text, 0.35))
+		addText(gui, sub, "Script", trim:Lerp(C.Text, 0.4), 0.68, 0.28)
 	end
-
-	-- info boards on both sides of the platform
-	buildBoard(ctx, top + Vector3.new(-12.6, 5.2, 2), Enum.NormalId.Right, "HOW TO CLIMB",
-		"SHIFT  run\nSPACE  jump\nQ  dash  (tap DASH on mobile)\nGrab the floating clouds!", color)
-	buildBoard(ctx, top + Vector3.new(12.6, 5.2, 2), Enum.NormalId.Left, "TEAMWORK",
+	-- info boards on both sides
+	buildBoard(ctx, F, Vector3.new(-11.4, 3.6, -3), Enum.NormalId.Right, "HOW TO CLIMB",
+		"SHIFT  run\nSPACE  jump\nQ  dash  (tap DASH on mobile)\nCollect the floating clouds!", trim:Lerp(C.Text, 0.3))
+	buildBoard(ctx, F, Vector3.new(11.4, 3.6, -3), Enum.NormalId.Left, "TEAMWORK",
 		"Touch a flag to heal everyone and lift up downed friends.\nHold glowing plates to raise bridges.\nNobody gets left behind!",
-		Theme.Colors.Good)
+		C.Checkpoint:Lerp(C.Text, 0.3))
 	return main
 end
 
-local function buildCheckpoint(ctx, step, index, total)
-	local main = buildCloud(ctx, step, { Name = "Checkpoint_" .. index, TrimColor = ctx.Diff.Color })
+function KB.Checkpoint(ctx, step, look)
+	local index = step.Stage
+	local total = ctx.CheckpointTotal
+	local main, F = buildBase(ctx, step, look, { Name = "Checkpoint_" .. index, Big = true })
 	CollectionService:AddTag(main, Tags.Checkpoint)
 	main:SetAttribute("CheckpointIndex", index)
-	local top = ctx.Origin + step.Pos
 	local sx, sz = step.Size.X, step.Size.Z
-	local color = ctx.Diff.Color
+	local d = min(sx, sz) - 3.2
+	local ring = cyl(ctx, "Decor", "CheckpointRing", 0.05, d, F * CFrame.new(0, 0.12, 0), C.Checkpoint, MAT.Neon, 0.35)
+	cyl(ctx, "Decor", "CheckpointInner", 0.05, d - 1.2, F * CFrame.new(0, 0.14, 0), look.Top)
+	addSparkles(ring, C.Checkpoint:Lerp(C.Text, 0.3), 5, 4, 1.8, 0.8)
 
-	local pad = mk(ctx, "Decor", "CheckpointPad", Vector3.new(sx - 3, 0.1, sz - 3), CFrame.new(top + Vector3.new(0, 0.07, 0)),
-		color, Enum.Material.Neon, { Decor = true, Transparency = 0.55 })
-	sparkles(pad, color, 6, 5, 1.8, 0.9)
-
-	-- two flag poles at the front corners, banners hanging inwards
-	for _, sgn in ipairs({ -1, 1 }) do
+	local orb
+	for i, sgn in ipairs({ -1, 1 }) do
 		local px = sgn * (sx / 2 - 1.3)
 		local pz = sz / 2 - 1.3
-		mk(ctx, "Decor", "FlagPole", Vector3.new(9, 0.5, 0.5), upright(top + Vector3.new(px, 4.5, pz)),
-			Color3.fromRGB(255, 240, 200), Enum.Material.SmoothPlastic, { Shape = Enum.PartType.Cylinder, Decor = true })
-		local ball = mk(ctx, "Decor", "FlagTop", Vector3.new(1.2, 1.2, 1.2), CFrame.new(top + Vector3.new(px, 9.3, pz)),
-			Theme.Colors.Token, Enum.Material.Neon, { Shape = Enum.PartType.Ball, Decor = true })
-		local light = Instance.new("PointLight")
-		light.Color = Theme.Colors.TokenGlow
-		light.Range = 14
-		light.Brightness = 1.2
-		light.Parent = ball
-		local banner = mk(ctx, "Signs", "FlagBanner", Vector3.new(4, 2.6, 0.15),
-			CFrame.new(top + Vector3.new(px - sgn * 2.2, 7.6, pz)), color, Enum.Material.SmoothPlastic, { Decor = true })
+		cyl(ctx, "Decor", "FlagPole", 9, 0.5, F * CFrame.new(px, 4.5, pz), C.Top:Lerp(C.Gold, 0.3), MAT.Metal)
+		local ballTop = ball(ctx, "Decor", "FlagTop", 1.2, F * CFrame.new(px, 9.3, pz), C.Token, MAT.Neon, 0.1)
+		addLight(ballTop, C.Token:Lerp(C.Text, 0.3), 14, 0.9)
+		orb = orb or ballTop
+		local banner = blk(ctx, "Signs", "FlagBanner", Vector3.new(4, 2.6, 0.15), F * CFrame.new(px - sgn * 2.2, 7.6, pz), C.Checkpoint)
+		blk(ctx, "Decor", "BannerTrim", Vector3.new(4.1, 0.25, 0.2), F * CFrame.new(px - sgn * 2.2, 8.8, pz), look.Tint)
 		for _, face in ipairs({ Enum.NormalId.Front, Enum.NormalId.Back }) do
-			local gui = surfaceGui(banner, face, 60)
-			addText(gui, tostring(index), "Display", Theme.Colors.White, 0.05, 0.9)
+			local gui = surfaceOn(banner, face, 60)
+			addText(gui, tostring(index), "Display", C.Text, 0.05, 0.9)
 		end
 	end
-
-	local anchor = mkAnchor(ctx, "Signs", top + Vector3.new(0, 11.5, 0))
-	local gui = billboard(anchor, 11, 4.2, 0, 170)
-	addText(gui, "Checkpoint " .. index .. "/" .. total, "Title", Theme.Colors.White, 0, 0.55)
+	local gui = billboardOn(orb, 11, 4.2, 4.2, 170)
+	addText(gui, "Checkpoint " .. index .. "/" .. total, "Title", C.Text, 0, 0.55)
 	local nextStage = ctx.Layout.Stages and ctx.Layout.Stages[index + 1]
 	local sub = "Final stretch - the finish is close!"
-	if nextStage then
+	if nextStage and nextStage.Name then
 		sub = "Next: " .. nextStage.Name
 	end
-	addText(gui, sub, "Script", color:Lerp(Theme.Colors.White, 0.4), 0.58, 0.36)
+	addText(gui, sub, "Script", C.Checkpoint:Lerp(C.Text, 0.45), 0.58, 0.36)
 	return main
 end
 
-local function buildFinish(ctx, step)
-	local gold = Theme.Colors.Rainbow[3]
-	local main = buildCloud(ctx, step, { Name = "FinishPlatform", TrimColor = gold })
+function KB.Finish(ctx, step, look)
+	local main, F = buildBase(ctx, step, look, { Name = "FinishPlatform", Big = true })
 	CollectionService:AddTag(main, Tags.FinishPad)
-	local top = ctx.Origin + step.Pos
 	local sz = step.Size.Z
-
-	-- rainbow bullseye
-	for k, c in ipairs(Theme.Colors.Rainbow) do
+	-- muted rainbow bullseye
+	for k, c in ipairs(C.Rainbow) do
 		local d = 26 - (k - 1) * 4
-		mk(ctx, "Decor", "GoalRing", Vector3.new(0.1, d, d), upright(top + Vector3.new(0, 0.06 + k * 0.03, 0)), c,
-			Enum.Material.Neon, { Shape = Enum.PartType.Cylinder, Decor = true, Transparency = 0.3 })
+		cyl(ctx, "Decor", "GoalRing", 0.05, d, F * CFrame.new(0, 0.12 + (k - 1) * 0.03, 0), c, MAT.SmoothPlastic, 0.05)
 	end
-	local orb = mk(ctx, "Decor", "GoalOrb", Vector3.new(4.5, 4.5, 4.5), CFrame.new(top + Vector3.new(0, 3.4, 0)),
-		Theme.Colors.Token, Enum.Material.Neon, { Shape = Enum.PartType.Ball, Decor = true, Transparency = 0.15 })
-	local light = Instance.new("PointLight")
-	light.Color = Theme.Colors.TokenGlow
-	light.Range = 30
-	light.Brightness = 1.6
-	light.Parent = orb
-	local confetti = sparkles(orb, Theme.Colors.White, 18, 16, 2.6, 1.1)
+	local orb = ball(ctx, "Decor", "GoalOrb", 4.2, F * CFrame.new(0, 3.6, 0), C.Gold, MAT.Neon, 0.2)
+	addLight(orb, C.Gold:Lerp(C.Text, 0.3), 28, 1.1)
+	local confetti = addSparkles(orb, C.Text, 14, 14, 2.6, 1.0)
 	local keys = {}
-	for k, c in ipairs(Theme.Colors.Rainbow) do
-		keys[#keys + 1] = ColorSequenceKeypoint.new((k - 1) / (#Theme.Colors.Rainbow - 1), c)
+	for k, c in ipairs(C.Rainbow) do
+		keys[#keys + 1] = ColorSequenceKeypoint.new((k - 1) / (#C.Rainbow - 1), c)
 	end
 	confetti.Color = ColorSequence.new(keys)
 	confetti.SpreadAngle = Vector2.new(40, 40)
 	confetti.EmissionDirection = Enum.NormalId.Top
 
-	-- rainbow arch near the arrival edge
+	-- rainbow arch near the arrival edge (local -Z is where the route comes from)
 	local archZ = -sz / 2 + 6
 	local half = 11
 	for _, sgn in ipairs({ -1, 1 }) do
-		for k, c in ipairs(Theme.Colors.Rainbow) do
-			mk(ctx, "Decor", "ArchSegment", Vector3.new(2.4, 2.2, 2.2),
-				upright(top + Vector3.new(sgn * half, 1.2 + (k - 1) * 2.4, archZ)), c, Enum.Material.Neon,
-				{ Shape = Enum.PartType.Cylinder, Decor = true })
+		for k, c in ipairs(C.Rainbow) do
+			cyl(ctx, "Decor", "ArchSegment", 2.4, 2.2, F * CFrame.new(sgn * half, 1.2 + (k - 1) * 2.4, archZ), c)
 		end
 	end
-	local beam = mk(ctx, "Signs", "FinishBeam", Vector3.new(26, 3.6, 2), CFrame.new(top + Vector3.new(0, 16, archZ)),
-		Theme.Colors.Panel, Enum.Material.SmoothPlastic, { Decor = true })
+	local beam = blk(ctx, "Signs", "FinishBeam", Vector3.new(26, 3.6, 2), F * CFrame.new(0, 16, archZ), C.Panel)
+	blk(ctx, "Decor", "FinishGlow", Vector3.new(26, 0.25, 2.1), F * CFrame.new(0, 14.1, archZ), C.Gold, MAT.Neon, 0.1)
 	for _, face in ipairs({ Enum.NormalId.Front, Enum.NormalId.Back }) do
-		local gui = surfaceGui(beam, face, 50)
-		local title = addText(gui, "FINISH", "Title", Theme.Colors.White, 0.03, 0.64)
-		Theme.Gradient(title, Theme.Colors.Rainbow[3], Theme.Colors.Rainbow[1], 90)
-		addText(gui, "you made it - together!", "Script", Theme.Colors.White, 0.68, 0.28)
+		local gui = surfaceOn(beam, face, 50)
+		local title = addText(gui, "FINISH", "Title", C.Text, 0.03, 0.64)
+		addGradient(title, C.Gold:Lerp(C.Text, 0.4), C.Rainbow[1])
+		addText(gui, "you made it - together!", "Script", C.Text, 0.68, 0.28)
 	end
-
-	local anchor = mkAnchor(ctx, "Signs", top + Vector3.new(0, 10, 0))
-	local sign = billboard(anchor, 10, 3.4, 0, 170)
-	addText(sign, "GOAL", "Title", gold, 0, 0.62)
-	addText(sign, "wait here for your team", "Script", Theme.Colors.White, 0.64, 0.32)
+	local sign = billboardOn(orb, 10, 3.4, 4.6, 170)
+	addText(sign, "GOAL", "Title", C.Gold:Lerp(C.Text, 0.25), 0, 0.62)
+	addText(sign, "wait here for your team", "Script", C.Text, 0.64, 0.32)
 	return main
 end
 
 ----------------------------------------------------------------------
--- Tokens + ambient scenery
+-- "DASH!" hint on the platform before a dash gap / plate bridge
 ----------------------------------------------------------------------
-local function fallbackToken(ctx, pos)
-	local p = mk(ctx, "Tokens", "CloudToken", Vector3.new(2, 2, 2), CFrame.new(pos), Theme.Colors.Token,
-		Enum.Material.Neon, { Shape = Enum.PartType.Ball, Collide = false })
-	p.CastShadow = false
+local function buildDashHint(ctx, step)
+	local hint = step.DashHint
+	if not (hint and hint.Pos) then
+		return
+	end
+	local pos = ctx.Origin + hint.Pos
+	local dir = hint.Dir
+	if not dir or Vector3.new(dir.X, 0, dir.Z).Magnitude < 0.01 then
+		dir = forwardOf(step)
+	end
+	dir = Vector3.new(dir.X, 0, dir.Z).Unit
+	local yaw = yawOf(dir)
+	for k = 1, 3 do
+		local tip = pos + dir * (0.4 - (k - 1) * 1.6) + Vector3.new(0, 0.14, 0)
+		chevron(ctx, "Decor", "DashArrow", CFrame.new(tip) * CFrame.Angles(0, yaw, 0), 2.2, 0.55, C.Gold, MAT.Neon, 0.1 + 0.15 * (k - 1))
+	end
+	local perp = Vector3.new(dir.Z, 0, -dir.X)
+	local pole = pos + perp * 1.8
+	rod(ctx, "Decor", "DashPole", pole, pole + Vector3.new(0, 4.6, 0), 0.25, C.Brass, MAT.Metal)
+	local head = ball(ctx, "Decor", "DashBeacon", 0.9, CFrame.new(pole + Vector3.new(0, 4.8, 0)), C.Gold, MAT.Neon, 0.1)
+	local gui = billboardOn(head, 8, 3.4, 2.4, 130)
+	addText(gui, "DASH!", "Accent", C.Gold, 0, 0.62)
+	if step.Kind == "PlateBridge" then
+		addText(gui, "or hold the plate for a bridge", "Body", C.Text, 0.64, 0.32)
+	else
+		addText(gui, "press Q  or tap DASH", "Body", C.Text, 0.64, 0.32)
+	end
+end
+
+----------------------------------------------------------------------
+-- Tokens (TokenService owns the visual)
+----------------------------------------------------------------------
+local function fallbackToken(ctx, pos, value)
+	local golden = value >= (Config.Tokens.GoldenValue or 5)
+	local size = golden and 3 or 2
+	local p = mk(ctx, "Tokens", "CloudToken", "Part", Vector3.new(size, size, size), CFrame.new(pos), C.Token, MAT.Neon,
+		{ Shape = Enum.PartType.Ball, Trigger = true, Free = true })
+	p.CanTouch = true
 	CollectionService:AddTag(p, Tags.CloudToken)
-	p:SetAttribute("Value", Config.Tokens.DefaultValue or 1)
+	if golden then
+		CollectionService:AddTag(p, Tags.GoldenToken)
+	end
+	p:SetAttribute("Value", value)
 	return p
 end
 
+-- returns the token VALUE total that was actually created
 local function buildTokens(ctx)
-	local okRequire, TokenService = pcall(function()
+	local TokenService = nil
+	local okRequire, mod = pcall(function()
 		return require(script.Parent.TokenService)
 	end)
-	if not okRequire or type(TokenService) ~= "table" or not TokenService.MakeTokenPart then
-		warn("[CourseBuilder] TokenService unavailable, using plain tokens: " .. tostring(TokenService))
-		TokenService = nil
+	if okRequire and type(mod) == "table" and type(mod.MakeTokenPart) == "function" then
+		TokenService = mod
+	else
+		warn("[CourseBuilder] TokenService unavailable, using plain tokens: " .. tostring(mod))
 	end
-	local value = Config.Tokens.DefaultValue or 1
+	local total = 0
 	for _, step in ipairs(ctx.Layout.Steps) do
-		if step.Tokens then
-			for _, offset in ipairs(step.Tokens) do
-				local pos = ctx.Origin + step.Pos + offset
-				local made = false
-				if TokenService then
-					made = pcall(TokenService.MakeTokenPart, pos, ctx.Groups.Tokens, value)
-				end
-				if not made then
-					fallbackToken(ctx, pos)
+		for _, tok in ipairs(step.Tokens or EMPTY) do
+			local value = tok.Value
+			if type(value) ~= "number" then
+				value = Config.Tokens.DefaultValue or 1
+				if tok.Golden then
+					value = Config.Tokens.GoldenValue or 5
 				end
 			end
-		end
-	end
-end
-
--- Big soft cloud puffs far below and beside the route so the course floats in a sea of clouds.
-local function buildAmbient(ctx)
-	if ctx.Parts > PART_BUDGET then
-		return
-	end
-	local steps = ctx.Layout.Steps
-	local rng = ctx.Rng
-	local count = math.min(26, math.floor(#steps / 2) + 6)
-	for k = 1, count do
-		local ref = steps[math.min(#steps, math.floor(((k - 0.5) / count) * #steps) + 1)]
-		local side = -1
-		if k % 2 == 0 then
-			side = 1
-		end
-		local base = ctx.Origin + Vector3.new(side * rng:NextNumber(45, 95), ref.Pos.Y - rng:NextNumber(25, 70),
-			ref.Pos.Z + rng:NextNumber(-20, 20))
-		local d = rng:NextNumber(24, 46)
-		for b = 1, 3 do
-			local bd = d
-			local off = Vector3.new(0, 0, 0)
-			if b > 1 then
-				bd = d * rng:NextNumber(0.55, 0.8)
-				off = Vector3.new(rng:NextNumber(-d * 0.5, d * 0.5), -rng:NextNumber(0, d * 0.15),
-					rng:NextNumber(-d * 0.4, d * 0.4))
+			local pos = ctx.Origin + tok.Pos
+			local part = nil
+			if TokenService then
+				local okMake, made = pcall(TokenService.MakeTokenPart, pos, ctx.Groups.Tokens, value)
+				if okMake and typeof(made) == "Instance" then
+					part = made
+				end
 			end
-			mk(ctx, "Ambient", "FarCloud", Vector3.new(bd, bd, bd), CFrame.new(base + off), Theme.Colors.Cloud,
-				Enum.Material.SmoothPlastic, { Shape = Enum.PartType.Ball, Decor = true, Transparency = 0.3 })
+			if not part then
+				part = fallbackToken(ctx, pos, value)
+			end
+			if not CollectionService:HasTag(part, Tags.CloudToken) then
+				CollectionService:AddTag(part, Tags.CloudToken)
+			end
+			if value >= (Config.Tokens.GoldenValue or 5) and not CollectionService:HasTag(part, Tags.GoldenToken) then
+				CollectionService:AddTag(part, Tags.GoldenToken)
+			end
+			total = total + value
 		end
 	end
+	return total
 end
 
 ----------------------------------------------------------------------
--- Build
+-- One step
 ----------------------------------------------------------------------
--- Build one step's geometry. Returns the main (tagged) part.
-local function buildStep(ctx, step, checkpointTotal)
-	local kind = step.Kind
-	if kind == "Start" then
-		return buildStart(ctx, step)
-	elseif kind == "Checkpoint" then
-		return buildCheckpoint(ctx, step, step.Stage, checkpointTotal)
-	elseif kind == "Finish" then
-		return buildFinish(ctx, step)
-	elseif kind == "Moving" then
-		return buildMoving(ctx, step)
-	elseif kind == "Vanishing" then
-		return buildVanishing(ctx, step)
-	elseif kind == "Bounce" then
-		return buildBounce(ctx, step)
-	elseif kind == "SpinBarPlatform" then
-		return buildSpinBars(ctx, step)
-	elseif kind == "StormPlatform" then
-		return buildStorm(ctx, step)
-	elseif kind == "LightningPlatform" then
-		return buildLightning(ctx, step)
-	elseif kind == "PlateBridge" then
-		return buildPlateBridge(ctx, step)
-	end
-	if kind == "DashGap" then
-		-- gold trim marks the landing of a dash-only gap
-		return buildCloud(ctx, step, { Name = "DashLanding_" .. step.Index, TrimColor = DASH_GOLD })
-	end
-	return buildCloud(ctx, step, { Name = "Cloud_" .. step.Index })
-end
-
--- Last-resort geometry if a decorated builder errors: keep the course traversable.
+-- Last-resort geometry if a decorated builder errors: keep the course traversable and tagged.
 local function buildFallback(ctx, step)
-	local main = buildCloud(ctx, step, { Name = "Cloud_" .. step.Index, Single = true })
+	local main = ctx.CurrentMain
+	if not main then
+		local look = lookFor(ctx, step)
+		main = buildBase(ctx, step, look, { Name = "Cloud_" .. step.Index, Slab = true })
+	end
 	if step.Kind == "Checkpoint" then
 		CollectionService:AddTag(main, Tags.Checkpoint)
 		main:SetAttribute("CheckpointIndex", step.Stage)
@@ -2010,82 +1311,694 @@ local function buildFallback(ctx, step)
 	return main
 end
 
+local function buildStep(ctx, step)
+	ctx.Attach = nil
+	ctx.CurrentMain = nil
+	local builder = KB[step.Kind] or KB.Platform
+	local ok, result = pcall(function()
+		return builder(ctx, step, lookFor(ctx, step))
+	end)
+	ctx.Attach = nil
+	if not ok then
+		warn("[CourseBuilder] step " .. tostring(step.Index) .. " (" .. tostring(step.Kind) .. ") failed: " .. tostring(result))
+		result = buildFallback(ctx, step)
+	end
+	if step.DashHint then
+		local okHint, err = pcall(buildDashHint, ctx, step)
+		if not okHint then
+			warn("[CourseBuilder] dash hint " .. tostring(step.Index) .. " failed: " .. tostring(err))
+		end
+	end
+	return result
+end
+
+----------------------------------------------------------------------
+-- Scenery: one floating landmark per stage theme, the spiral's central pillar, distant cloud puffs.
+-- Everything is decor (no collision / touch / query). Items arrive from layout.Scenery:
+--   { Type, Stage, Pos = centre of the BASE, Yaw, Radius, Height, Seed, Tint }
+-- Builders get (ctx, item, B, rng, col, lite): B is the base frame (Y up), `lite` asks for fewer parts.
+----------------------------------------------------------------------
+local G = "Scenery"
+local LM = {}
+
+local function worldPoint(B, x, y, z)
+	return B:PointToWorldSpace(Vector3.new(x, y, z))
+end
+
+local function sceneryPalette(item)
+	local tint = tintOf(item.Tint)
+	return {
+		Cloud = C.Top:Lerp(C.Side, 0.25),
+		Shade = C.Side:Lerp(C.Shadow, 0.25),
+		Soft = tint:Lerp(C.Top, 0.4),
+		Tint = tint,
+		Dark = tint:Lerp(C.Shadow, 0.55),
+	}
+end
+
+-- windmill made of cloud drums with four sail blades
+function LM.CloudWindmill(ctx, item, B, rng, col, lite)
+	local R, H = item.Radius, item.Height
+	local ht = H * 0.52
+	local lb = max(5, min(R * 0.95, ht - 1.2, H - ht - 2.0))
+	ball(ctx, G, "WindmillBase", Vector3.new(R * 1.5, R * 0.45, R * 1.5), B * CFrame.new(0, R * 0.225, 0), col.Cloud)
+	local seg = ht / 3
+	for k = 1, 3 do
+		cyl(ctx, G, "WindmillTower", seg, R * (0.66 - 0.1 * k), B * CFrame.new(0, seg * (k - 0.5), 0),
+			(k % 2 == 1) and col.Cloud or col.Soft)
+	end
+	blk(ctx, G, "WindmillDoor", Vector3.new(R * 0.14, R * 0.26, 0.4), B * CFrame.new(0, R * 0.13, R * 0.27), col.Dark)
+	local hub = B * CFrame.new(0, ht + seg * 0.15, R * 0.22)
+	ball(ctx, G, "WindmillHub", R * 0.26, hub, col.Tint)
+	local spin = rng:NextNumber(0, pi / 2)
+	for k = 0, 3 do
+		local arm = hub * CFrame.Angles(0, 0, spin + k * pi / 2)
+		blk(ctx, G, "BladeArm", Vector3.new(lb * 0.1, lb, lb * 0.1), arm * CFrame.new(0, lb / 2, 0), col.Shade)
+		blk(ctx, G, "BladeSail", Vector3.new(lb * 0.34, lb * 0.62, 0.3), arm * CFrame.new(lb * 0.2, lb * 0.64, 0.15), col.Cloud)
+		if not lite then
+			ball(ctx, G, "BladeTip", lb * 0.16, arm * CFrame.new(0, lb, 0), col.Soft)
+		end
+	end
+end
+
+-- cluster of tall translucent crystals on a small rock
+function LM.CrystalSpires(ctx, item, B, rng, col, lite)
+	local R, H = item.Radius, item.Height
+	ball(ctx, G, "SpireRock", Vector3.new(R * 1.7, 3.6, R * 1.7), B * CFrame.new(0, 1.0, 0), col.Shade)
+	local n = 6
+	if lite then
+		n = 4
+	end
+	for k = 1, n do
+		local a = (k / n) * pi * 2 + rng:NextNumber(-0.3, 0.3)
+		local r = R * rng:NextNumber(0.3, 0.6)
+		local h = H * rng:NextNumber(0.6, 0.95)
+		if k == 1 then
+			r = 0
+			h = H
+		end
+		local w = rng:NextNumber(2.2, 3.6)
+		local tilt = rng:NextNumber(-0.08, 0.08)
+		local cf = B * CFrame.new(cos(a) * r, 2.0, sin(a) * r) * CFrame.Angles(tilt, rng:NextNumber(0, pi), -tilt * 0.7)
+		local bodyH = h * 0.75 - 2
+		local crystal = col.Soft:Lerp(col.Tint, 0.45)
+		blk(ctx, G, "Crystal", Vector3.new(w, bodyH, w * 0.8), cf * CFrame.new(0, bodyH / 2, 0), crystal, MAT.SmoothPlastic, 0.18)
+		local tip = w * 0.95
+		blk(ctx, G, "CrystalTip", Vector3.new(tip, tip, tip), cf * CFrame.new(0, bodyH + tip * 0.5, 0) * CFrame.Angles(pi / 4, 0, pi / 4),
+			crystal, MAT.SmoothPlastic, 0.15)
+		if not lite then
+			blk(ctx, G, "CrystalCore", Vector3.new(0.35, bodyH * 0.9, 0.35), cf * CFrame.new(0, bodyH / 2, 0), col.Tint, MAT.Neon, 0.3)
+		end
+	end
+end
+
+-- striped hot-air balloon built from stacked discs
+function LM.SkyBalloon(ctx, item, B, rng, col, lite)
+	local R, H = item.Radius, item.Height
+	local re = max(4, min(R * 0.95, (H - 7.5) / 2))
+	local yc = 7 + re
+	local layers = 11
+	if lite then
+		layers = 7
+	end
+	local cA = col.Tint:Lerp(C.Top, 0.15)
+	local cB = C.Rainbow[((item.Seed or 1) % #C.Rainbow) + 1]:Lerp(C.Top, 0.1)
+	for i = 1, layers do
+		local u = -0.92 + (i - 1) * (1.84 / (layers - 1))
+		local dia = 2 * re * sqrt(1 - u * u)
+		local hgt = re * 1.84 / layers * 1.06 + 0.05
+		cyl(ctx, G, "Envelope", hgt, dia, B * CFrame.new(0, yc + u * re, 0), (i % 2 == 1) and cA or cB)
+	end
+	ball(ctx, G, "BalloonCap", re * 0.18, B * CFrame.new(0, yc + re * 0.97, 0), col.Dark)
+	blk(ctx, G, "Basket", Vector3.new(2.8, 1.8, 2.8), B * CFrame.new(0, 1.4, 0), rgb(150, 116, 92), MAT.WoodPlanks)
+	for _, c in ipairs({ { 1, 1 }, { -1, 1 }, { 1, -1 }, { -1, -1 } }) do
+		rod(ctx, G, "Rope", worldPoint(B, c[1] * 1.3, 2.3, c[2] * 1.3), worldPoint(B, c[1] * re * 0.5, yc - re * 0.8, c[2] * re * 0.5),
+			0.15, C.Iron)
+	end
+	local burner = ball(ctx, G, "Burner", 0.9, B * CFrame.new(0, 4.4, 0), C.Lava, MAT.Neon, 0.1)
+	addLight(burner, C.Lava, 14, 0.8)
+end
+
+-- a muted rainbow arch standing on two clouds
+function LM.RainbowArc(ctx, item, B, rng, col, lite)
+	local R, H = item.Radius, item.Height
+	local ro = max(8, min(R * 0.95, H - 1.0))
+	local bands = 6
+	if lite then
+		bands = 4
+	end
+	local bw = 1.3
+	for i = 1, bands do
+		local ri = ro - (i - 0.5) * bw
+		local n = max(8, ceil(pi * ri / 3.8))
+		local chord = pi * ri / n * 1.1
+		for j = 0, n - 1 do
+			local phi = (j + 0.5) * pi / n
+			blk(ctx, G, "RainbowBand", Vector3.new(chord, bw * 1.04, 2.0),
+				B * CFrame.new(ri * cos(phi), ri * sin(phi), 0) * CFrame.Angles(0, 0, phi + pi / 2), C.Rainbow[i],
+				MAT.SmoothPlastic, 0.05)
+		end
+	end
+	local foot = ro - bands * bw / 2
+	for _, s in ipairs({ -1, 1 }) do
+		ball(ctx, G, "RainbowFoot", Vector3.new(8, 4, 6), B * CFrame.new(s * foot, 0.6, 0), col.Cloud)
+		ball(ctx, G, "RainbowFoot", Vector3.new(5, 3, 4), B * CFrame.new(s * (foot + 2.6), 0.3, 1.4), col.Soft)
+	end
+end
+
+-- big stone ring on a pedestal with a glowing core
+function LM.GiantRing(ctx, item, B, rng, col, lite)
+	local R, H = item.Radius, item.Height
+	local rrOut = max(8, min(R * 0.95, H * 0.5 - 2.0))
+	local rr = rrOut - 1.3
+	local cy = H - rrOut - 0.3
+	local n = 22
+	if lite then
+		n = 14
+	end
+	local chord = 2 * pi * rr / n * 1.12
+	for j = 0, n - 1 do
+		local phi = j * 2 * pi / n
+		blk(ctx, G, "RingSegment", Vector3.new(chord, 2.6, 3.0),
+			B * CFrame.new(rr * cos(phi), cy + rr * sin(phi), 0) * CFrame.Angles(0, 0, phi + pi / 2),
+			(j % 2 == 0) and col.Cloud or col.Soft)
+		if not lite then
+			blk(ctx, G, "RingGlow", Vector3.new(chord * 0.9, 0.35, 0.4),
+				B * CFrame.new((rr - 1.6) * cos(phi), cy + (rr - 1.6) * sin(phi), 0) * CFrame.Angles(0, 0, phi + pi / 2),
+				col.Tint, MAT.Neon, 0.25)
+		end
+	end
+	local core = ball(ctx, G, "RingCore", 2.4, B * CFrame.new(0, cy, 0), col.Tint, MAT.Neon, 0.3)
+	addSparkles(core, col.Tint, 6, 4, 2, 0.8)
+	if not lite then
+		for k = 0, 3 do
+			local phi = k * pi / 2 + pi / 4
+			rod(ctx, G, "RingSpoke", worldPoint(B, 0, cy, 0), worldPoint(B, (rr - 1.6) * cos(phi), cy + (rr - 1.6) * sin(phi), 0),
+				0.18, col.Tint, MAT.Neon, 0.5)
+		end
+	end
+	local bottom = cy - rrOut
+	cyl(ctx, G, "RingStand", bottom, 4.0, B * CFrame.new(0, bottom / 2, 0), col.Shade)
+	ball(ctx, G, "RingBase", Vector3.new(R * 1.1, 3, R * 1.1), B * CFrame.new(0, 1, 0), col.Cloud)
+end
+
+-- dark tapering tower crowned with storm puffs and a red beacon
+function LM.StormTower(ctx, item, B, rng, col, lite)
+	local R, H = item.Radius, item.Height
+	local bodyH = H * 0.7
+	local drums = 6
+	local h = bodyH / drums
+	local stone = C.Storm:Lerp(C.Side, 0.2)
+	for k = 1, drums do
+		local dia = R * (0.95 - 0.09 * k)
+		cyl(ctx, G, "TowerDrum", h, dia, B * CFrame.new(0, h * (k - 0.5), 0), (k % 2 == 1) and stone or stone:Lerp(C.Shadow, 0.3))
+		if k >= 2 and not lite then
+			for _, s in ipairs({ -1, 1 }) do
+				blk(ctx, G, "TowerWindow", Vector3.new(0.9, 1.7, 0.5), B * CFrame.new(s * dia * 0.18, h * (k - 0.5), dia * 0.5),
+					rgb(240, 208, 128), MAT.Neon, 0.15)
+			end
+		end
+	end
+	for k = 1, 4 do
+		local a = k * pi / 2 + rng:NextNumber(-0.4, 0.4)
+		ball(ctx, G, "TowerPuff", R * rng:NextNumber(0.55, 0.75),
+			B * CFrame.new(cos(a) * R * 0.22, bodyH + 2 + rng:NextNumber(-0.5, 1.0), sin(a) * R * 0.22),
+			C.Storm:Lerp(rgb(120, 130, 164), rng:NextNumber(0, 0.4)), MAT.SmoothPlastic, 0.08)
+	end
+	rod(ctx, G, "TowerSpire", worldPoint(B, 0, bodyH + 2, 0), worldPoint(B, 0, H - 1.5, 0), 0.7, C.Iron, MAT.Metal)
+	local beacon = ball(ctx, G, "TowerBeacon", 1.6, B * CFrame.new(0, H - 1, 0), C.HazardGlow, MAT.Neon, 0.1)
+	addLight(beacon, C.HazardGlow, 20, 1.0)
+end
+
+-- tall rods with glowing tips and little sparks between them
+function LM.LightningRods(ctx, item, B, rng, col, lite)
+	local R, H = item.Radius, item.Height
+	local n = 5
+	if lite then
+		n = 3
+	end
+	local tips = {}
+	for k = 1, n do
+		local a = k * 2 * pi / n + rng:NextNumber(-0.3, 0.3)
+		local r = R * 0.7
+		local h = H * rng:NextNumber(0.55, 0.85)
+		if k == 1 then
+			r = 0
+			h = H
+		end
+		local x, z = cos(a) * r, sin(a) * r
+		cyl(ctx, G, "RodPole", h, 0.9, B * CFrame.new(x, h / 2, z), C.Iron, MAT.Metal)
+		cyl(ctx, G, "RodBase", 1.4, 2.6, B * CFrame.new(x, 0.7, z), C.Iron:Lerp(C.Side, 0.3), MAT.Metal)
+		for _, f in ipairs({ 0.4, 0.7 }) do
+			cyl(ctx, G, "RodRing", 0.3, 2.2, B * CFrame.new(x, h * f, z), C.Brass, MAT.Metal)
+		end
+		local tip = ball(ctx, G, "RodTip", 1.7, B * CFrame.new(x, h + 0.6, z), rgb(236, 214, 130), MAT.Neon, 0.1)
+		tips[#tips + 1] = worldPoint(B, x, h + 0.6, z)
+		if k == 1 then
+			addLight(tip, rgb(236, 214, 130), 22, 0.9)
+		end
+	end
+	if not lite then
+		for k = 1, #tips do
+			local a, b = tips[k], tips[k % #tips + 1]
+			local mid = (a + b) / 2 + Vector3.new(rng:NextNumber(-2, 2), rng:NextNumber(-2, 1), rng:NextNumber(-2, 2))
+			rod(ctx, G, "RodSpark", a, mid, 0.16, rgb(190, 176, 240), MAT.Neon, 0.35)
+			rod(ctx, G, "RodSpark", mid, b, 0.16, rgb(190, 176, 240), MAT.Neon, 0.35)
+		end
+	end
+end
+
+-- paper lanterns hanging from a little cloud
+function LM.LanternCluster(ctx, item, B, rng, col, lite)
+	local R, H = item.Radius, item.Height
+	local cloudY = H - R * 0.35
+	ball(ctx, G, "LanternCloud", Vector3.new(R * 1.7, R * 0.7, R * 1.7), B * CFrame.new(0, cloudY, 0), col.Cloud)
+	ball(ctx, G, "LanternCloud", Vector3.new(R, R * 0.6, R), B * CFrame.new(R * 0.4, cloudY + R * 0.04, R * 0.2), col.Soft)
+	local n = 9
+	if lite then
+		n = 5
+	end
+	for k = 1, n do
+		local a = rng:NextNumber(0, 2 * pi)
+		local r = R * rng:NextNumber(0.1, 0.8)
+		local x, z = cos(a) * r, sin(a) * r
+		local d = rng:NextNumber(2.2, 3.2)
+		local y = rng:NextNumber(3 + d, cloudY - 4)
+		rod(ctx, G, "LanternRope", worldPoint(B, x, cloudY - 0.6, z), worldPoint(B, x, y + d * 0.6, z), 0.12, C.Iron)
+		local lamp = ball(ctx, G, "Lantern", Vector3.new(d, d * 1.2, d), B * CFrame.new(x, y, z),
+			col.Tint:Lerp(C.Gold, rng:NextNumber(0.2, 0.7)), MAT.Neon, 0.15)
+		cyl(ctx, G, "LanternCap", 0.35, d * 0.55, B * CFrame.new(x, y + d * 0.62, z), C.Iron, MAT.Metal)
+		cyl(ctx, G, "LanternCap", 0.35, d * 0.55, B * CFrame.new(x, y - d * 0.62, z), C.Iron, MAT.Metal)
+		if k <= 2 then
+			addLight(lamp, col.Tint:Lerp(C.Gold, 0.5), 18, 0.7)
+		end
+	end
+end
+
+-- a small cloud castle: keep, four round towers, walls, gate, flag and two cannon barrels
+function LM.CloudFortress(ctx, item, B, rng, col, lite)
+	local R, H = item.Radius, item.Height
+	ball(ctx, G, "FortressBase", Vector3.new(R * 1.95, 4.4, R * 1.95), B * CFrame.new(0, 0.4, 0), col.Cloud)
+	local y0 = 2.2
+	local K = R * 0.7
+	local Hk = H * 0.5
+	blk(ctx, G, "Keep", Vector3.new(K, Hk, K), B * CFrame.new(0, y0 + Hk / 2, 0), col.Shade)
+	blk(ctx, G, "KeepTop", Vector3.new(K * 1.1, 1.0, K * 1.1), B * CFrame.new(0, y0 + Hk + 0.5, 0), col.Cloud)
+	local cren = { { -1, -1 }, { 1, -1 }, { 1, 1 }, { -1, 1 }, { 0, -1 }, { 1, 0 }, { 0, 1 }, { -1, 0 } }
+	for _, c in ipairs(cren) do
+		blk(ctx, G, "Merlon", Vector3.new(K * 0.18, 1.4, K * 0.18),
+			B * CFrame.new(c[1] * K * 0.46, y0 + Hk + 1.7, c[2] * K * 0.46), col.Cloud)
+	end
+	local tr = R * 0.58
+	local td = R * 0.34
+	local th = H * 0.7
+	for _, cx in ipairs({ -1, 1 }) do
+		for _, cz in ipairs({ -1, 1 }) do
+			local x, z = cx * tr, cz * tr
+			cyl(ctx, G, "FortTower", th, td, B * CFrame.new(x, y0 + th / 2, z), col.Cloud)
+			cyl(ctx, G, "FortCornice", 1.1, td * 1.2, B * CFrame.new(x, y0 + th + 0.5, z), col.Shade)
+			cyl(ctx, G, "FortRoof", 1.3, td * 0.85, B * CFrame.new(x, y0 + th + 1.7, z), col.Tint)
+			cyl(ctx, G, "FortRoof", 1.3, td * 0.45, B * CFrame.new(x, y0 + th + 3.0, z), col.Tint:Lerp(C.Top, 0.2))
+		end
+	end
+	local wl = 2 * tr - td
+	local wh = H * 0.3
+	blk(ctx, G, "FortWall", Vector3.new(wl, wh, 1.8), B * CFrame.new(0, y0 + wh / 2, tr), col.Cloud)
+	blk(ctx, G, "FortWall", Vector3.new(wl, wh, 1.8), B * CFrame.new(0, y0 + wh / 2, -tr), col.Cloud)
+	blk(ctx, G, "FortWall", Vector3.new(1.8, wh, wl), B * CFrame.new(tr, y0 + wh / 2, 0), col.Cloud)
+	blk(ctx, G, "FortWall", Vector3.new(1.8, wh, wl), B * CFrame.new(-tr, y0 + wh / 2, 0), col.Cloud)
+	blk(ctx, G, "FortGate", Vector3.new(R * 0.22, wh * 0.7, 0.5), B * CFrame.new(0, y0 + wh * 0.35, tr + 0.95), col.Dark)
+	local top = worldPoint(B, 0, y0 + Hk + 2.2, 0)
+	rod(ctx, G, "FortFlagPole", top, top + Vector3.new(0, H * 0.22, 0), 0.4, C.Iron, MAT.Metal)
+	blk(ctx, G, "FortFlag", Vector3.new(0.15, 2.2, 3.4), B * CFrame.new(1.8, y0 + Hk + 2.2 + H * 0.22 - 1.4, 0), col.Tint)
+	if not lite then
+		for _, cx in ipairs({ -1, 1 }) do
+			local base = worldPoint(B, cx * tr, y0 + th * 0.55, tr)
+			local muzzle = worldPoint(B, cx * (tr + R * 0.04), y0 + th * 0.55 + 1.8, tr + R * 0.17)
+			rod(ctx, G, "FortCannon", base, muzzle, 1.5, C.Iron, MAT.Metal)
+			ball(ctx, G, "FortCannonMouth", 1.9, CFrame.new(muzzle), C.Brass, MAT.Metal)
+		end
+	end
+end
+
+-- a flock of diamond kites on long strings, tails of coloured beads
+function LM.KiteFlock(ctx, item, B, rng, col, lite)
+	local R, H = item.Radius, item.Height
+	ball(ctx, G, "KiteCloud", Vector3.new(R * 1.2, 3.2, R * 1.2), B * CFrame.new(0, 0.8, 0), col.Cloud)
+	cyl(ctx, G, "KitePole", 3.6, 0.4, B * CFrame.new(0, 3.2, 0), C.Iron, MAT.Metal)
+	local poleTop = worldPoint(B, 0, 5.2, 0)
+	local n = 5
+	if lite then
+		n = 3
+	end
+	for k = 1, n do
+		local a = (k / n) * 2 * pi + rng:NextNumber(-0.3, 0.3)
+		local r = R * rng:NextNumber(0.3, 0.75)
+		local y = H * rng:NextNumber(0.45, 0.9)
+		local pos = Vector3.new(cos(a) * r, y, sin(a) * r)
+		local s = rng:NextNumber(2.8, 3.8)
+		local cf = B * CFrame.new(pos) * CFrame.Angles(-0.25, pi / 2 - a, 0)
+		local color = C.Rainbow[((k + (item.Seed or 0)) % #C.Rainbow) + 1]
+		blk(ctx, G, "Kite", Vector3.new(s, s, 0.15), cf * CFrame.Angles(0, 0, pi / 4), color, MAT.SmoothPlastic, 0.05)
+		blk(ctx, G, "KiteSpar", Vector3.new(0.12, s * 1.42, 0.22), cf * CFrame.new(0, 0, 0.05), col.Dark)
+		blk(ctx, G, "KiteSpar", Vector3.new(s * 1.42, 0.12, 0.22), cf * CFrame.new(0, 0, 0.05), col.Dark)
+		local beads = 5
+		if lite then
+			beads = 3
+		end
+		for j = 1, beads do
+			ball(ctx, G, "KiteTail", 0.5 + 0.06 * j, cf * CFrame.new(0.5 * sin(j * 1.3), -s * 0.8 - j * 0.9, -0.1),
+				C.Rainbow[((j + k) % #C.Rainbow) + 1])
+		end
+		rod(ctx, G, "KiteString", worldPoint(B, pos.X, pos.Y - s * 0.7, pos.Z), poleTop, 0.1, C.Top, MAT.SmoothPlastic, 0.2)
+	end
+end
+
+-- stone bell tower with a golden bell
+function LM.BellTower(ctx, item, B, rng, col, lite)
+	local R, H = item.Radius, item.Height
+	local W = R * 0.9
+	local hb = H * 0.46
+	blk(ctx, G, "BellBase", Vector3.new(W, hb, W), B * CFrame.new(0, hb / 2, 0), col.Cloud)
+	blk(ctx, G, "BellDoor", Vector3.new(W * 0.3, hb * 0.28, 0.4), B * CFrame.new(0, hb * 0.14, W / 2 + 0.1), col.Dark)
+	if not lite then
+		for _, s in ipairs({ -1, 1 }) do
+			blk(ctx, G, "BellWindow", Vector3.new(0.9, 2.2, 0.4), B * CFrame.new(s * W * 0.24, hb * 0.62, W / 2 + 0.1),
+				rgb(240, 208, 128), MAT.Neon, 0.2)
+		end
+	end
+	blk(ctx, G, "BellLedge", Vector3.new(W * 1.15, 1.0, W * 1.15), B * CFrame.new(0, hb + 0.5, 0), col.Shade)
+	local y0 = hb + 1.0
+	local fh = H * 0.2
+	for _, cx in ipairs({ -1, 1 }) do
+		for _, cz in ipairs({ -1, 1 }) do
+			cyl(ctx, G, "BelfryPillar", fh, 1.3, B * CFrame.new(cx * W * 0.38, y0 + fh / 2, cz * W * 0.38), col.Cloud)
+		end
+	end
+	ball(ctx, G, "Bell", 3.0, B * CFrame.new(0, y0 + fh * 0.62, 0), C.Gold, MAT.Metal)
+	cyl(ctx, G, "BellFlare", 1.0, 4.2, B * CFrame.new(0, y0 + fh * 0.62 - 1.5, 0), C.Gold, MAT.Metal)
+	ball(ctx, G, "BellClapper", 0.8, B * CFrame.new(0, y0 + fh * 0.62 - 2.3, 0), C.Brass, MAT.Metal)
+	blk(ctx, G, "BelfryBeam", Vector3.new(W * 0.9, 0.6, 0.6), B * CFrame.new(0, y0 + fh * 0.9, 0), col.Shade)
+	local ry = y0 + fh
+	blk(ctx, G, "BellRoof", Vector3.new(W * 1.2, 1.0, W * 1.2), B * CFrame.new(0, ry + 0.5, 0), col.Tint)
+	blk(ctx, G, "BellRoof", Vector3.new(W * 0.9, 1.0, W * 0.9), B * CFrame.new(0, ry + 1.5, 0), col.Tint:Lerp(C.Top, 0.15))
+	blk(ctx, G, "BellRoof", Vector3.new(W * 0.55, 1.0, W * 0.55), B * CFrame.new(0, ry + 2.5, 0), col.Tint:Lerp(C.Top, 0.3))
+	rod(ctx, G, "BellSpire", worldPoint(B, 0, ry + 3, 0), worldPoint(B, 0, H - 0.8, 0), 0.4, C.Iron, MAT.Metal)
+	ball(ctx, G, "BellFinial", 1.2, B * CFrame.new(0, H - 0.5, 0), C.Gold, MAT.Metal)
+end
+
+-- tapered obelisk with a glowing capstone, rune bars and floating rune stones
+function LM.RuneObelisk(ctx, item, B, rng, col, lite)
+	local R, H = item.Radius, item.Height
+	local sizes = { R * 0.62, R * 0.46, R * 0.32 }
+	local heights = { H * 0.32, H * 0.28, H * 0.22 }
+	local y = 0
+	for k = 1, 3 do
+		blk(ctx, G, "Obelisk", Vector3.new(sizes[k], heights[k], sizes[k]), B * CFrame.new(0, y + heights[k] / 2, 0),
+			(k % 2 == 1) and col.Shade or col.Cloud)
+		y = y + heights[k]
+	end
+	local tip = ball(ctx, G, "Capstone", R * 0.34, B * CFrame.new(0, y + R * 0.2, 0), col.Tint, MAT.Neon, 0.15)
+	addLight(tip, col.Tint, 20, 0.8)
+	addSparkles(tip, col.Tint:Lerp(C.Text, 0.3), 5, 4, 2, 0.7)
+	if not lite then
+		for _, z in ipairs({ -1, 1 }) do
+			local fz = z * (sizes[1] / 2 + 0.1)
+			blk(ctx, G, "RuneBar", Vector3.new(0.3, heights[1] * 0.7, 0.2), B * CFrame.new(-sizes[1] * 0.2, heights[1] * 0.5, fz), col.Tint, MAT.Neon, 0.25)
+			blk(ctx, G, "RuneBar", Vector3.new(0.3, heights[1] * 0.4, 0.2), B * CFrame.new(sizes[1] * 0.2, heights[1] * 0.45, fz), col.Tint, MAT.Neon, 0.25)
+			blk(ctx, G, "RuneBar", Vector3.new(sizes[1] * 0.5, 0.3, 0.2), B * CFrame.new(0, heights[1] * 0.62, fz), col.Tint, MAT.Neon, 0.25)
+		end
+	end
+	for k = 1, 3 do
+		local a = k * 2 * pi / 3 + rng:NextNumber(-0.3, 0.3)
+		local cf = B * CFrame.new(cos(a) * R * 0.85, H * (0.3 + 0.17 * k), sin(a) * R * 0.85) * CFrame.Angles(0, pi / 2 - a, rng:NextNumber(-0.15, 0.15))
+		blk(ctx, G, "RuneStone", Vector3.new(1.8, 2.8, 0.7), cf, col.Dark)
+		blk(ctx, G, "RuneGlyph", Vector3.new(0.3, 1.6, 0.2), cf * CFrame.new(0, 0, 0.4), col.Tint, MAT.Neon, 0.2)
+	end
+end
+
+-- a big gate with a glowing ring in its opening
+function LM.SkyGate(ctx, item, B, rng, col, lite)
+	local R, H = item.Radius, item.Height
+	local px = R * 0.62
+	local ph = H * 0.78
+	for _, s in ipairs({ -1, 1 }) do
+		cyl(ctx, G, "GateBase", 1.6, 5.0, B * CFrame.new(s * px, 0.8, 0), col.Shade)
+		cyl(ctx, G, "GatePillar", ph, 3.6, B * CFrame.new(s * px, ph / 2, 0), col.Cloud)
+		cyl(ctx, G, "GateCapital", 1.2, 5.0, B * CFrame.new(s * px, ph + 0.6, 0), col.Shade)
+	end
+	local ly = ph + 1.2 + 1.6
+	blk(ctx, G, "GateLintel", Vector3.new(px * 2 + 5, 3.2, 3.6), B * CFrame.new(0, ly, 0), col.Cloud)
+	blk(ctx, G, "GateCrest", Vector3.new(px * 0.9, 1.8, 3.0), B * CFrame.new(0, ly + 2.5, 0), col.Tint)
+	for k = -1, 1 do
+		blk(ctx, G, "GateEmblem", Vector3.new(1.4, 1.4, 0.4), B * CFrame.new(k * 3.4, ly, 1.9) * CFrame.Angles(0, 0, pi / 4), C.Gold, MAT.Neon, 0.2)
+	end
+	local rr = R * 0.4
+	local cy = ph * 0.52
+	local n = 16
+	if lite then
+		n = 10
+	end
+	for j = 0, n - 1 do
+		local phi = j * 2 * pi / n
+		blk(ctx, G, "GateRing", Vector3.new(2 * pi * rr / n * 1.1, 0.7, 0.6),
+			B * CFrame.new(rr * cos(phi), cy + rr * sin(phi), 0) * CFrame.Angles(0, 0, phi + pi / 2), col.Tint, MAT.Neon, 0.25)
+	end
+	local core = ball(ctx, G, "GateCore", 1.6, B * CFrame.new(0, cy, 0), col.Tint, MAT.Neon, 0.35)
+	addSparkles(core, col.Tint:Lerp(C.Text, 0.3), 6, 4, 2, 0.7)
+end
+
+-- floating rock island with a smoking volcano
+function LM.FloatingVolcano(ctx, item, B, rng, col, lite)
+	local R, H = item.Radius, item.Height
+	local rock = C.Rock
+	for k = 1, 6 do
+		local hk = H * 0.07
+		cyl(ctx, G, "VolcanoRock", hk, R * 2 * (0.14 + 0.15 * k), B * CFrame.new(0, hk * (k - 0.5), 0),
+			rock:Lerp(C.Shadow, (6 - k) * 0.06), MAT.Slate)
+	end
+	local y0 = H * 0.42
+	local ch = H * 0.09
+	for k = 1, 5 do
+		cyl(ctx, G, "VolcanoCone", ch, R * (1.9 - 0.34 * (k - 1)), B * CFrame.new(0, y0 + ch * (k - 0.5), 0),
+			rock:Lerp(C.Hazard, 0.08 * k), MAT.Slate)
+	end
+	local topY = y0 + ch * 5
+	local lava = cyl(ctx, G, "VolcanoLava", 0.5, R * 0.52, B * CFrame.new(0, topY + 0.2, 0), C.Lava, MAT.Neon, 0.1)
+	addLight(lava, C.Lava, 24, 1.0)
+	addSmoke(lava, rgb(110, 108, 124), 4, R * 0.5)
+	addSparkles(lava, C.Lava, 6, 8, 1.6, 0.6)
+	if not lite then
+		for k = 1, 3 do
+			local a = k * 2 * pi / 3 + rng:NextNumber(-0.4, 0.4)
+			rod(ctx, G, "LavaStreak", worldPoint(B, cos(a) * R * 0.2, topY, sin(a) * R * 0.2),
+				worldPoint(B, cos(a) * R * 0.78, y0 + ch * 0.6, sin(a) * R * 0.78), 0.55, C.Lava, MAT.Neon, 0.2)
+		end
+	end
+end
+
+-- the spiral's central column: soft cloud pillar with glowing slits and tinted bands
+function LM.CentralPillar(ctx, item, B, rng, col, lite)
+	local r, height = item.Radius, item.Height
+	local body = C.Side:Lerp(C.Shadow, 0.3)
+	cyl(ctx, G, "Pillar", height, r * 2, B * CFrame.new(0, height / 2, 0), body)
+	local bands = min(10, floor(height / 18))
+	for k = 1, bands do
+		cyl(ctx, G, "PillarBand", 1.4, r * 2 + 1.6, B * CFrame.new(0, height * k / (bands + 1), 0),
+			(k % 2 == 1) and col.Soft or col.Tint:Lerp(C.Shadow, 0.3))
+	end
+	if not lite then
+		for k = 0, 3 do
+			local a = k * pi / 2 + pi / 4
+			blk(ctx, G, "PillarSlit", Vector3.new(0.5, height * 0.6, 0.35),
+				B * CFrame.new(cos(a) * (r + 0.1), height * 0.5, sin(a) * (r + 0.1)) * CFrame.Angles(0, pi / 2 - a, 0),
+				col.Tint, MAT.Neon, 0.55)
+		end
+	end
+	ball(ctx, G, "PillarCrown", Vector3.new(r * 3.2, r * 1.2, r * 3.2), B * CFrame.new(0, height, 0), col.Cloud)
+	ball(ctx, G, "PillarFoot", Vector3.new(r * 3.6, r * 1.4, r * 3.6), B * CFrame.new(0, 0, 0), col.Cloud)
+end
+
+-- distant cloud puff / part of the cloud sea below the route
+function LM.Puff(ctx, item, B, rng, col, lite)
+	local r = item.Radius
+	local cloud = C.Top:Lerp(C.Side, 0.4)
+	local trans = rng:NextNumber(0.18, 0.32)
+	ball(ctx, G, "FarCloud", Vector3.new(r * 2, r * 1.1, r * 1.7), B * CFrame.new(0, r * 0.3, 0), cloud, MAT.SmoothPlastic, trans)
+	local bumps = 2
+	if lite then
+		bumps = 1
+	end
+	for k = 1, bumps do
+		local s = r * rng:NextNumber(0.8, 1.1)
+		ball(ctx, G, "FarCloud", Vector3.new(s, s * 0.7, s * 0.9),
+			B * CFrame.new((k == 1 and -1 or 1) * r * 0.6, r * 0.38, rng:NextNumber(-0.3, 0.3) * r), cloud:Lerp(C.Top, 0.25),
+			MAT.SmoothPlastic, trans)
+	end
+end
+
+local function buildScenery(ctx)
+	local items = ctx.Layout.Scenery
+	if type(items) ~= "table" then
+		return
+	end
+	for _, item in ipairs(items) do
+		local fn = LM[item.Type]
+		if fn and item.Pos and ctx.Parts < ctx.Cap then
+			local B = CFrame.new(ctx.Origin + item.Pos) * CFrame.Angles(0, rad(item.Yaw or 0), 0)
+			local rng = Random.new(item.Seed or 1)
+			ctx.Attach = nil
+			local ok, err = pcall(fn, ctx, item, B, rng, sceneryPalette(item), ctx.Parts > ctx.LiteCap)
+			ctx.Attach = nil
+			if not ok then
+				warn("[CourseBuilder] scenery " .. tostring(item.Type) .. " failed: " .. tostring(err))
+			end
+		end
+	end
+end
+
+----------------------------------------------------------------------
+-- Build
+----------------------------------------------------------------------
+local function difficultyTrim(diff, tier)
+	local trims = WORLD.Trim
+	if type(trims) == "table" then
+		local v = trims[diff.Id]
+		if typeof(v) ~= "Color3" then
+			v = trims[tier]
+		end
+		if typeof(v) == "Color3" then
+			return v
+		end
+	end
+	return diff.Color
+end
+
+-- CFrame on top of a step, `up` studs above the surface, looking along the step's direction of travel.
+local function spawnOn(ctx, step, up, back)
+	local fwd = forwardOf(step)
+	local p = ctx.Origin + step.Pos + Vector3.new(0, up, 0) - fwd * (back or 0)
+	return CFrame.new(p, p + fwd)
+end
+
+-- Only used when the layout generator hands back an empty layout: a start and a finish platform so
+-- the match flow still has something to stand on.
+local function buildStub(ctx, info)
+	local start = {
+		Index = 1, Stage = 0, Kind = "Start", Pos = Vector3.new(0, 0, 0), Size = Vector3.new(26, 2, 26), Yaw = 0, Variant = 1,
+	}
+	local finish = {
+		Index = 2, Stage = 1, Kind = "Finish", Pos = Vector3.new(0, 0, 31), Size = Vector3.new(30, 2, 30), Yaw = 0, Variant = 1,
+	}
+	ctx.Layout.Steps = { start, finish }
+	buildStep(ctx, start)
+	info.Finish = buildStep(ctx, finish)
+	info.StartCFrame = spawnOn(ctx, start, 3.5, 3)
+	info.TotalSteps = 2
+end
+
 function CourseBuilder.Build(layout, origin, parent)
 	origin = origin or Vector3.new(0, 0, 0)
 	parent = parent or Workspace
+	layout = layout or {}
 	local diff = Config.GetDifficulty(layout.DifficultyId) or Config.Difficulties[1]
+	local tier = 1
+	for i, d in ipairs(Config.Difficulties) do
+		if d.Id == diff.Id then
+			tier = i
+		end
+	end
+	layout.Steps = layout.Steps or {}
+	local steps = layout.Steps
 
 	local folder = Instance.new("Folder")
 	folder.Name = "Course_" .. tostring(layout.Seed)
 	folder:SetAttribute("DifficultyId", diff.Id)
+	folder:SetAttribute("Archetype", tostring(layout.Archetype or ""))
 	local groups = {}
-	for _, name in ipairs({ "Platforms", "Hazards", "Decor", "Signs", "Tokens", "Ambient" }) do
+	for _, name in ipairs({ "Platforms", "Hazards", "Decor", "Signs", "Tokens", "Scenery" }) do
 		local f = Instance.new("Folder")
 		f.Name = name
 		f.Parent = folder
 		groups[name] = f
 	end
 
+	local tokenCount = layout.TokenCount
+	if type(tokenCount) ~= "number" then
+		tokenCount = 0
+		for _, s in ipairs(steps) do
+			tokenCount = tokenCount + #(s.Tokens or EMPTY)
+		end
+	end
+	local checkpointTotal = 0
+	for _, s in ipairs(steps) do
+		if s.Kind == "Checkpoint" then
+			checkpointTotal = checkpointTotal + 1
+		end
+	end
+
+	local cap = PART_LIMIT - tokenCount * TOKEN_PARTS
 	local ctx = {
 		Layout = layout,
 		Origin = origin,
 		Diff = diff,
+		Trim = difficultyTrim(diff, tier),
 		Folder = folder,
 		Groups = groups,
 		Welds = {},
 		Parts = 0,
+		Attach = nil,
+		CurrentMain = nil,
+		CheckpointTotal = max(checkpointTotal, 1),
 		Rng = Random.new((layout.Seed or 0) * 7 + 13),
+		Cap = cap, -- scenery stops here
+		LiteCap = cap - 250, -- landmarks get simpler past this
+		UnderCap = cap - 380, -- platform undersides get simpler past this
 	}
-
-	local checkpointTotal = 0
-	for _ in pairs(layout.Checkpoints) do
-		checkpointTotal = checkpointTotal + 1
-	end
 
 	local info = {
 		Folder = folder,
 		Checkpoints = {},
-		TotalTokens = layout.TotalTokens,
-		TotalSteps = #layout.Steps,
+		TotalTokens = layout.TotalTokens or 0,
+		TotalSteps = #steps,
 		KillY = origin.Y - 60,
+		Archetype = layout.Archetype,
+		Themes = layout.Themes,
 	}
 
-	for i, step in ipairs(layout.Steps) do
-		local ok, result = pcall(buildStep, ctx, step, checkpointTotal)
-		if not ok then
-			warn("[CourseBuilder] step " .. i .. " (" .. tostring(step.Kind) .. ") failed: " .. tostring(result))
-			result = buildFallback(ctx, step)
-		end
-		local top = origin + step.Pos
+	for _, step in ipairs(steps) do
+		local main = buildStep(ctx, step)
 		if step.Kind == "Start" then
-			local p = top + Vector3.new(0, 3.5, -4)
-			info.StartCFrame = CFrame.new(p, p + Vector3.new(0, 0, 1))
+			info.StartCFrame = spawnOn(ctx, step, 3.5, 3)
 		elseif step.Kind == "Checkpoint" then
-			local p = top + Vector3.new(0, 3.5, 0)
 			info.Checkpoints[step.Stage] = {
-				Part = result,
+				Part = main,
 				Index = step.Stage,
-				SpawnCFrame = CFrame.new(p, p + Vector3.new(0, 0, 1)),
+				SpawnCFrame = spawnOn(ctx, step, 3.5, 0),
 				Stage = step.Stage,
 			}
 		elseif step.Kind == "Finish" then
-			info.Finish = result
-		elseif (step.Kind == "DashGap" or step.Kind == "PlateBridge") and i > 1 then
-			local okHint, err = pcall(buildDashHint, ctx, layout.Steps[i - 1], step)
-			if not okHint then
-				warn("[CourseBuilder] dash hint " .. i .. " failed: " .. tostring(err))
-			end
+			info.Finish = main
 		end
 	end
+	if #steps == 0 or not info.StartCFrame or not info.Finish then
+		warn("[CourseBuilder] layout without start / finish for " .. tostring(layout.DifficultyId) .. " seed " .. tostring(layout.Seed))
+		if #steps == 0 then
+			buildStub(ctx, info)
+		end
+		info.StartCFrame = info.StartCFrame or CFrame.new(origin + Vector3.new(0, 5, 0))
+	end
 
-	pcall(buildAmbient, ctx)
+	buildScenery(ctx)
 
 	-- parent once, then do everything that needs the parts to live in the world
 	folder.Parent = parent
 	applyWelds(ctx)
-	local okTokens, errTokens = pcall(buildTokens, ctx)
-	if not okTokens then
-		warn("[CourseBuilder] tokens failed: " .. tostring(errTokens))
+	local okTokens, tokenTotal = pcall(buildTokens, ctx)
+	if okTokens then
+		info.TotalTokens = tokenTotal
+	else
+		warn("[CourseBuilder] tokens failed: " .. tostring(tokenTotal))
 	end
 	return info
 end

@@ -1,4 +1,4 @@
--- MatchService: match lifecycle + team rules for Nimbus Climb.
+-- MatchService (v2): match lifecycle + team rules for Nimbus Climb.
 --
 -- One match = one procedurally generated sky course in its own arena slot, a party of 1-4 players,
 -- and a single worker loop (task.spawn + task.wait(0.25)) that drives the state machine:
@@ -9,6 +9,17 @@
 -- Everything a match creates (course, hazard loops, token watcher, event connections, player
 -- attributes) is torn down in cleanupMatch(), always in the same order, every step in a pcall so a
 -- single failure can never leak a slot.
+--
+-- v2 additions:
+--   * five difficulties (everything is looked up through Config.GetDifficulty / per-id Config tables)
+--   * pet perks through deps.PetService: token pickups are multiplied by GetTokenMultiplier with a
+--     per-player fractional carry (rounding stays fair over time), checkpoint heals are scaled by
+--     the CheckpointHeal perk
+--   * DataService.RecordMatch for every member at the end of a match, lifetime TokensEarned
+--   * MatchResult.Stars
+--   * courses are no longer a line toward +Z: all positions come from CourseInfo (StartCFrame,
+--     Checkpoints[i].SpawnCFrame, Finish part, KillY), so spirals / zigzags / any heading work
+--
 -- Plain Lua 5.1-compatible syntax only.
 
 local Players = game:GetService("Players")
@@ -28,13 +39,24 @@ MatchService.MatchEnded = Util.Signal() -- Fire(match, won:boolean)
 ----------------------------------------------------------------------
 local TICK = 0.25 -- worker loop period (also the void / checkpoint / finish poll rate)
 local STATE_INTERVAL = 0.5 -- MatchState broadcast period while counting down / playing (2 Hz)
-local START_SPREAD = 4 -- scatter radius on the start platform (contract allows +-6)
+local START_SPREAD = 4 -- scatter radius on the start platform (platform is >= 24x24)
 local CHECKPOINT_SPREAD = 3.5 -- scatter radius on a checkpoint pad (pads are >= 14x14)
 local FINISH_SPREAD = 7.5 -- scatter radius on the finish pad (pad is >= 28x28)
 local RESPAWN_FIX_DELAY = 0.4 -- let PlayerService place + stat a fresh character before we adjust it
 local MAX_TICK_ERRORS = 40 -- consecutive worker errors before a match is force-closed
 local SHORT_RESPAWN_TIME = 1.5 -- Players.RespawnTime cap, so reset-button deaths are quick
 local LAYOUT_ATTEMPTS = 4 -- tries to get a layout that passes ValidateLayout
+local TOKEN_TOAST_WINDOW = 0.6 -- pickups inside this window share one "+n cloud tokens" toast
+local PAD_BELOW = 2 -- studs below a pad's underside that still count as "on" it (poll fallback)
+local DEFAULT_KILL_DROP = 60 -- CourseInfo.KillY fallback: origin.Y - this
+
+-- A player standing on a pad has the root ~3 studs over its top surface. Anything higher than the
+-- course headroom guarantee cannot be a player standing on the pad itself (it would be on a step
+-- above it), so the poll fallback never fires from the floor above.
+local PAD_ABOVE = 9
+if type(Config.Course) == "table" and type(Config.Course.Clearance) == "number" then
+	PAD_ABOVE = math.max(6, math.min(12, Config.Course.Clearance + 1))
+end
 
 ----------------------------------------------------------------------
 -- Module state
@@ -47,6 +69,8 @@ local playerMatch = {} -- Player -> match
 local nextMatchId = 0
 local random = Random.new()
 local remoteCache = {}
+local tokenCarry = {} -- Player -> fractional pet-bonus tokens not yet paid out (0 <= x < 1)
+local tokenToast = {} -- Player -> pending coalesced "+n cloud tokens" toast
 
 -- forward declarations (functions that reference each other)
 local endMatch
@@ -61,6 +85,13 @@ local broadcastState
 ----------------------------------------------------------------------
 local function clock()
 	return os.clock()
+end
+
+local function numberOr(v, default)
+	if type(v) == "number" and v == v and v ~= math.huge and v ~= -math.huge then
+		return v
+	end
+	return default
 end
 
 local function copyList(list)
@@ -191,7 +222,8 @@ local function teleportTo(player, cf)
 	return true
 end
 
--- Place player `index` of `count` on a ring around `base`, with a little random jitter.
+-- Place player `index` of `count` on a ring around `base` (in base's local space, so it follows
+-- the pad's heading), with a little random jitter.
 local function spreadCFrame(base, index, count, radius)
 	count = math.max(count or 1, 1)
 	local angle = ((index - 1) / count) * math.pi * 2 + math.pi / 4
@@ -234,6 +266,7 @@ local function setFrozen(player, frozen)
 end
 
 -- Is `pos` above/inside the footprint of a block `part` (used instead of Touched for reliability)?
+-- The test runs in the part's own space, so it works for pads rotated to any heading.
 local function isOverPart(part, pos, padXZ, below, above)
 	local rel = part.CFrame:PointToObjectSpace(pos)
 	local hs = part.Size * 0.5
@@ -241,6 +274,19 @@ local function isOverPart(part, pos, padXZ, below, above)
 		and math.abs(rel.Z) <= hs.Z + padXZ
 		and rel.Y >= -(hs.Y + below)
 		and rel.Y <= hs.Y + above
+end
+
+-- Void height of a match's course (CourseInfo.KillY, else origin.Y - 60).
+local function killYOf(match)
+	local course = match.Course
+	local y = course and course.KillY
+	if type(y) == "number" and y == y then
+		return y
+	end
+	if match.Origin then
+		return match.Origin.Y - DEFAULT_KILL_DROP
+	end
+	return -1e9
 end
 
 local function teamSpawnCFrame(match)
@@ -254,12 +300,18 @@ local function teamSpawnCFrame(match)
 	return course.StartCFrame
 end
 
--- Centre of the finish pad, standing height.
+-- Standing spot at the centre of the finish pad, facing the pad's direction of travel (the pad's
+-- local +Z). Follows the pad's heading so spiral / zigzag finishes spread correctly.
 local function finishCFrame(match)
-	local pad = match.Course.Finish
+	local pad = match.Course and match.Course.Finish
 	if pad and pad.Parent then
-		local p = pad.Position + Vector3.new(0, pad.Size.Y / 2 + 3.5, 0)
-		return CFrame.new(p, p + Vector3.new(0, 0, 1))
+		local top = (pad.CFrame * CFrame.new(0, pad.Size.Y / 2 + 3.5, 0)).Position
+		local look = pad.CFrame.LookVector
+		local fwd = Vector3.new(-look.X, 0, -look.Z)
+		if fwd.Magnitude < 0.01 then
+			fwd = Vector3.new(0, 0, 1)
+		end
+		return CFrame.new(top, top + fwd.Unit)
 	end
 	return teamSpawnCFrame(match)
 end
@@ -274,6 +326,47 @@ local function secondsLeft(match, t)
 		return math.max(0, math.ceil((match.EndDeadline or t) - t))
 	end
 	return 0
+end
+
+----------------------------------------------------------------------
+-- Pet perks (deps.PetService). Every call is guarded: no PetService => no bonus.
+----------------------------------------------------------------------
+local function perkCap(key, default)
+	local caps = Config.Pets and Config.Pets.PerkCaps
+	return numberOr(caps and caps[key], default)
+end
+
+-- Summed perk value (a fraction, 0.2 = +20%) for `key`, capped like PetCatalog.SumPerks.
+local function perkOf(player, key)
+	local pets = deps.PetService
+	if not pets or type(pets.GetPerks) ~= "function" then
+		return 0
+	end
+	local ok, perks = pcall(pets.GetPerks, player)
+	if not ok or type(perks) ~= "table" then
+		return 0
+	end
+	local value = numberOr(perks[key], 0)
+	if value < 0 then
+		value = 0
+	end
+	local cap = perkCap(key, nil)
+	if cap and value > cap then
+		value = cap
+	end
+	return value
+end
+
+-- >= 1. Never trusts the PetService to stay inside the configured cap.
+local function tokenMultiplier(player)
+	local pets = deps.PetService
+	if pets and type(pets.GetTokenMultiplier) == "function" then
+		local ok, mult = pcall(pets.GetTokenMultiplier, player)
+		if ok then
+			return Util.Clamp(numberOr(mult, 1), 1, 1 + perkCap("TokenBonus", 1))
+		end
+	end
+	return 1
 end
 
 ----------------------------------------------------------------------
@@ -376,6 +469,63 @@ end
 ----------------------------------------------------------------------
 -- Tokens
 ----------------------------------------------------------------------
+-- Pay `n` tokens into the persistent wallet. Also keeps Stats.TokensEarned (lifetime) correct:
+-- if DataService.AddTokens already counts it we leave it alone, otherwise we add it here, so the
+-- stat is right whichever way DataService is written (and never double counted).
+local function creditTokens(player, n)
+	local ds = deps.DataService
+	if not ds then
+		return
+	end
+	local profile = nil
+	local before = 0
+	if type(ds.GetProfile) == "function" then
+		local ok, p = pcall(ds.GetProfile, player)
+		if ok and type(p) == "table" and type(p.Stats) == "table" then
+			profile = p
+			before = numberOr(p.Stats.TokensEarned, 0)
+		end
+	end
+	callDep("DataService", "AddTokens", player, n)
+	if profile and numberOr(profile.Stats.TokensEarned, 0) == before then
+		profile.Stats.TokensEarned = before + n
+		callDep("DataService", "MarkDirty", player)
+	end
+end
+
+-- Several pickups within TOKEN_TOAST_WINDOW share one toast, so the (max 4) toast stack on the
+-- right edge is not flooded by a row of tokens.
+local function queueTokenToast(match, player, gained, base)
+	local pending = tokenToast[player]
+	if pending then
+		pending.Gained = pending.Gained + gained
+		pending.Base = pending.Base + base
+		return
+	end
+	pending = { Gained = gained, Base = base }
+	tokenToast[player] = pending
+	task.delay(TOKEN_TOAST_WINDOW, function()
+		if tokenToast[player] == pending then
+			tokenToast[player] = nil
+		end
+		if player.Parent == nil or playerMatch[player] ~= match then
+			return
+		end
+		local text = "+" .. pending.Gained .. " cloud token"
+		if pending.Gained ~= 1 then
+			text = text .. "s"
+		end
+		local extra = pending.Gained - pending.Base
+		if extra > 0 then
+			text = text .. " (pets +" .. extra .. ")"
+		end
+		notify(player, text, "token", 2)
+	end)
+end
+
+-- TokenService calls this (through the match handle) with the pickup's base value.
+-- Pets multiply the payout; a per-player carry keeps the rounding fair over time:
+--   exact = base * multiplier + carry ; paid = floor(exact) ; carry = exact - paid
 local function addTokens(match, player, n)
 	if match.State ~= "Playing" or match.Stopped then
 		return
@@ -383,20 +533,23 @@ local function addTokens(match, player, n)
 	if not isMember(match, player) then
 		return
 	end
-	n = math.floor((tonumber(n) or 0) + 0.5)
-	if n < 1 then
+	local base = math.floor(numberOr(n, 0) + 0.5)
+	if base < 1 then
 		return
 	end
-	local total = (match.Tokens[player] or 0) + n
-	match.Tokens[player] = total
-	match.TeamTokens = match.TeamTokens + n
-	setAttr(player, Config.Attr.MatchTokens, total)
-	callDep("DataService", "AddTokens", player, n)
-	local label = "+" .. n .. " cloud token"
-	if n ~= 1 then
-		label = label .. "s"
+	local exact = base * tokenMultiplier(player) + (tokenCarry[player] or 0)
+	local paid = math.floor(exact + 1e-6)
+	if paid < base then
+		paid = base -- the multiplier is >= 1, never pay less than the pickup is worth
 	end
-	notify(player, label, "token", 2)
+	tokenCarry[player] = math.max(0, exact - paid)
+
+	local total = (match.Tokens[player] or 0) + paid
+	match.Tokens[player] = total
+	match.TeamTokens = match.TeamTokens + base -- team progress counts the course's own token value
+	setAttr(player, Config.Attr.MatchTokens, total)
+	creditTokens(player, paid)
+	queueTokenToast(match, player, paid, base)
 end
 
 ----------------------------------------------------------------------
@@ -416,14 +569,15 @@ reachCheckpoint = function(match, index, byPlayer)
 	match.Checkpoint = index
 	notifyAll(match, string.format("Checkpoint %d/%d reached!", index, match.TotalCheckpoints), "good", 3.5)
 
-	-- heal everyone who is up, collect the downed
+	-- heal everyone who is up (pets can boost their owner's heal), collect the downed
 	local downedList = {}
 	for _, p in ipairs(copyList(match.Players)) do
 		if isMember(match, p) then
 			if isDowned(p) then
 				table.insert(downedList, p)
 			else
-				callDep("DamageService", "HealFraction", p, Config.Damage.CheckpointHealFraction)
+				local fraction = Config.Damage.CheckpointHealFraction * (1 + perkOf(p, "CheckpointHeal"))
+				callDep("DamageService", "HealFraction", p, Util.Clamp(fraction, 0, 1))
 			end
 		end
 	end
@@ -439,7 +593,7 @@ reachCheckpoint = function(match, index, byPlayer)
 		notify(p, "Revived by " .. who .. "!", "good", 3)
 	end
 	if #downedList > 0 then
-		notifyAll(match, "Teammates are back on their feet!", "good", 3)
+		notifyAll(match, "Team is back on its feet!", "good", 3)
 	end
 	broadcastState(match)
 end
@@ -475,7 +629,7 @@ markFinished = function(match, player)
 	teleportTo(player, spreadCFrame(finishCFrame(match), match.FinishCount, Config.Match.MaxPlayers, FINISH_SPREAD))
 	setFrozen(player, true)
 	callDep("DamageService", "GrantInvulnerability", player, 3)
-	notify(player, "You made it! Wait here for your team.", "good", 4)
+	notify(player, "You made it! Wait for your team.", "good", 4)
 	notifyAll(match, nameOf(player) .. " reached the finish!", "good", 3, player)
 	broadcastState(match)
 end
@@ -712,6 +866,24 @@ end
 ----------------------------------------------------------------------
 -- Ending a match (victory / defeat / timeout / abandoned)
 ----------------------------------------------------------------------
+-- Stats for every member: Matches always, Wins + BestTimes only for finishers of a won match.
+-- Runs off the worker thread so a slow DataService can never stall the match state machine.
+local function recordStats(match, roster, won, seconds)
+	local diffId = match.DifficultyId
+	local finished = {}
+	for _, p in ipairs(roster) do
+		finished[p] = won and match.Finished[p] == true
+	end
+	task.spawn(function()
+		for _, p in ipairs(roster) do
+			if p.Parent ~= nil then
+				callDep("DataService", "RecordMatch", p, diffId, finished[p] == true, seconds)
+				callDep("DataService", "Sync", p)
+			end
+		end
+	end)
+end
+
 endMatch = function(match, won, reason)
 	if match.Stopped or match.State == "Ended" then
 		return
@@ -744,9 +916,11 @@ endMatch = function(match, won, reason)
 	for _, p in ipairs(match.Players) do
 		if won and bonusValue > 0 and match.Finished[p] then
 			bonuses[p] = bonusValue
-			callDep("DataService", "AddTokens", p, bonusValue)
+			creditTokens(p, bonusValue)
 		end
 	end
+
+	recordStats(match, copyList(match.Players), won, Util.Round(playSeconds, 1))
 
 	local members = {}
 	for _, p in ipairs(match.Players) do
@@ -767,6 +941,7 @@ endMatch = function(match, won, reason)
 			Bonus = bonuses[p] or 0,
 			DifficultyId = diff.Id,
 			DifficultyName = diff.DisplayName,
+			Stars = diff.Stars,
 			TotalTokens = (match.Course and match.Course.TotalTokens) or 0,
 			Members = members,
 		})
@@ -799,7 +974,7 @@ local function beginPlaying(match, t)
 			setFrozen(p, false)
 		end
 	end
-	notifyAll(match, "Go! Climb together, and nobody gets left behind.", "good", 3.5)
+	notifyAll(match, "Go! Climb together.", "good", 3.5)
 	broadcastState(match)
 end
 
@@ -812,7 +987,7 @@ local function processPlayerPlaying(match, player)
 	local downed = isDowned(player)
 	local finished = match.Finished[player] == true
 
-	if root.Position.Y < course.KillY then
+	if root.Position.Y < killYOf(match) then
 		handleVoid(match, player, downed, finished)
 		return
 	end
@@ -824,14 +999,14 @@ local function processPlayerPlaying(match, player)
 	local pos = root.Position
 	for index = match.MaxCheckpoint, match.Checkpoint + 1, -1 do
 		local cp = course.Checkpoints[index]
-		if cp and cp.Part and cp.Part.Parent and isOverPart(cp.Part, pos, 2, 2, 9) then
+		if cp and cp.Part and cp.Part.Parent and isOverPart(cp.Part, pos, 2, PAD_BELOW, PAD_ABOVE) then
 			reachCheckpoint(match, index, player)
 			break
 		end
 	end
 
 	local pad = course.Finish
-	if pad and pad.Parent and isOverPart(pad, pos, 1, 2, 9) then
+	if pad and pad.Parent and isOverPart(pad, pos, 1, PAD_BELOW, PAD_ABOVE) then
 		markFinished(match, player)
 	end
 end
@@ -888,11 +1063,12 @@ local function tickPlaying(match, t)
 end
 
 local function tickEnded(match, t)
+	local killY = killYOf(match)
 	for _, player in ipairs(copyList(match.Players)) do
 		if isMember(match, player) then
 			callDep("DamageService", "GrantInvulnerability", player, 1)
 			local hum, root = getLive(player)
-			if hum and root and root.Position.Y < match.Course.KillY then
+			if hum and root and root.Position.Y < killY then
 				-- no damage on the results screen, just bring them back
 				if match.Finished[player] then
 					teleportTo(player, finishCFrame(match))
@@ -982,6 +1158,29 @@ local function seedInUse(match, seed)
 	return false
 end
 
+-- Keep only checkpoints the match can actually use: a table with a numeric index and a spawn
+-- CFrame (derived from the pad when the builder did not supply one).
+local function cleanCheckpoints(raw)
+	local clean = {}
+	local count = 0
+	local maxIndex = 0
+	for index, cp in pairs(raw or {}) do
+		if type(index) == "number" and type(cp) == "table" then
+			if typeof(cp.SpawnCFrame) ~= "CFrame" and cp.Part then
+				cp.SpawnCFrame = cp.Part.CFrame * CFrame.new(0, cp.Part.Size.Y / 2 + 3.5, 0)
+			end
+			if typeof(cp.SpawnCFrame) == "CFrame" then
+				clean[index] = cp
+				count = count + 1
+				if index > maxIndex then
+					maxIndex = index
+				end
+			end
+		end
+	end
+	return clean, count, maxIndex
+end
+
 -- Generate (and validate) a layout, build the course, attach hazards + token pickup, and hook the
 -- checkpoint / finish touch events. Errors propagate to the caller (StartMatch cleans up).
 local function setupCourse(match)
@@ -1032,21 +1231,15 @@ local function setupCourse(match)
 	end
 	match.Layout = layout
 	match.Course = info
-	if not info.StartCFrame or not info.Finish then
+	if typeof(info.StartCFrame) ~= "CFrame" or not info.Finish then
 		error("course is missing its start or finish")
 	end
+	match.Archetype = info.Archetype or layout.Archetype
 
-	local maxCheckpoint = 0
-	local count = 0
-	for index in pairs(info.Checkpoints or {}) do
-		count = count + 1
-		if index > maxCheckpoint then
-			maxCheckpoint = index
-		end
-	end
-	info.Checkpoints = info.Checkpoints or {}
+	local clean, count, maxIndex = cleanCheckpoints(info.Checkpoints)
+	info.Checkpoints = clean
 	match.TotalCheckpoints = count
-	match.MaxCheckpoint = maxCheckpoint
+	match.MaxCheckpoint = maxIndex
 
 	-- hazards pause unless the match is actually being played
 	local hazardHandle = {
@@ -1095,6 +1288,8 @@ end
 ----------------------------------------------------------------------
 -- Public API
 ----------------------------------------------------------------------
+-- deps = { PlayerService, DamageService, DataService, HazardService, TokenService, CourseBuilder,
+--          PetService }  (ItemService is separate: it asks MatchService.GetMatchOf)
 function MatchService.Init(d)
 	deps = d or deps or {}
 	if initialized then
@@ -1131,6 +1326,8 @@ function MatchService.Init(d)
 				cleanupMatch(match)
 			end
 		end
+		tokenCarry[player] = nil
+		tokenToast[player] = nil
 	end)
 
 	local dmg = deps.DamageService
@@ -1140,7 +1337,7 @@ function MatchService.Init(d)
 			if not match or match.State ~= "Playing" or match.Stopped then
 				return
 			end
-			notifyAll(match, nameOf(player) .. " is down! Reach the next checkpoint to lift them up.", "bad", 4, player)
+			notifyAll(match, nameOf(player) .. " is down! Next flag revives.", "bad", 4, player)
 			broadcastState(match)
 		end)
 	end
@@ -1192,10 +1389,10 @@ function MatchService.StartMatch(difficultyId, players)
 		Course = nil,
 		Won = false,
 		Reason = nil,
-		TeamTokens = 0,
+		TeamTokens = 0, -- course token value collected by the team (pet bonus not included)
 		FinishCount = 0,
 		LastStateAt = 0,
-		Tokens = {}, -- Player -> tokens this match
+		Tokens = {}, -- Player -> tokens paid out this match (pet bonus included)
 		Finished = {}, -- Player -> true
 		Recs = {}, -- Player -> { Conns, DiedConn }
 		Connections = {}, -- match-level connections (checkpoint / finish Touched)
@@ -1250,8 +1447,12 @@ function MatchService.StartMatch(difficultyId, players)
 	match.LastCountdown = math.ceil(Config.Match.IntroCountdown)
 	broadcastState(match)
 
+	local welcome = "Welcome to " .. diff.DisplayName .. "!"
+	if type(match.Archetype) == "string" and match.Archetype ~= "" then
+		welcome = diff.DisplayName .. ": " .. match.Archetype .. " course"
+	end
 	for _, p in ipairs(present) do
-		notify(p, "Welcome to " .. diff.DisplayName .. "! Get ready...", "info", 3)
+		notify(p, welcome, "info", 3)
 	end
 
 	task.spawn(runMatch, match)
