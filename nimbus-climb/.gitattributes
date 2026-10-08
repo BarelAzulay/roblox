@@ -1,0 +1,3 @@
+# Keep launcher line endings exactly as committed (.bat must be CRLF, .command must be LF).
+*.bat -text
+*.command -text
