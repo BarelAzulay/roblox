@@ -2,23 +2,27 @@
 """Smoke test for Nimbus Climb v2: runs the real Lua modules against a Roblox mock (tools/robloxmock.lua).
 
     pip install lupa
-    python3 tools/smoke.py [--only SCENARIO[,SCENARIO...]] [--seeds N] [-v] [--strict] [--json FILE]
+    python3 tools/smoke.py [--only SCENARIO[,SCENARIO...]] [--seeds N] [--quick] [-v] [--strict] [--json FILE] [--echo]
 
-What it does (see tools/smoke_*.lua for the scenarios; --list prints their names):
+Two Lua worlds are booted (each its own state, so server and client cannot cheat by sharing globals):
 
-  server world   loads every shared + server module through a fake ModuleScript tree, checks the public
-                 API of ARCHITECTURE.md + ARCHITECTURE_V2.md (tools/contract.json), the Config / PetCatalog /
-                 ItemCatalog data, PetBuilder for every pet, CourseBuilder.GenerateLayout + ValidateLayout for
-                 the five difficulties over N seeds (independent audit + statistics per difficulty), cannon
-                 ballistics, built courses (part budget, tags, attributes), then boots src/server/Main.server.lua,
-                 joins fake players and drives the lobby (spots, shop, portals), the economy (DataService, pets,
-                 roulettes, items, ProfileSync, v1 -> v2 migration), matches (victory, defeat, timeout, abandon,
-                 leave, deaths, concurrent slots, pet perks), hazards (including pendulum, wind, cannon, golden
-                 tokens), persistence and leak checks on a fake clock.
-  client world   loads the client controllers + UI kit with a fake LocalPlayer on a 1920x1080 screen, runs
-                 Main.client.lua, feeds it the exact remote traffic recorded in the server world and checks the
-                 HUD, toasts, menu windows, hotbar, pet followers and the "no system text in the middle of the
-                 screen" layout rule.
+  server world   smoke_server.lua   mock self-test, module loading, contract.json API check, boot of Main.server.lua, lobby,
+                                    players, portals, damage rules, the match lifecycle (victory / defeat / timeout / abandon /
+                                    leave / death / concurrent slots), persistence, shutdown, whole-run invariants
+                 smoke_content.lua  PetCatalog / ItemCatalog / roulette odds, Config shape, PetBuilder for every pet
+                 smoke_course.lua   5 difficulties x N seeds of GenerateLayout + ValidateLayout + an independent audit with
+                                    per-difficulty statistics, cannon ballistics, CourseBuilder.Build (budget, tags, attributes)
+                 smoke_economy.lua  spots, DataService / PetService economy, items, ProfileSync shape, v1 -> v2 migration,
+                                    the match lifecycle on all five difficulties, pet perks inside matches
+                 smoke_hazards.lua  HazardService on real generated courses (incl. pendulum, wind, cannon, golden tokens)
+  client world   smoke_client.lua   Main.client.lua boot, movement, HUD, toasts / results, damage fx, replay of the exact
+                                    server traffic, final invariants, touch layout (390x844 phone)
+                 smoke_client_v2.lua CloudUI kit, State, menu + windows + roulette reveal, hotbar, pet followers, and the
+                                    "no text in the middle of the screen" rule at 1920x1080 and 390x844
+
+`--list` prints the scenario names. Every tools/smoke_*.lua must be listed in `server_files` / `client_files` below and every
+scenario function must be listed in the scenario lists (smoke.py reports a failure otherwise). A scenario that crashes or runs
+longer than --scenario-timeout seconds is reported as one failed check; the other scenarios still run.
 
 Exit status is 1 when any check fails or a script raised an error.
 """
@@ -223,6 +227,7 @@ class World:
                     "options": self.rt.table_from(
                         {
                             "StrictMembers": bool(args.strict_members),
+                            "Echo": bool(getattr(args, "echo", False)),
                             "Watchdog": not args.no_watchdog,
                             "StepSize": 1.0 / args.fps,
                             "SliceLimit": args.slice_limit,
@@ -293,9 +298,11 @@ def main():
     ap.add_argument("--quick", action="store_true", help="shorter runs (fewer seeds, skip the long timeout wait)")
     ap.add_argument("-v", "--verbose", action="store_true", help="print passing checks too")
     ap.add_argument("--strict", action="store_true", help="warnings fail the run")
+    ap.add_argument("--echo", action="store_true", help="print the game's print() / warn() output and script errors as they happen (debugging)")
     ap.add_argument("--strict-members", action="store_true", help="unknown Instance members raise errors (like Roblox) instead of being recorded")
     ap.add_argument("--engine", help="lupa engine (luajit21, lua54, ...) default: luajit21")
     ap.add_argument("--fps", type=float, default=30.0, help="simulation steps per fake second (default 30)")
+    ap.add_argument("--scenario-timeout", type=float, default=600.0, help="real seconds one scenario may run before it is aborted (default 600)")
     ap.add_argument("--slice-limit", type=float, default=30.0, help="real seconds a script may run without yielding")
     ap.add_argument("--no-watchdog", action="store_true", help="disable the runaway-loop debug hooks (faster)")
     ap.add_argument("--json", metavar="FILE", help="write all results as JSON")
@@ -327,13 +334,13 @@ def main():
         ["mock_selftest", "load_modules"]
         + pure_scenarios
         + [
-            "boot", "lobby", "players", "spots", "economy", "items", "profile_sync", "portals", "damage_rules",
+            "boot", "lobby", "players", "spots", "economy", "items", "profile_sync", "migration", "portals", "damage_rules",
             "match_victory", "match_defeat", "match_timeout", "match_abandon", "match_leave", "match_death",
             "match_slots", "match_difficulties", "match_pets", "hazards", "persistence", "dash_relay", "shutdown",
             "final_checks",
         ]
     )
-    server_files = ["smoke_server.lua", "smoke_content.lua", "smoke_economy.lua"]
+    server_files = ["smoke_server.lua", "smoke_content.lua", "smoke_course.lua", "smoke_economy.lua", "smoke_hazards.lua"]
     client_scenarios = [
         "client_load", "client_ui_kit", "client_state", "client_input", "client_hud", "client_notify", "client_damage",
         "client_menu", "client_hotbar", "client_pets", "client_layout_rule", "client_replay", "client_final",
@@ -343,7 +350,14 @@ def main():
     if args.list:
         print("server:", ", ".join(server_scenarios))
         print("client:", ", ".join(client_scenarios + mobile_scenarios))
+        print("files: ", ", ".join(["smoke_common.lua"] + server_files + client_files))
         return 0
+
+    # every tools/smoke_*.lua must be loaded by one of the worlds, otherwise its scenarios silently never run
+    wired = set(server_files + client_files + ["smoke_common.lua"])
+    for name in sorted(os.listdir(HERE)):
+        if name.startswith("smoke_") and name.endswith(".lua") and name not in wired:
+            reporter.emit("fail", "smoke.py", "tools/%s is not wired into smoke.py" % name, "add it to server_files / client_files in tools/smoke.py")
 
     # scenarios build on each other: asking for one pulls in what it needs
     if only is not None:
@@ -355,6 +369,8 @@ def main():
             only |= {"load_modules"}
         if only & set(client_scenarios) - {"client_load"}:
             only |= {"client_load"}
+        if "cannon" in only:
+            only |= {"layouts"}  # the cannon audit reads the cannons the layouts scenario collected
 
     def wanted(name):
         return only is None or name in only
@@ -365,6 +381,13 @@ def main():
     if only is not None and wanted("client_replay") and not any(n in only for n in server_scenarios):
         run_server = True
         only = only | set(server_scenarios)
+
+    def check_listed(table, names, label):
+        """A scenario function that exists in the Lua files but is not in the lists above would never run."""
+        listed = set(names) | {"export_replication"}
+        for key in list(table.keys()):
+            if isinstance(key, str) and key not in listed:
+                reporter.emit("fail", "smoke.py", "%s scenario '%s' is defined but not listed in tools/smoke.py" % (label, key), "add it to the scenario lists")
 
     def run_scenarios(world, table, names, label):
         """Runs the wanted scenarios of one world; a crash in one never stops the rest."""
@@ -379,10 +402,13 @@ def main():
                 continue
             print("\n== %s ==" % name)
             t0 = time.time()
+            # a runaway scenario (or a game function it calls) is aborted instead of hanging the whole suite
+            world.Mock["Deadline"] = world.Mock.RealClock() + args.scenario_timeout
             try:
                 fn()
             except Exception as exc:  # a Lua error escaping a scenario (guarded() normally catches them)
                 reporter.emit("fail", name, "scenario crashed", str(exc))
+            world.Mock["Deadline"] = None
             try:
                 cursor = drain(results, cursor, reporter)
             except Exception:
@@ -396,6 +422,7 @@ def main():
         try:
             server = World(engine, engine_name, "server", args, api, contract)
             S = server.load_scenarios(server_files)
+            check_listed(S, server_scenarios, "server")
             run_scenarios(server, S, server_scenarios, "server")
             replication = S["export_replication"]() if S["export_replication"] else None
         except Exception:
@@ -406,6 +433,7 @@ def main():
         try:
             client = World(engine, engine_name, "client", args, api, contract, viewport=(1920, 1080))
             C = client.load_scenarios(client_files)
+            check_listed(C, client_scenarios + mobile_scenarios, "client")
             if replication is not None:
                 client.rt.globals().REPLICATION = replication_to_client(client.rt, server, replication)
             run_scenarios(client, C, client_scenarios, "client")

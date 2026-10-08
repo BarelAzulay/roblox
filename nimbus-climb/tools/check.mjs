@@ -679,7 +679,7 @@ function checkContract(file, ast) {
 	for (const name of wanted) {
 		if (!defined.has(name)) {
 			const sev = dynamic ? "warning" : "error";
-			report(last, sev, "contract", "public member '" + name + "' (ARCHITECTURE.md) is not defined" + (dynamic ? " (module fills its table dynamically; verify at runtime)" : ""));
+			report(last, sev, "contract", "public member '" + name + "' (ARCHITECTURE.md + ARCHITECTURE_V2.md, tools/contract.json) is not defined" + (dynamic ? " (module fills its table dynamically; verify at runtime)" : ""));
 		}
 	}
 }

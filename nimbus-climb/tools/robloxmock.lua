@@ -221,7 +221,10 @@ local function watchdog()
 		Mock.Deadline = nil
 		error("mock deadline exceeded (test took too long)", 2)
 	end
-	if now - Sched.sliceStart > Mock.Options.SliceLimit then
+	-- Only a thread the fake scheduler is running can "forget to yield". (LuaJIT hooks are global, so this
+	-- function also fires on the main thread that drives the scenarios: a scenario that crunches numbers for a
+	-- minute without ever resuming a game thread is not a runaway game script. Mock.Deadline covers that case.)
+	if Sched.current ~= nil and now - Sched.sliceStart > Mock.Options.SliceLimit then
 		Sched.sliceStart = now
 		error("script exhausted its execution budget (endless loop without task.wait?)", 2)
 	end
@@ -1628,6 +1631,7 @@ local CLOSED_ENUMS = {
 	ModelStreamingMode = "Default Atomic Persistent PersistentPerPlayer Nonatomic",
 	CollisionFidelity = "Default Hull Box PreciseConvexDecomposition",
 	RenderFidelity = "Automatic Precise Performance",
+	ActuatorRelativeTo = "Attachment0 Attachment1 World",
 }
 
 -- Enum type names that exist (open lists: any member name is accepted).
@@ -3146,12 +3150,14 @@ function IM.Clone(self)
 	if st.props.Archivable == false then
 		return nil
 	end
+	local map = {} -- original -> clone, so references inside the cloned tree can be remapped (like Roblox does)
 	local function cloneNode(node)
 		local nst = node[STATE]
 		if nst.props.Archivable == false then
 			return nil
 		end
 		local copy = makeInstance(nst.class.name)
+		map[node] = copy
 		local cst = copy[STATE]
 		cst.name = nst.name
 		for k, v in pairs(nst.props) do
@@ -3173,7 +3179,20 @@ function IM.Clone(self)
 		end
 		return copy
 	end
-	return cloneNode(self)
+	local root = cloneNode(self)
+	-- Object-valued properties (Model.PrimaryPart, WeldConstraint.Part0/Part1, ObjectValue.Value ...) that point
+	-- into the cloned tree now point at the clones
+	if root then
+		for _, copy in pairs(map) do
+			local props = copy[STATE].props
+			for k, v in pairs(props) do
+				if rawtype(v) ~= "number" and rawtype(v) ~= "string" and rawtype(v) ~= "boolean" and isInstance(v) and map[v] then
+					props[k] = map[v]
+				end
+			end
+		end
+	end
+	return root
 end
 
 -- attributes
@@ -3493,9 +3512,26 @@ local function pivotTo(inst, target)
 	end
 	local pivot = modelPivot(inst)
 	local delta = target * pivot:Inverse()
+	-- With a PrimaryPart the primary is set EXACTLY from the target and the other parts keep their offset to
+	-- it. (Composing `delta * current` for every part lets the rounding error of the transpose-as-inverse
+	-- square itself on each call: after ~60 PivotTo calls a pet that is moved every frame becomes NaN, which
+	-- real Roblox never does.)
+	local primary = st.props.PrimaryPart
+	local newPrimary, oldPrimaryInv
+	if primary and not primary[STATE].destroyed then
+		local pst = primary[STATE]
+		newPrimary = target * (pst.props.PivotOffset or CF_IDENTITY):Inverse()
+		oldPrimaryInv = currentCFrame(pst):Inverse()
+	end
 	for _, p in ipairs(modelParts(inst)) do
 		local pst = p[STATE]
-		applyCFrame(p, pst, delta * currentCFrame(pst), false)
+		if newPrimary and p == primary then
+			applyCFrame(p, pst, newPrimary, false)
+		elseif newPrimary then
+			applyCFrame(p, pst, newPrimary * (oldPrimaryInv * currentCFrame(pst)), false)
+		else
+			applyCFrame(p, pst, delta * currentCFrame(pst), false)
+		end
 	end
 	if st.props.WorldPivot then
 		st.props.WorldPivot = target
@@ -3784,6 +3820,15 @@ defclass("WeldConstraint", "Instance", {
 	init = function(inst, st)
 		st.onProp = weldHook
 	end,
+})
+
+-- Physics constraints used by the game (VectorForce: the wind gusts push players with one)
+defclass("VectorForce", "Instance", {
+	creatable = true,
+	props = {
+		Force = T.v3(0, 0, 0), Attachment0 = T.inst(), Attachment1 = T.inst(), ApplyAtCenterOfMass = T.bool(false),
+		RelativeTo = T.enum("ActuatorRelativeTo", "Attachment0"), Visible = T.bool(false), Enabled = T.bool(true),
+	},
 })
 
 -- Lights, effects

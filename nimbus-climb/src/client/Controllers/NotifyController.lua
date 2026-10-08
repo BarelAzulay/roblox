@@ -24,6 +24,7 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
+local GuiService = game:GetService("GuiService")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Config = require(Shared:WaitForChild("Config"))
@@ -64,6 +65,10 @@ local PILL_GAP = 8
 -- result card
 local RESULT_W = 264
 local RESULT_Y = 0.47 -- vertical position (fraction of the screen), right edge
+-- On narrow (portrait) screens the scaled card reaches into the middle of the screen. The game must never say
+-- anything there, so the card moves up until it sits above this central band (fractions of the screen size).
+local CENTRE_BAND = 0.15
+local CENTRE_MARGIN = 6
 local CONFETTI_PIECES = 18
 
 -- dash puffs of other players
@@ -106,7 +111,7 @@ local UI = {} -- Gui, Stack, StackScale, ToastPad, ResultPad
 local scalers = {}
 local toasts = {} -- live toasts, oldest first
 local toastSerial = 0
-local result = { Panel = nil, Serial = 0 } -- the open result card
+local result = { Panel = nil, Serial = 0, Height = 0 } -- the open result card (Height: design px)
 local lastDashFx = {}
 
 ----------------------------------------------------------------------
@@ -236,6 +241,26 @@ local function applyMargins()
 	end
 end
 
+-- Position of the (right-edge) result card: `xScale` 1 = on screen, > 1 = parked off screen. The card sits at
+-- RESULT_Y of the screen height; when the screen is so narrow that the scaled card reaches into the centre band
+-- it is lifted above that band instead (never below it: the thumb controls live there).
+local function resultPosition(xScale, panelHeight)
+	local vp = viewportSize()
+	local k = currentScale()
+	local side = isTouchDevice() and TOUCH_EDGE or EDGE
+	local cardLeft = vp.X - side - RESULT_W * k
+	if cardLeft >= vp.X * (0.5 + CENTRE_BAND) then
+		return UDim2.new(xScale, 0, RESULT_Y, 0)
+	end
+	-- the ScreenGui area starts below the top bar (IgnoreGuiInset = false), so gui y = screen y - inset
+	local okInset, inset = pcall(GuiService.GetGuiInset, GuiService)
+	local top = (okInset and inset and inset.Y) or 0
+	local half = (panelHeight or result.Height) * k / 2
+	local ceiling = vp.Y * (0.5 - CENTRE_BAND) - CENTRE_MARGIN - half - top
+	local floorY = (EDGE + PILL_H + PILL_GAP) * k + half -- keep clear of the token pill
+	return UDim2.new(xScale, 0, 0, math.floor(math.max(ceiling, floorY)))
+end
+
 local function relayout()
 	local k = currentScale()
 	for i = #scalers, 1, -1 do
@@ -247,6 +272,10 @@ local function relayout()
 		end
 	end
 	applyMargins()
+	local panel = result.Panel
+	if panel and panel.Root and panel.Root.Parent then
+		panel.Root.Position = resultPosition(1)
+	end
 end
 
 ----------------------------------------------------------------------
@@ -448,7 +477,7 @@ local function closeResults(immediate)
 		panel.Destroy()
 		return
 	end
-	tween(panel.Root, 0.3, { Position = UDim2.new(1.8, 0, RESULT_Y, 0) }, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+	tween(panel.Root, 0.3, { Position = resultPosition(1.8) }, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
 	task.delay(0.35, function()
 		if panel.Root.Parent then
 			panel.Destroy()
@@ -565,13 +594,14 @@ local function buildResults(data)
 	local footY = y
 	y = y + FOOT_H
 	local panelH = 34 + 8 + y
+	result.Height = panelH
 
 	local accent = won and (Theme.Buttons and Theme.Buttons.Gold or GOLD) or Color3.fromRGB(118, 130, 204)
 	local panel = CloudUI.Panel({
 		Name = "ResultCard",
 		Size = UDim2.fromOffset(RESULT_W, panelH),
 		AnchorPoint = Vector2.new(1, 0.5),
-		Position = UDim2.new(1.8, 0, RESULT_Y, 0),
+		Position = resultPosition(1.8, panelH),
 		Accent = accent,
 		Closable = true,
 		OnClose = function()
@@ -724,7 +754,7 @@ local function showResults(data)
 	end
 	result.Panel = panel
 
-	tween(panel.Root, 0.5, { Position = UDim2.new(1, 0, RESULT_Y, 0) }, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+	tween(panel.Root, 0.5, { Position = resultPosition(1) }, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
 	if data.Won == true then
 		burstConfetti(panel.Root, serial)
 	end

@@ -119,6 +119,16 @@ local function button(pattern)
 	return nil
 end
 
+-- first TextButton called `name` anywhere in PlayerGui (shown or not)
+local function namedButton(name)
+	for _, d in ipairs(gui():GetDescendants()) do
+		if d:IsA("TextButton") and d.Name == name then
+			return d
+		end
+	end
+	return nil
+end
+
 local function remotes()
 	return ReplicatedStorage:FindFirstChild("Remotes")
 end
@@ -164,14 +174,15 @@ local function controllersFolder()
 end
 
 ----------------------------------------------------------------------------------------------------
--- payloads exactly as ARCHITECTURE.md describes them
+-- payloads exactly as ARCHITECTURE.md / ARCHITECTURE_V2.md describe them
 ----------------------------------------------------------------------------------------------------
 local function matchState(over)
+	local easy = Config.GetDifficulty("Easy")
 	local s = {
 		Phase = "Playing",
-		DifficultyId = "Breeze",
-		DifficultyName = "Soft Breeze",
-		Color = Color3.fromRGB(120, 220, 255),
+		DifficultyId = easy.Id,
+		DifficultyName = easy.DisplayName,
+		Color = easy.Color,
 		Seconds = 545,
 		Checkpoint = 2,
 		TotalCheckpoints = 4,
@@ -187,6 +198,44 @@ local function matchState(over)
 		s[k] = v
 	end
 	return s
+end
+
+-- Shown text labels whose centre lies inside the middle of the screen (|dx| < tol * width, |dy| < tol * height).
+-- ARCHITECTURE_V2.md: nothing the GAME says (toasts, countdown, party status, results, title card) may sit there.
+local function centredTexts(tol)
+	local vp = Mock.Viewport
+	local W, H = vp.X, vp.Y
+	local out = {}
+	for _, d in ipairs(texts(nil, true)) do
+		local t = tostring(d.Text):gsub("<[^>]*>", "")
+		if t:gsub("%s", "") ~= "" and d.AbsoluteSize.X > 0 and d.AbsoluteSize.Y > 0 then
+			local cx = d.AbsolutePosition.X + d.AbsoluteSize.X / 2
+			local cy = d.AbsolutePosition.Y + d.AbsoluteSize.Y / 2
+			-- AbsolutePosition is relative to the ScreenGui area, which starts below the top bar unless
+			-- IgnoreGuiInset is true: convert to screen space so "the middle" is the middle of what the player sees
+			local owner = d:FindFirstAncestorOfClass("ScreenGui")
+			if owner and owner.IgnoreGuiInset == false then
+				cy = cy + (Mock.TopInset or 0)
+			end
+			if math.abs(cx - W / 2) < tol * W and math.abs(cy - H / 2) < tol * H then
+				out[#out + 1] = {
+					path = d:GetFullName():gsub("^Players%.[^.]+%.PlayerGui%.", ""),
+					text = t,
+					x = cx / W,
+					y = cy / H,
+				}
+			end
+		end
+	end
+	return out
+end
+
+local function describeCentred(list)
+	local parts = {}
+	for i = 1, math.min(5, #list) do
+		parts[i] = string.format("%s '%s' at %.2f,%.2f", list[i].path, list[i].text:sub(1, 30), list[i].x, list[i].y)
+	end
+	return table.concat(parts, "; ")
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -209,6 +258,13 @@ S.client_load = guarded("client_load", function()
 				T.ok(key .. " loads")
 				for _, fn in pairs(spec["functions"] or {}) do
 					T.check(type(result[fn]) == "function", key .. "." .. fn .. " is a function", type(result[fn]))
+				end
+				for _, name in pairs(spec["signals"] or {}) do
+					local sig = result[name]
+					T.check(type(sig) == "table" and type(sig.Connect) == "function" and type(sig.Fire) == "function", key .. "." .. name .. " is a signal (Connect + Fire)", type(sig))
+				end
+				for _, name in pairs(spec.fields or {}) do
+					T.check(result[name] ~= nil, key .. "." .. name .. " exists")
 				end
 			end
 		end
@@ -236,7 +292,45 @@ S.client_load = guarded("client_load", function()
 	local hud = gui():FindFirstChild("NimbusHud")
 	if T.check(hud ~= nil and hud:IsA("ScreenGui"), "HudController builds the ScreenGui 'NimbusHud'") then
 		T.eq(hud.ResetOnSpawn, false, "NimbusHud.ResetOnSpawn = false")
-		T.eq(hud.IgnoreGuiInset, true, "NimbusHud.IgnoreGuiInset = true")
+		T.eq(hud.IgnoreGuiInset, false, "NimbusHud.IgnoreGuiInset = false (v2: IgnoreGuiInset = false everywhere)")
+		T.eq(hud.DisplayOrder, 10, "NimbusHud.DisplayOrder = 10")
+		T.eq(hud.ZIndexBehavior, Enum.ZIndexBehavior.Sibling, "NimbusHud.ZIndexBehavior = Sibling")
+	end
+	-- every ScreenGui the game builds: the documented display orders, never reset on spawn, and every one
+	-- that carries text respects the top bar inset
+	local wantedOrder = { NimbusHud = 10, NimbusHotbar = 11, NimbusMenu = 20, NimbusNotify = 30 }
+	for _, g in ipairs(gui():GetChildren()) do
+		if g:IsA("ScreenGui") then
+			T.eq(g.ResetOnSpawn, false, g.Name .. ".ResetOnSpawn = false")
+			if wantedOrder[g.Name] then
+				T.eq(g.DisplayOrder, wantedOrder[g.Name], g.Name .. ".DisplayOrder = " .. wantedOrder[g.Name])
+			end
+			local hasText = false
+			for _, d in ipairs(g:GetDescendants()) do
+				if d:IsA("TextLabel") or d:IsA("TextButton") then
+					hasText = true
+					break
+				end
+			end
+			if hasText and g.Name ~= "MobileControls" then
+				T.eq(g.IgnoreGuiInset, false, g.Name .. ".IgnoreGuiInset = false (it carries text)")
+			end
+		end
+	end
+	for name, order in pairs(wantedOrder) do
+		T.check(gui():FindFirstChild(name) ~= nil, "ScreenGui " .. name .. " exists (display order " .. order .. ")")
+	end
+	-- the title card is on screen right after joining: it is a small banner, never in the middle
+	do
+		local title = findText("nimbus climb")
+		T.check(title ~= nil, "the title card ('NIMBUS CLIMB') is shown after joining", allShownText())
+		T.check(#centredTexts(CONTRACT.v2.centreTolerance) == 0, "...and nothing is shown in the middle of the screen while it is up", describeCentred(centredTexts(CONTRACT.v2.centreTolerance)))
+		if title then
+			local vp = Mock.Viewport
+			local cx = title.AbsolutePosition.X + title.AbsoluteSize.X / 2
+			local cy = title.AbsolutePosition.Y + title.AbsoluteSize.Y / 2
+			T.check(cx < vp.X * 0.4 and cy < vp.Y * 0.25, "the title card is a small banner in the top-left corner", string.format("centre at %.2f,%.2f of the screen", cx / vp.X, cy / vp.Y))
+		end
 	end
 	T.eq(Mock.CoreGui.Health, false, "the default Roblox health bar is disabled (retried after early failures)")
 	T.eq(LocalPlayer.CameraMaxZoomDistance, 40, "LocalPlayer.CameraMaxZoomDistance = 40")
@@ -244,7 +338,6 @@ S.client_load = guarded("client_load", function()
 	T.check(type(stamina) == "number" and stamina >= 0 and stamina <= Config.Physics.MaxStamina, "the Stamina attribute is mirrored (0..MaxStamina)", tostring(stamina))
 	T.check(M.MovementController.GetDashCooldownFraction() == 0, "GetDashCooldownFraction() is 0 when the dash is ready", tostring(M.MovementController.GetDashCooldownFraction()))
 	-- the title card fades away
-	T.check(findText("nimbus climb") ~= nil or true, "title card handled")
 	advance(6)
 	T.check(findText("nimbus climb") == nil, "the 'NIMBUS CLIMB' title card fades out after a few seconds", allShownText())
 	-- initial HUD state
@@ -429,22 +522,22 @@ S.client_hud = guarded("client_hud", function()
 	LocalPlayer:SetAttribute("InMatch", true)
 	LocalPlayer:SetAttribute("MatchTokens", 3)
 	advance(1.5)
-	T.check(findText("this run: 3") ~= nil or findText("this run") ~= nil, "'this run: N' appears while in a match", allShownText())
+	T.check(findText("+3", nil, false) ~= nil, "the token pill shows the match tokens ('+3') while in a match", allShownText())
 	-- party panel
 	local leaveParty = #serverCalls("LeaveParty")
 	toClient("PartyState", {
-		PortalId = "Breeze",
-		DifficultyName = "Soft Breeze",
-		Color = Color3.fromRGB(120, 220, 255),
+		PortalId = "Medium",
+		DifficultyName = "Medium",
+		Color = Config.GetDifficulty("Medium").Color,
 		Players = { { UserId = LocalPlayer.UserId, Name = LocalPlayer.Name }, { UserId = 77, Name = "Buddy" } },
 		Max = 4,
 		Countdown = 12,
 	})
 	LocalPlayer:SetAttribute("InMatch", false)
 	advance(1.0)
-	T.check(findText("soft breeze") ~= nil, "PartyState shows the difficulty name", allShownText())
+	T.check(findText("medium") ~= nil, "PartyState shows the difficulty name", allShownText())
 	T.check(findText("buddy") ~= nil, "...and the party members")
-	T.check(findText("12") ~= nil, "...and the countdown ('Starting in 12s')", allShownText())
+	T.check(findText("starting in") ~= nil, "...and the countdown ('Starting in Ns')", allShownText())
 	local leaveBtn = button("leave")
 	if T.check(leaveBtn ~= nil, "a Leave button is visible in the party panel") then
 		Mock.Click(leaveBtn)
@@ -458,22 +551,22 @@ S.client_hud = guarded("client_hud", function()
 	LocalPlayer:SetAttribute("InMatch", true)
 	toClient("MatchState", matchState({ Phase = "Countdown", Seconds = 3, Checkpoint = 0, TokensCollected = 0 }))
 	advance(0.6)
-	T.check(findText("3", nil, false) ~= nil, "the intro countdown shows the seconds", allShownText())
+	local matchPanel = gui().NimbusHud.TopLeft.MatchPanel
+	T.check(findText("^3$", matchPanel, true) ~= nil, "the intro countdown shows the seconds inside the match panel (a '3')", allShownText())
 	toClient("MatchState", matchState({ Phase = "Countdown", Seconds = 1, Checkpoint = 0, TokensCollected = 0 }))
 	advance(0.5)
-	T.check(findText("1") ~= nil, "the intro countdown updates")
+	T.check(findText("^1$", matchPanel, true) ~= nil and findText("^3$", matchPanel, true) == nil, "the intro countdown updates (3 -> 1)", allShownText())
 	toClient("MatchState", matchState())
-	advance(0.8)
-	T.check(findText("go") ~= nil or true, "GO! flashes when play starts")
-	advance(2.0)
-	T.check(findText("soft breeze") ~= nil, "the match panel shows the difficulty", allShownText())
+	advance(2.8)
+	T.check(findText("^%d$", matchPanel, true) == nil, "the countdown numeral is gone once play starts (the timer shows m:ss again)", allShownText())
+	T.check(findText("easy") ~= nil, "the match panel shows the difficulty", allShownText())
 	local timerOk = false
 	for k = 0, 10 do
 		timerOk = timerOk or findText(Util.FormatTime(545 - k)) ~= nil
 	end
 	T.check(timerOk, "the match panel shows the time left (~" .. Util.FormatTime(545) .. ", counting down)", allShownText())
 	T.check(findText("checkpoint 2/4") ~= nil, "the match panel shows 'Checkpoint 2/4'", allShownText())
-	T.check(findText("tokens 7/24") ~= nil, "the match panel shows 'Tokens 7/24'", allShownText())
+	T.check(findText("7/24") ~= nil, "the match panel shows the token progress ('7/24')", allShownText())
 	T.check(findText("buddy") ~= nil and findText("fallen") ~= nil, "the team list shows the other members", allShownText())
 	local skull = false
 	for _, d in ipairs(texts(nil, true)) do
@@ -485,15 +578,15 @@ S.client_hud = guarded("client_hud", function()
 	-- the time keeps ticking down with each message
 	toClient("MatchState", matchState({ Seconds = 544, Checkpoint = 3, TokensCollected = 9 }))
 	advance(0.8)
-	T.check(findText("checkpoint 3/4") ~= nil and findText("tokens 9/24") ~= nil, "the match panel follows new MatchState messages", allShownText())
-	-- leave match needs a confirmation
+	T.check(findText("checkpoint 3/4") ~= nil and findText("9/24") ~= nil, "the match panel follows new MatchState messages", allShownText())
+	-- leave match needs a confirmation (the compact Leave button inside the match panel, named LeaveMatch)
 	local leaveMatchCalls = #serverCalls("LeaveMatch")
-	local lm = button("leave match")
-	if T.check(lm ~= nil, "a 'Leave match' button is visible during a match") then
+	local lm = namedButton("LeaveMatch")
+	if T.check(lm ~= nil and isShown(lm), "a 'Leave' button is visible in the match panel during a match") then
 		Mock.Click(lm)
 		advance(0.2)
 		T.eq(#serverCalls("LeaveMatch"), leaveMatchCalls, "the first press only asks for confirmation")
-		lm = button("leave") or button("sure") or lm
+		T.check(tostring(lm.Text):lower():find("sure") ~= nil, "...the button turns into 'Sure?'", lm.Text)
 		Mock.Click(lm)
 		advance(0.2)
 		T.eq(#serverCalls("LeaveMatch"), leaveMatchCalls + 1, "the second press fires Remotes.LeaveMatch")
@@ -503,7 +596,8 @@ S.client_hud = guarded("client_hud", function()
 	LocalPlayer:SetAttribute("MatchTokens", 0)
 	advance(1.2)
 	T.check(findText("checkpoint 3/4") == nil, "MatchState(nil) hides the match panel", allShownText())
-	T.check(button("leave match") == nil, "...and the Leave match button")
+	local lm2 = namedButton("LeaveMatch")
+	T.check(lm2 == nil or not isShown(lm2), "...and the Leave button")
 	flushWarnings("client hud")
 	flushErrors("client hud")
 end)
@@ -536,7 +630,7 @@ S.client_notify = guarded("client_notify", function()
 	advance(4)
 	-- results
 	local result = {
-		Won = true, Reason = "victory", Seconds = 187, MatchTokens = 11, Bonus = 10, DifficultyId = "Breeze", DifficultyName = "Soft Breeze", TotalTokens = 24,
+		Won = true, Reason = "victory", Seconds = 187, MatchTokens = 11, Bonus = 10, DifficultyId = "Easy", DifficultyName = "Easy", Stars = 1, TotalTokens = 24,
 		Members = {
 			{ Name = LocalPlayer.Name, MatchTokens = 11, Finished = true, Downed = false },
 			{ Name = "Buddy", MatchTokens = 6, Finished = true, Downed = false },
@@ -545,13 +639,13 @@ S.client_notify = guarded("client_notify", function()
 	toClient("MatchResult", result)
 	advance(4.0) -- numbers on the card count up
 	T.check(findText("victory") ~= nil, "MatchResult(Won) shows VICTORY", allShownText())
-	T.check(findText("soft breeze") ~= nil, "the results card names the difficulty")
+	T.check(findText("easy") ~= nil, "the results card names the difficulty")
 	T.check(findText(Util.FormatTime(187)) ~= nil, "...shows the time (" .. Util.FormatTime(187) .. ")", allShownText())
 	T.check(findText("buddy") ~= nil, "...lists the team")
 	local victory = findText("victory")
 	local card = victory and victory:FindFirstAncestorOfClass("ScreenGui")
 	T.check(card ~= nil and findText("%f[%d]10%f[%D]", card, true) ~= nil, "...shows the win bonus (+10)", card and allShownText() or "no card")
-	T.check(findText("returning to the lobby") ~= nil, "...counts down to the lobby", allShownText())
+	T.check(findText("back to lobby in") ~= nil, "...counts down to the lobby ('Back to lobby in Ns')", allShownText())
 	toClient("MatchState", nil)
 	advance(1.5)
 	T.check(findText("victory") == nil, "MatchState(nil) closes the results card", allShownText())
@@ -691,29 +785,74 @@ S.client_replay = guarded("client_replay", function()
 		T.warn("no server replication log: run the server scenarios first")
 		return
 	end
-	-- the three players that received the most traffic, replayed one after the other as the local player
-	local score = {}
+	-- a few players with different traffic, replayed one after the other as the local player: the busiest one,
+	-- and whoever got the most PartyState / MatchResult / RouletteResult / OpenPanel messages
+	local score, byKind = {}, {}
 	for i = 1, #REPLICATION do
 		local e = REPLICATION[i]
 		if e.kind == "remote" and e.target == "client" and e.userId then
 			score[e.userId] = (score[e.userId] or 0) + 1
+			byKind[e.remote] = byKind[e.remote] or {}
+			byKind[e.remote][e.userId] = (byKind[e.remote][e.userId] or 0) + 1
 		end
 	end
-	local users = {}
-	for userId, n in pairs(score) do
-		users[#users + 1] = { userId = userId, n = n }
-	end
-	table.sort(users, function(a, b)
-		if a.n ~= b.n then
-			return a.n > b.n
+	local function best(counts)
+		local pick, top = nil, 0
+		for userId, n in pairs(counts or {}) do
+			if n > top or (n == top and pick and userId < pick) then
+				pick, top = userId, n
+			end
 		end
-		return a.userId < b.userId
-	end)
+		return pick
+	end
+	local users, seenUser = {}, {}
+	for _, userId in ipairs({ best(score), best(byKind.PartyState), best(byKind.MatchResult), best(byKind.RouletteResult), best(byKind.OpenPanel) }) do
+		if userId and not seenUser[userId] then
+			seenUser[userId] = true
+			users[#users + 1] = { userId = userId, n = score[userId] }
+		end
+	end
+	-- the menu draws one pet viewport per distinct owned pet, so the GUI size depends on the profile: compare
+	-- before / after with the same small profile
+	local function smallProfile()
+		LocalPlayer:SetAttribute("CloudTokens", 600)
+		toClient("ProfileSync", {
+			Tokens = 600, Pets = { cloudy_dragon = 2, pebble_pup = 1, biscuit_bear = 3 }, Equipped = { "cloudy_dragon" }, Items = { heal_cloud = 2 },
+			Stats = { Matches = 1, Wins = 1, TokensEarned = 5, Spins = 1, BestTimes = {} }, Perks = { MaxHealth = 0.12, TokenBonus = 0.25, StaminaRegen = 0, CheckpointHeal = 0 },
+		})
+		advance(1.5)
+	end
+	smallProfile()
+	local function guiBreakdown()
+		local parts = {}
+		for _, g in ipairs(gui():GetChildren()) do
+			local line = g.Name .. " " .. #g:GetDescendants()
+			if g.Name == "NimbusMenu" then
+				-- one level deeper: which window / layer holds the objects
+				local inner = {}
+				for _, c in ipairs(g:GetChildren()) do
+					for _, cc in ipairs(c:GetChildren()) do
+						local n = #cc:GetDescendants()
+						if n > 60 then
+							inner[#inner + 1] = c.Name .. "." .. cc.Name .. " " .. n
+						end
+					end
+				end
+				if #inner > 0 then
+					line = line .. " (" .. table.concat(inner, ", ") .. ")"
+				end
+			end
+			parts[#parts + 1] = line
+		end
+		return table.concat(parts, ", ")
+	end
+	local baselineGui = #gui():GetDescendants()
+	local baselineBreakdown = guiBreakdown()
 	local maxGui = 0
 	local total = 0
 	local shownResult, shownPanel, shownParty = false, false, false
 	local kinds = {}
-	for rank = 1, math.min(3, #users) do
+	for rank = 1, #users do
 		local picked = replayFor(users[rank].userId)
 		local me = LocalPlayer.UserId
 		local mapped = {}
@@ -734,7 +873,7 @@ S.client_replay = guarded("client_replay", function()
 				kinds[e.remote] = (kinds[e.remote] or 0) + 1
 				if e.remote == "MatchResult" then
 					advance(1.0)
-					shownResult = shownResult or findText("victory") ~= nil or findText("defeat") ~= nil or findText("returning to the lobby") ~= nil
+					shownResult = shownResult or findText("victory") ~= nil or findText("defeat") ~= nil or findText("back to lobby in") ~= nil
 				elseif e.remote == "MatchState" and not shownPanel then
 					advance(0.5)
 					shownPanel = shownPanel or findText("checkpoint") ~= nil
@@ -754,13 +893,35 @@ S.client_replay = guarded("client_replay", function()
 		parts[#parts + 1] = k .. "=" .. v
 	end
 	table.sort(parts)
-	T.info("*replayed " .. total .. " server events for " .. math.min(3, #users) .. " players (" .. table.concat(parts, " ") .. "); GUI peaked at " .. maxGui .. " objects")
+	T.info("*replayed " .. total .. " server events for " .. #users .. " players (" .. table.concat(parts, " ") .. "); GUI peaked at " .. maxGui .. " objects")
 	T.check(total > 40, "the server run produced replayable traffic", total .. " events")
 	T.check(shownParty, "the HUD showed the party panel (with a Leave button) while replaying PartyState traffic")
 	T.check(shownPanel, "the HUD showed a match panel while replaying MatchState traffic")
 	T.check(shownResult, "the HUD showed a results card while replaying MatchResult traffic")
-	T.check(maxGui < 2500, "the GUI stays small during a long session (toasts / floats are cleaned up)", "peak " .. maxGui .. " objects")
-	T.check(#gui():GetDescendants() < 1200, "the GUI is tidy after the replay", #gui():GetDescendants() .. " objects")
+	LocalPlayer:SetAttribute("InMatch", false)
+	LocalPlayer:SetAttribute("Downed", false)
+	toClient("MatchState", nil)
+	toClient("PartyState", nil)
+	-- roulette results queue up on the client and a reveal card stays up until the player dismisses it: Esc closes the
+	-- stage (which starts the next queued result), then the open window. Dismiss until nothing is left.
+	local idle = 0
+	for _ = 1, 150 do
+		Mock.FireSignal(game:GetService("UserInputService"), "InputBegan", Mock.NewInput("Escape", "Keyboard", "Begin"), false)
+		advance(0.4)
+		if gui():FindFirstChild("RouletteStage", true) then
+			idle = 0
+		else
+			idle = idle + 1
+			if idle >= 2 then
+				break
+			end
+		end
+	end
+	T.check(gui():FindFirstChild("RouletteStage", true) == nil, "every queued roulette result can be dismissed with Esc", "a RouletteStage is still on screen after 150 presses")
+	smallProfile()
+	advance(2.0)
+	T.check(maxGui < baselineGui + 4000, "the GUI stays small during a long session (toasts / floats are cleaned up)", "peak " .. maxGui .. " objects, " .. baselineGui .. " before (" .. baselineBreakdown .. ")")
+	T.check(#gui():GetDescendants() <= baselineGui + 120, "the GUI is tidy after the replay (no growth from toasts, result cards, roulette reveals)", #gui():GetDescendants() .. " objects after, " .. baselineGui .. " before; now: " .. guiBreakdown() .. "; before: " .. baselineBreakdown)
 end)
 
 ----------------------------------------------------------------------------------------------------
@@ -842,13 +1003,21 @@ S.client_mobile = guarded("client_mobile", function()
 		advance(1.5)
 		T.near(hum().WalkSpeed, Config.Physics.WalkSpeed, 1.5, "tapping RUN again stops running")
 	end
-	-- Layout: RUN and DASH must never sit on top of Roblox's default jump button (TouchJump), which is
-	-- 120 px (left edge 170 px / top edge 210 px from the right / bottom screen edge) on big screens and
-	-- 70 px (95 px / 90 px) on small ones. Rectangles are {x0, y0, x1, y1} in screen pixels.
+	-- Layout: RUN and DASH must never sit on top of Roblox's default jump button (TouchJump: 120 px, left edge
+	-- 170 px / top edge 210 px from the right / bottom screen edge on big screens, 70 px (95 / 90) on small ones),
+	-- on the hotbar, on the HP bar, on the token pill or on the menu column. Rectangles are {x0, y0, x1, y1} in pixels.
 	if run and dash then
-		local function rectOf(button)
-			local p, s = button.AbsolutePosition, button.AbsoluteSize
-			return { x0 = p.X, y0 = p.Y, x1 = p.X + s.X, y1 = p.Y + s.Y }
+		-- Screen-space rectangle. AbsolutePosition is relative to the owning ScreenGui's area, which starts below the
+		-- top bar unless IgnoreGuiInset is true (MobileControls does, the HUD / hotbar / menu do not), so rectangles of
+		-- different guis are only comparable once the inset is added for the guis that respect it.
+		local function rectOf(inst)
+			local p, s2 = inst.AbsolutePosition, inst.AbsoluteSize
+			local dy = 0
+			local owner = inst:FindFirstAncestorOfClass("ScreenGui")
+			if owner and owner.IgnoreGuiInset == false then
+				dy = Mock.TopInset or 0
+			end
+			return { x0 = p.X, y0 = p.Y + dy, x1 = p.X + s2.X, y1 = p.Y + s2.Y + dy }
 		end
 		local function overlaps(a, b)
 			return a.x0 < b.x1 and b.x0 < a.x1 and a.y0 < b.y1 and b.y0 < a.y1
@@ -856,37 +1025,92 @@ S.client_mobile = guarded("client_mobile", function()
 		local function show(r)
 			return string.format("x %d..%d, y %d..%d", r.x0, r.x1, r.y0, r.y1)
 		end
-		local function jumpRect(w, h, size, fromRight, fromBottom)
-			return { x0 = w - fromRight, y0 = h - fromBottom, x1 = w - fromRight + size, y1 = h - fromBottom + size }
+		local function jumpRect(w, h)
+			if math.min(w, h) <= 500 then
+				return { x0 = w - 95, y0 = h - 90, x1 = w - 95 + 70, y1 = h - 90 + 70 }
+			end
+			return { x0 = w - 170, y0 = h - 210, x1 = w - 170 + 120, y1 = h - 210 + 120 }
 		end
-		local function checkLayout(label, w, h, jump)
+		local function guiPart(path)
+			local cur = gui()
+			for part in path:gmatch("[^.]+") do
+				cur = cur and cur:FindFirstChild(part)
+			end
+			return cur
+		end
+		local function checkLayout(label, w, h)
+			Mock.SetViewport(w, h)
+			advance(0.4)
 			local d, r = rectOf(dash), rectOf(run)
+			local jump = jumpRect(w, h)
 			T.check(not overlaps(d, jump), label .. ": DASH does not cover the jump button", show(d) .. " vs jump " .. show(jump))
 			T.check(not overlaps(r, jump), label .. ": RUN does not cover the jump button", show(r) .. " vs jump " .. show(jump))
 			T.check(not overlaps(d, r), label .. ": DASH and RUN do not overlap", show(d) .. " vs " .. show(r))
 			for name, rect in pairs({ DASH = d, RUN = r }) do
-				T.check(rect.x0 >= 0 and rect.y0 >= 0 and rect.x1 <= w and rect.y1 <= h,
-					label .. ": " .. name .. " is fully on screen", show(rect))
+				T.check(rect.x0 >= 0 and rect.y0 >= 0 and rect.x1 <= w and rect.y1 <= h, label .. ": " .. name .. " is fully on screen", show(rect))
+			end
+			for _, other in ipairs({ { "NimbusHotbar.Hotbar", "the hotbar" }, { "NimbusHud.BottomLeft.Vitals", "the HP bar" }, { "NimbusHud.TopRight.TokenPill", "the token pill" }, { "NimbusMenu.MenuColumn", "the menu column" } }) do
+				local inst = guiPart(other[1])
+				if inst then
+					local o = rectOf(inst)
+					T.check(not overlaps(d, o), label .. ": DASH does not cover " .. other[2], show(d) .. " vs " .. show(o))
+					T.check(not overlaps(r, o), label .. ": RUN does not cover " .. other[2], show(r) .. " vs " .. show(o))
+				end
+			end
+			local hotbar, vitals = guiPart("NimbusHotbar.Hotbar"), guiPart("NimbusHud.BottomLeft.Vitals")
+			if hotbar and vitals then
+				T.check(not overlaps(rectOf(hotbar), rectOf(vitals)), label .. ": the hotbar and the HP bar do not overlap", show(rectOf(hotbar)) .. " vs " .. show(rectOf(vitals)))
+				T.check(not overlaps(rectOf(hotbar), jump), label .. ": the hotbar does not cover the jump button", show(rectOf(hotbar)) .. " vs jump " .. show(jump))
 			end
 		end
+		checkLayout("390x844 phone", 390, 844)
+		checkLayout("844x390 phone landscape", 844, 390)
+		checkLayout("800x400", 800, 400)
+		checkLayout("1280x720", 1280, 720)
+		-- the HP bar is raised on touch so the thumbstick can be used (bottom-left)
+		local vitals = guiPart("NimbusHud.BottomLeft.Vitals")
+		if vitals then
+			Mock.SetViewport(390, 844)
+			advance(0.4)
+			local v = rectOf(vitals)
+			T.check(844 - v.y1 >= 120, "390x844: the HP bar is raised on touch devices (the thumbstick area stays free)", show(v))
+		end
+		Mock.SetViewport(390, 844) -- leave the world as we found it
+		advance(0.2)
+	end
 
-		-- big screen (tablet / desktop window): 120 px jump button
-		Mock.SetViewport(1280, 720)
-		advance(0.1)
-		checkLayout("1280x720", 1280, 720, jumpRect(1280, 720, 120, 170, 210))
-
-		-- small screen (phone): 70 px jump button and the classic offsets
-		Mock.SetViewport(800, 400)
-		advance(0.1)
-		checkLayout("800x400", 800, 400, jumpRect(800, 400, 70, 95, 90))
-		local dp, rp = dash.Position, run.Position
-		T.check(dp.X.Scale == 1 and dp.X.Offset == -30 and dp.Y.Scale == 1 and dp.Y.Offset == -175,
-			"800x400: DASH keeps the small layout (-30, -175 from the bottom-right)", tostring(dp))
-		T.check(rp.X.Scale == 1 and rp.X.Offset == -120 and rp.Y.Scale == 1 and rp.Y.Offset == -150,
-			"800x400: RUN keeps the small layout (-120, -150 from the bottom-right)", tostring(rp))
-
-		Mock.SetViewport(1280, 720) -- leave the world as we found it
-		advance(0.1)
+	-- touch-friendly hotbar (slots >= 48 px) and a menu column that fits on a phone
+	local hotbar = gui():FindFirstChild("NimbusHotbar")
+	if hotbar then
+		local smallest = math.huge
+		for _, d in ipairs(hotbar:GetDescendants()) do
+			if d.Name:find("^Hotbar%d$") and d:IsA("GuiObject") then
+				smallest = math.min(smallest, d.AbsoluteSize.X, d.AbsoluteSize.Y)
+			end
+		end
+		T.check(smallest >= 48, "390x844: hotbar slots are at least 48 px (touch friendly)", "smallest slot " .. fmt(smallest, 0) .. " px")
+	end
+	local column = gui():FindFirstChild("NimbusMenu") and gui().NimbusMenu:FindFirstChild("MenuColumn")
+	if column then
+		local p, sz = column.AbsolutePosition, column.AbsoluteSize
+		T.check(p.X >= 0 and p.Y >= 0 and p.X + sz.X <= 390 and p.Y + sz.Y <= 844, "390x844: the menu column fits on screen", tostring(p) .. " " .. tostring(sz))
+		for _, other in ipairs({ { "NimbusHud.BottomLeft.Vitals", "the HP bar" }, { "NimbusHotbar.Hotbar", "the hotbar" }, { "NimbusHud.TopRight.TokenPill", "the token pill" } }) do
+			local cur = gui()
+			for part in other[1]:gmatch("[^.]+") do
+				cur = cur and cur:FindFirstChild(part)
+			end
+			if cur then
+				local a, b = cur.AbsolutePosition, cur.AbsoluteSize
+				local overlap = p.X < a.X + b.X and a.X < p.X + sz.X and p.Y < a.Y + b.Y and a.Y < p.Y + sz.Y
+				T.check(not overlap, "390x844: the menu column does not cover " .. other[2], tostring(p) .. " " .. tostring(sz) .. " vs " .. tostring(a) .. " " .. tostring(b))
+			end
+		end
+	end
+	-- the "nothing in the middle of the screen" rule on a phone
+	if _G.KC and _G.KC.layoutRule then
+		Mock.SetViewport(390, 844)
+		advance(0.3)
+		_G.KC.layoutRule("390x844")
 	end
 
 	local fontBad = 0
@@ -899,5 +1123,20 @@ S.client_mobile = guarded("client_mobile", function()
 	flushWarnings("client mobile")
 	flushErrors("client mobile")
 end)
+
+----------------------------------------------------------------------------------------------------
+-- helpers exported to smoke_client_v2.lua (same Lua state)
+----------------------------------------------------------------------------------------------------
+_G.KC = {
+	S = S, M = M, T = T, guarded = guarded, fmt = fmt, advance = advance,
+	flushErrors = flushErrors, flushWarnings = flushWarnings,
+	gui = gui, isShown = isShown, texts = texts, findText = findText, allShownText = allShownText,
+	button = button, namedButton = namedButton, remotes = remotes, toClient = toClient, serverCalls = serverCalls,
+	hum = hum, root = root, ensureRemotes = ensureRemotes, matchState = matchState,
+	centredTexts = centredTexts, describeCentred = describeCentred,
+	env = function()
+		return Config, Util, Theme
+	end,
+}
 
 return S

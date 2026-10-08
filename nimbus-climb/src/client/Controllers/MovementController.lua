@@ -353,6 +353,8 @@ end
 -- Footprints of the other things that live at the bottom of a touch screen. KEEP IN SYNC with
 -- HotbarController.lua (SLOT/GAP/TOUCH_BOTTOM, scale 0.75..1.2) and HudController.lua (VITALS_W/H,
 -- TOUCH_EDGE, TOUCH_RAISE_SMALL/LARGE, scale 0.7..1.25). Only used to keep our buttons clear of them.
+-- (On a narrow phone the hotbar slides a few px LEFT of centre to clear the jump button; our buttons are all
+-- right of it, so the centred footprint below still covers every spot they could touch.)
 local HOTBAR_W, HOTBAR_H, HOTBAR_BOTTOM = 280, 64, 16
 local VITALS_W, VITALS_H, VITALS_LEFT = 300, 54, 20
 local VITALS_RAISE_SMALL, VITALS_RAISE_LARGE = 150, 220

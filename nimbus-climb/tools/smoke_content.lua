@@ -506,4 +506,426 @@ S.config_shape = guarded("config_shape", function()
 	flushErrors("config_shape")
 end)
 
+----------------------------------------------------------------------------------------------------
+-- scenario: PetBuilder for every pet of the catalog
+----------------------------------------------------------------------------------------------------
+local function finiteCFrame(cf)
+	for _, v in ipairs({ cf:GetComponents() }) do
+		if not T.finite(v) then
+			return false
+		end
+	end
+	return true
+end
+
+local function countParts(model)
+	local n = 0
+	for _, d in ipairs(model:GetDescendants()) do
+		if d:IsA("BasePart") then
+			n = n + 1
+		end
+	end
+	return n
+end
+
+local function partsNamed(model, pattern)
+	local out = {}
+	for _, d in ipairs(model:GetDescendants()) do
+		if d:IsA("BasePart") and d.Name:find(pattern) then
+			out[#out + 1] = d
+		end
+	end
+	return out
+end
+
+-- number of direction changes of `fn()` while animating a pet for `seconds` at 30 fps
+local function turns(PB, model, opts, seconds, probe)
+	local last, dir, count = nil, 0, 0
+	local t = 0
+	for _ = 1, floor(seconds * 30) do
+		t = t + 1 / 30
+		PB.Animate(model, t, opts)
+		local v = probe()
+		if last then
+			local d = v - last
+			if abs(d) > 1e-4 then
+				local nd = d > 0 and 1 or -1
+				if dir ~= 0 and nd ~= dir then
+					count = count + 1
+				end
+				dir = nd
+			end
+		end
+		last = v
+	end
+	return count
+end
+
+S.petbuilder = guarded("petbuilder", function()
+	local Config = config()
+	local PB, PC = M["shared/PetBuilder"], M["shared/PetCatalog"]
+	if not (PB and PC) then
+		T.fail("petbuilder needs PetBuilder and PetCatalog")
+		return
+	end
+	local budget = CONTRACT.v2.partBudget.pet
+	local holder = Instance.new("Folder")
+	holder.Name = "SmokePets"
+	holder.Parent = workspace
+	local tally = {
+		model = T.tally("PetBuilder.Build returns a Model with a PrimaryPart for every pet"),
+		budget = T.tally("every pet stays within the part budget (<= " .. budget .. " parts)"),
+		flags = T.tally("every pet part is Anchored, CanCollide=false, CanTouch=false, CanQuery=false, Massless"),
+		shadows = T.tally("small pet parts have CastShadow = false"),
+		wings = T.tally("every pet has two wings named WingL and WingR (BaseParts)"),
+		height = T.tally("pets are 2.0 - 3.4 studs tall (GetHeight) and GetHeight matches the built model"),
+		scale = T.tally("Build(def, { Scale = s }) scales the pet"),
+		palette = T.tally("the pet is painted in its Look colours (Primary / Secondary / WingColor)"),
+		eyes = T.tally("pets have big glossy eyes (Eye parts + shine highlights); Glow pets have Neon irises"),
+		flair = T.tally("Legendary and Mythic pets carry a low-rate sparkle emitter"),
+		noAssets = T.tally("pets use no external assets (no mesh ids, no textures except built-in particles)"),
+		animate = T.tally("Animate runs for 120 frames without errors, NaN or new instances"),
+		flap = T.tally("Animate flaps the wings and WingL/WingR mirror each other"),
+		pivot = T.tally("Animate is relative to the PrimaryPart (same pose after PivotTo)"),
+		clone = T.tally("a Clone() of a pet animates like the original"),
+		species = T.tally("pets look different from each other (distinct part-name + colour signatures per species)"),
+	}
+	local totalParts, maxParts, minParts, maxPet = 0, 0, huge, nil
+	local heights = {}
+	local signatures = {}
+	for _, def in ipairs(PC.Pets) do
+		local who = def.Id
+		local ok, model = pcall(PB.Build, def, { Scale = 1 })
+		local built = ok and typeof(model) == "Instance" and model:IsA("Model") and model.PrimaryPart ~= nil and model.PrimaryPart:IsDescendantOf(model)
+		tally.model:case(built, who .. ": " .. tostring(model))
+		if built then
+			model.Parent = holder
+			model:PivotTo(CFrame.new(0, 3000, 0))
+			local n = countParts(model)
+			totalParts = totalParts + n
+			if n > maxParts then
+				maxParts, maxPet = n, who
+			end
+			minParts = min(minParts, n)
+			tally.budget:case(n <= budget and n >= 25, who .. ": " .. n .. " parts (25-" .. budget .. ")")
+			-- flags
+			local badFlags, loudShadows = 0, 0
+			for _, d in ipairs(model:GetDescendants()) do
+				if d:IsA("BasePart") then
+					if not (d.Anchored == true and d.CanCollide == false and d.CanTouch == false and d.CanQuery == false and d.Massless == true) then
+						badFlags = badFlags + 1
+					end
+					if d.CastShadow and max(d.Size.X, d.Size.Y, d.Size.Z) < 1.5 then
+						loudShadows = loudShadows + 1
+					end
+				end
+			end
+			tally.flags:case(badFlags == 0, who .. ": " .. badFlags .. " parts with wrong flags")
+			tally.shadows:case(loudShadows <= n * 0.1, who .. ": " .. loudShadows .. " small parts cast shadows")
+			-- wings
+			local wl, wr = model:FindFirstChild("WingL", true), model:FindFirstChild("WingR", true)
+			tally.wings:case(wl ~= nil and wr ~= nil and wl:IsA("BasePart") and wr:IsA("BasePart") and wl ~= wr, who .. ": WingL " .. tostring(wl) .. " WingR " .. tostring(wr))
+			-- height + scale
+			local h = PB.GetHeight(def)
+			heights[#heights + 1] = h
+			local ext = model:GetExtentsSize().Y
+			local h2model = Instance.new("Model")
+			tally.height:case(type(h) == "number" and h >= 2.0 and h <= 3.4 and abs(h - ext) <= 0.35, who .. ": GetHeight " .. tostring(h) .. ", extents " .. fmt(ext, 2))
+			h2model:Destroy()
+			local bigOk, big = pcall(PB.Build, def, { Scale = 1.4 })
+			if bigOk and typeof(big) == "Instance" then
+				big.Parent = holder
+				local ratio = big:GetExtentsSize().Y / max(ext, 0.01)
+				tally.scale:case(abs(ratio - 1.4) <= 0.12, who .. ": scale 1.4 gives " .. fmt(ratio, 2) .. "x")
+				big:Destroy()
+			else
+				tally.scale:case(false, who .. ": Build with Scale failed: " .. tostring(big))
+			end
+			-- palette
+			local look = def.Look
+			local function nearest(color, filter)
+				local best = huge
+				for _, d in ipairs(model:GetDescendants()) do
+					if d:IsA("BasePart") and (not filter or filter(d)) then
+						best = min(best, K.colorDistance255(d.Color, color))
+					end
+				end
+				return best
+			end
+			local dp, ds = nearest(look.Primary), nearest(look.Secondary)
+			local dw = nearest(look.WingColor, function(d)
+				return d.Name:find("^Wing") ~= nil
+			end)
+			tally.palette:case(dp <= 60 and ds <= 60 and dw <= 70, who .. ": colour distance primary " .. fmt(dp, 0) .. ", secondary " .. fmt(ds, 0) .. ", wing " .. fmt(dw, 0))
+			-- eyes
+			local eyeParts = partsNamed(model, "^Eye")
+			local irisNeon, shine = false, 0
+			for _, e in ipairs(eyeParts) do
+				if e.Name:find("Shine") then
+					shine = shine + 1
+				end
+				if e.Name:find("Iris") and e.Material == Enum.Material.Neon then
+					irisNeon = true
+				end
+			end
+			local eyeOk = #eyeParts >= 4 and shine >= 2 and (not look.Glow or irisNeon or #partsNamed(model, "Iris") == 0)
+			if look.Glow then
+				local anyNeon = false
+				for _, d in ipairs(model:GetDescendants()) do
+					if d:IsA("BasePart") and d.Material == Enum.Material.Neon and (d.Name:find("^Eye") or d.Name:find("^Wing")) and not d.Name:find("Shine") then
+						anyNeon = true
+					end
+				end
+				eyeOk = eyeOk and anyNeon
+			end
+			tally.eyes:case(eyeOk, who .. ": " .. #eyeParts .. " eye parts, " .. shine .. " highlights, glow=" .. tostring(look.Glow) .. ", neon iris/edge=" .. tostring(irisNeon))
+			-- rarity flair
+			local emitters = {}
+			for _, d in ipairs(model:GetDescendants()) do
+				if d:IsA("ParticleEmitter") then
+					emitters[#emitters + 1] = d
+				end
+			end
+			if def.Rarity == "Legendary" or def.Rarity == "Mythic" then
+				local lowRate = #emitters >= 1 and #emitters <= 3
+				for _, e in ipairs(emitters) do
+					lowRate = lowRate and e.Rate <= 12
+				end
+				tally.flair:case(lowRate, who .. ": " .. #emitters .. " emitters")
+			else
+				tally.flair:case(#emitters <= 1, who .. ": " .. #emitters .. " emitters on a " .. def.Rarity .. " pet")
+			end
+			-- assets: nothing but parts, built-in meshes and built-in particle textures
+			local assetBad
+			for _, d in ipairs(model:GetDescendants()) do
+				if d:IsA("MeshPart") and (d.MeshId ~= "" or d.TextureID ~= "") then
+					assetBad = assetBad or (d.Name .. " is a MeshPart with asset ids")
+				elseif d:IsA("SpecialMesh") and (d.MeshId ~= "" or d.TextureId ~= "") then
+					assetBad = assetBad or (d.Name .. " is a SpecialMesh with asset ids")
+				elseif d:IsA("ParticleEmitter") and d.Texture ~= "" and not d.Texture:find("^rbxasset://textures/particles/") then
+					assetBad = assetBad or (d.Name .. ".Texture = " .. d.Texture)
+				elseif d:IsA("Decal") or d:IsA("Texture") or d:IsA("Script") or d:IsA("LocalScript") or d:IsA("Sound") or d:IsA("SurfaceAppearance") then
+					assetBad = assetBad or (d.ClassName .. " " .. d.Name)
+				end
+			end
+			tally.noAssets:case(assetBad == nil, who .. ": " .. tostring(assetBad))
+			-- animation
+			local before = Mock.CountDescendants(model)
+			local errs = Mock.Errors and #Mock.Errors or 0
+			local animOk, animErr = pcall(function()
+				for i = 1, 120 do
+					PB.Animate(model, i / 30, { Flap = 1, Excited = (i % 40) / 40 })
+				end
+			end)
+			local finite = true
+			for _, d in ipairs(model:GetDescendants()) do
+				if d:IsA("BasePart") and not finiteCFrame(d.CFrame) then
+					finite = false
+				end
+			end
+			tally.animate:case(animOk and finite and Mock.CountDescendants(model) == before, who .. ": " .. tostring(animErr) .. " finite=" .. tostring(finite) .. " instances " .. before .. " -> " .. Mock.CountDescendants(model))
+			-- flapping: the wings swing by tens of degrees, WingL / WingR mirror each other,
+			-- Flap speeds the cycle up and Excited > 0.5 flaps faster
+			if wl and wr then
+				local function rel(w)
+					return model.PrimaryPart.CFrame:ToObjectSpace(w.CFrame)
+				end
+				local function angle(a, b)
+					local d = a:Dot(b)
+					return math.deg(math.acos(max(-1, min(1, d))))
+				end
+				local frames, ups, mirror = {}, {}, 0
+				for i = 1, 90 do
+					PB.Animate(model, 4 + i / 30, { Flap = 1, Excited = 0 })
+					local a, b = rel(wl), rel(wr)
+					frames[i] = a
+					ups[i] = { a.UpVector, a.RightVector, a.LookVector }
+					mirror = max(mirror, abs(a.Position.X + b.Position.X), abs(a.Position.Y - b.Position.Y), abs(a.Position.Z - b.Position.Z))
+				end
+				local spread = 0
+				for i = 1, 90, 3 do
+					for j = i + 1, 90, 3 do
+						spread = max(spread, angle(ups[i][1], ups[j][1]), angle(ups[i][2], ups[j][2]), angle(ups[i][3], ups[j][3]))
+					end
+				end
+				local function path(flap, excited)
+					local fresh = PB.Build(def, {})
+					fresh.Parent = holder
+					local w = fresh:FindFirstChild("WingL", true)
+					local sum, last = 0, nil
+					for i = 1, 150 do
+						PB.Animate(fresh, 10 + i / 30, { Flap = flap, Excited = excited })
+						local r = fresh.PrimaryPart.CFrame:ToObjectSpace(w.CFrame)
+						if i > 60 then
+							if last then
+								sum = sum + angle(r.UpVector, last.UpVector) + angle(r.RightVector, last.RightVector) + angle(r.LookVector, last.LookVector)
+							end
+							last = r
+						end
+					end
+					fresh:Destroy()
+					return sum
+				end
+				local calm, wild, quick = path(1, 0), path(1, 1), path(2, 0)
+				local note = ""
+				if spread < 40 then
+					note = "wings swing only " .. fmt(spread, 0) .. " degrees (expected about +-35)"
+				elseif mirror > 0.05 then
+					note = "WingL and WingR are not mirror images (max difference " .. fmt(mirror, 3) .. ")"
+				elseif wild < calm * 1.2 then
+					note = "Excited = 1 does not flap faster (" .. fmt(wild, 0) .. " vs " .. fmt(calm, 0) .. " degrees travelled)"
+				elseif quick < calm * 1.5 then
+					note = "Flap = 2 does not flap faster (" .. fmt(quick, 0) .. " vs " .. fmt(calm, 0) .. " degrees travelled)"
+				end
+				tally.flap:case(note == "", who .. ": " .. note)
+			end
+			-- relative to the PrimaryPart: two fresh pets with the same animation history, one moved somewhere else
+			local twinA, twinB = PB.Build(def, {}), PB.Build(def, {})
+			twinA.Parent, twinB.Parent = holder, holder
+			twinA:PivotTo(CFrame.new(0, 3000, 0))
+			twinB:PivotTo(CFrame.new(-420, 2900, 77) * CFrame.Angles(0.4, 2.1, -0.3))
+			for i = 1, 20 do
+				PB.Animate(twinA, 20 + i / 30, { Flap = 1, Excited = 0.2 })
+				PB.Animate(twinB, 20 + i / 30, { Flap = 1, Excited = 0.2 })
+			end
+			local worst = 0
+			for _, d in ipairs(twinA:GetDescendants()) do
+				if d:IsA("BasePart") then
+					local o = twinB:FindFirstChild(d.Name, true)
+					if o then
+						local ra = twinA.PrimaryPart.CFrame:ToObjectSpace(d.CFrame)
+						local rb = twinB.PrimaryPart.CFrame:ToObjectSpace(o.CFrame)
+						worst = max(worst, (ra.Position - rb.Position).Magnitude, (ra.LookVector - rb.LookVector).Magnitude, (ra.UpVector - rb.UpVector).Magnitude)
+					end
+				end
+			end
+			-- and animating again after moving the pet keeps the same relative pose
+			twinB:PivotTo(CFrame.new(55, 3100, -9))
+			PB.Animate(twinB, 20 + 21 / 30, { Flap = 1, Excited = 0.2 })
+			PB.Animate(twinA, 20 + 21 / 30, { Flap = 1, Excited = 0.2 })
+			for _, d in ipairs(twinA:GetDescendants()) do
+				if d:IsA("BasePart") then
+					local o = twinB:FindFirstChild(d.Name, true)
+					if o then
+						local ra = twinA.PrimaryPart.CFrame:ToObjectSpace(d.CFrame)
+						local rb = twinB.PrimaryPart.CFrame:ToObjectSpace(o.CFrame)
+						worst = max(worst, (ra.Position - rb.Position).Magnitude, (ra.LookVector - rb.LookVector).Magnitude)
+					end
+				end
+			end
+			tally.pivot:case(worst < 0.01, who .. ": the pose differs by " .. fmt(worst, 3) .. " after PivotTo")
+			twinA:Destroy()
+			twinB:Destroy()
+			-- clone
+			local copy = model:Clone()
+			copy.Parent = holder
+			copy:PivotTo(CFrame.new(40, 3000, 40))
+			local cloneOk, cloneErr = pcall(function()
+				for i = 1, 30 do
+					PB.Animate(copy, 30 + i / 30, { Flap = 1, Excited = 0 })
+				end
+			end)
+			local cw = copy:FindFirstChild("WingL", true)
+			local moved = false
+			if cw and copy.PrimaryPart then
+				local r0 = copy.PrimaryPart.CFrame:ToObjectSpace(cw.CFrame).Position
+				PB.Animate(copy, 31.2, { Flap = 1, Excited = 0 })
+				local r1 = copy.PrimaryPart.CFrame:ToObjectSpace(cw.CFrame).Position
+				moved = (r1 - r0).Magnitude > 0.001
+			end
+			tally.clone:case(cloneOk and copy.PrimaryPart ~= nil and copy.PrimaryPart ~= model.PrimaryPart and moved, who .. ": " .. tostring(cloneErr) .. " primary " .. tostring(copy.PrimaryPart) .. " moved " .. tostring(moved))
+			copy:Destroy()
+			-- silhouette signature
+			local names = {}
+			for _, d in ipairs(model:GetChildren()) do
+				names[#names + 1] = d.Name:gsub("%d+$", "")
+			end
+			table.sort(names)
+			local sig = look.Species .. "|" .. look.WingStyle .. "|" .. tostring(look.Accessory) .. "|" .. string.format("%d,%d,%d", look.Primary.R * 255, look.Primary.G * 255, look.Primary.B * 255)
+			tally.species:case(not signatures[sig], who .. ": same species / wings / accessory / colour as " .. tostring(signatures[sig]))
+			signatures[sig] = who
+			model:Destroy()
+		end
+	end
+	for _, tl in pairs(tally) do
+		tl:report()
+	end
+	T.info(string.format("*pets built: %d  parts per pet %d-%d (avg %.0f, largest %s)  heights %.2f-%.2f", #PC.Pets, minParts == huge and 0 or minParts, maxParts, totalParts / max(#PC.Pets, 1), tostring(maxPet),
+		(function()
+			local m = huge
+			for _, v in ipairs(heights) do
+				m = min(m, v)
+			end
+			return m == huge and 0 or m
+		end)(), (function()
+			local m = 0
+			for _, v in ipairs(heights) do
+				m = max(m, v)
+			end
+			return m
+		end)()))
+	-- the mascot looks like the icon
+	local dragon = PC.Get(CONTRACT.v2.mascotPetId)
+	if dragon then
+		local model = PB.Build(dragon, { Scale = 1 })
+		model.Parent = holder
+		local horns = partsNamed(model, "^Horn")
+		T.check(#horns >= 2, "Cloudy Dragon has two horns", #horns .. " horn parts")
+		local gold = 0
+		for _, h in ipairs(horns) do
+			local c = h.Color
+			if c.R > 0.75 and c.G > 0.55 and c.B < 0.55 and c.R >= c.G then
+				gold = gold + 1
+			end
+		end
+		T.check(gold >= 2, "Cloudy Dragon's horns are gold", gold .. " gold horn parts")
+		T.check(#partsNamed(model, "^Nostril") == 2, "Cloudy Dragon has two nostril dots", #partsNamed(model, "^Nostril") .. "")
+		T.check(#partsNamed(model, "^Eye") >= 6, "Cloudy Dragon has big eyes with sparkle highlights", #partsNamed(model, "^Eye") .. " eye parts")
+		T.check(#partsNamed(model, "Tail") >= 3, "Cloudy Dragon has a tail with a cloud-puff tip", #partsNamed(model, "Tail") .. " tail parts")
+		T.check(#partsNamed(model, "^Wing[LR]") >= 6, "Cloudy Dragon's cloud wings are made of several puffs", #partsNamed(model, "^Wing[LR]") .. " wing parts")
+		local belly = partsNamed(model, "^Belly")
+		T.check(#belly >= 1 and belly[1].Color.R > 0.85 and belly[1].Color.B < belly[1].Color.R, "Cloudy Dragon has a cream belly", belly[1] and tostring(belly[1].Color))
+		model:Destroy()
+	end
+	-- defensive: unknown Species / WingStyle / Accessory fall back, never raise
+	local weird = {
+		Id = "weird", Name = "Weird", Rarity = "Common", Blurb = "-",
+		Look = { Species = "Blob", WingStyle = "Laser", Accessory = "Hat", Primary = Color3.fromRGB(10, 200, 10), Secondary = Color3.fromRGB(200, 10, 10), Eye = Color3.fromRGB(0, 0, 0), WingColor = Color3.fromRGB(250, 250, 10) },
+		Perks = {},
+	}
+	local weirdOk, weirdModel = pcall(PB.Build, weird, { Scale = 1 })
+	T.check(weirdOk and typeof(weirdModel) == "Instance" and weirdModel:FindFirstChild("WingL", true) ~= nil, "unknown Species / WingStyle / Accessory fall back to Cat / Feather / none without erroring", tostring(weirdModel))
+	if weirdOk and typeof(weirdModel) == "Instance" then
+		weirdModel:Destroy()
+	end
+	-- every species x wing style x accessory builds within budget (small synthetic matrix)
+	local combos, worstCombo, comboBad = 0, 0, nil
+	for _, species in ipairs(PC.Species) do
+		for wi, wing in ipairs(PC.WingStyles or { "Feather", "Bat", "Fairy", "Cloud", "Crystal", "Flame" }) do
+			local acc = (PC.Accessories or { "Horns", "Crown", "Halo", "Leaf", "Mushroom", "Scarf", "Antlers", "Flower" })[(wi + #species) % 9 + 1]
+			local d = {
+				Id = "combo", Name = "Combo", Rarity = (wi % 2 == 0) and "Mythic" or "Common", Blurb = "-",
+				Look = { Species = species, WingStyle = wing, Accessory = acc, Glow = wi % 2 == 0, Primary = Color3.fromRGB(180, 120, 90), Secondary = Color3.fromRGB(240, 220, 200), Eye = Color3.fromRGB(30, 30, 50), WingColor = Color3.fromRGB(200, 160, 220) },
+				Perks = {},
+			}
+			local okc, m = pcall(PB.Build, d, { Scale = 1 })
+			combos = combos + 1
+			if not okc or typeof(m) ~= "Instance" then
+				comboBad = comboBad or (species .. "/" .. wing .. "/" .. tostring(acc) .. ": " .. tostring(m))
+			else
+				local n = countParts(m)
+				worstCombo = max(worstCombo, n)
+				if n > budget then
+					comboBad = comboBad or (species .. "/" .. wing .. "/" .. tostring(acc) .. ": " .. n .. " parts")
+				end
+				m:Destroy()
+			end
+		end
+	end
+	T.check(comboBad == nil, "every Species x WingStyle x Accessory combination builds within the part budget (" .. combos .. " combos, worst " .. worstCombo .. " parts)", comboBad)
+	holder:Destroy()
+	flushErrors("petbuilder")
+	flushWarnings("petbuilder")
+end)
+
 return S

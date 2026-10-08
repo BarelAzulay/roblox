@@ -44,6 +44,8 @@ local SLOT = 64
 local GAP = 8
 local BOTTOM = 10
 local TOUCH_BOTTOM = 16
+local JUMP_GAP = 8 -- clear space kept between the bar and Roblox's jump button (touch devices)
+local SIDE_GAP = 6 -- the bar never slides closer than this to the left screen edge
 local COOLDOWN = 0.8 -- seconds between two uses of the same slot
 local HINT_SECONDS = 2.2
 
@@ -126,10 +128,21 @@ local function relayout()
 	local size = guiSize()
 	holderScale.Scale = Util.Clamp(math.min(size.X / REF_W, size.Y / REF_H), MIN_SCALE, MAX_SCALE)
 	local bottom = BOTTOM
+	local shift = 0
 	if touchDevice then
 		bottom = TOUCH_BOTTOM
+		-- Roblox's own jump button sits bottom-right: its left edge is 1.5 J - 10 px from the right screen edge
+		-- (J = 70 when the smaller screen axis is <= 500 px, else 120). On a narrow phone the centred bar would
+		-- touch it, so the bar slides left just far enough (and never off the left edge).
+		local camera = workspace.CurrentCamera
+		local vp = camera and camera.ViewportSize or size
+		local jump = math.min(vp.X, vp.Y) <= 500 and 70 or 120
+		local reach = size.X - (jump * 1.5 - 10) - JUMP_GAP -- right-most x the bar may reach
+		local half = holder.Size.X.Offset * holderScale.Scale / 2
+		shift = math.min(0, reach - half - size.X / 2)
+		shift = math.min(0, math.max(shift, half + SIDE_GAP - size.X / 2))
 	end
-	holder.Position = UDim2.new(0.5, 0, 1, -bottom)
+	holder.Position = UDim2.new(0.5, math.floor(shift), 1, -bottom)
 end
 
 ----------------------------------------------------------------------

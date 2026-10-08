@@ -1064,6 +1064,12 @@ function V.matchResult(r)
 	if not isStr(r.DifficultyId) or not isStr(r.DifficultyName) then
 		p[#p + 1] = "DifficultyId/DifficultyName"
 	end
+	local diff = isStr(r.DifficultyId) and config().GetDifficulty(r.DifficultyId)
+	if not diff then
+		p[#p + 1] = "DifficultyId " .. tostring(r.DifficultyId) .. " is not a Config.Difficulties id"
+	elseif r.Stars ~= diff.Stars then
+		p[#p + 1] = "Stars is " .. tostring(r.Stars) .. ", expected " .. diff.Stars
+	end
 	if type(r.Members) ~= "table" then
 		p[#p + 1] = "Members"
 	else
@@ -1101,6 +1107,154 @@ function V.partyState(st)
 				p[#p + 1] = "Players[" .. i .. "] malformed"
 			end
 		end
+	end
+	return p
+end
+
+-- ARCHITECTURE_V2.md section 1: the ProfileSync snapshot. Plain tables only (no Instances), capped perks.
+function V.profileSync(s)
+	local Config = config()
+	local PC = M["shared/PetCatalog"]
+	local p = {}
+	if type(s) ~= "table" then
+		return { "payload is " .. type(s) }
+	end
+	local function plain(v, path)
+		local t = typeof(v)
+		if t == "table" then
+			for k, x in pairs(v) do
+				plain(x, path .. "." .. tostring(k))
+			end
+		elseif t ~= "number" and t ~= "string" and t ~= "boolean" then
+			p[#p + 1] = path .. " is a " .. t .. " (a snapshot holds plain data only)"
+		end
+	end
+	plain(s, "snapshot")
+	local function int(v, lo, hi)
+		return type(v) == "number" and v == v and v == math.floor(v) and v >= lo and v <= hi
+	end
+	if not int(s.Tokens, 0, 1e9) then
+		p[#p + 1] = "Tokens is " .. tostring(s.Tokens)
+	end
+	if type(s.Pets) ~= "table" then
+		p[#p + 1] = "Pets is not a table"
+	else
+		for id, n in pairs(s.Pets) do
+			if type(id) ~= "string" or not int(n, 1, Config.Pets.MaxPerStack) then
+				p[#p + 1] = "Pets[" .. tostring(id) .. "] = " .. tostring(n)
+			end
+		end
+	end
+	if type(s.Equipped) ~= "table" then
+		p[#p + 1] = "Equipped is not a table"
+	else
+		if #s.Equipped > Config.Pets.MaxEquipped then
+			p[#p + 1] = "Equipped lists " .. #s.Equipped .. " pets (max " .. Config.Pets.MaxEquipped .. ")"
+		end
+		local used = {}
+		for i, id in ipairs(s.Equipped) do
+			used[id] = (used[id] or 0) + 1
+			if type(id) ~= "string" or used[id] > ((type(s.Pets) == "table" and s.Pets[id]) or 0) then
+				p[#p + 1] = "Equipped[" .. i .. "] = " .. tostring(id) .. " is not owned that often"
+			end
+		end
+		local keys = 0
+		for _ in pairs(s.Equipped) do
+			keys = keys + 1
+		end
+		if keys ~= #s.Equipped then
+			p[#p + 1] = "Equipped is not an array"
+		end
+	end
+	if type(s.Items) ~= "table" then
+		p[#p + 1] = "Items is not a table"
+	else
+		for id, n in pairs(s.Items) do
+			if type(id) ~= "string" or not int(n, 0, Config.Items.MaxCarry) then
+				p[#p + 1] = "Items[" .. tostring(id) .. "] = " .. tostring(n)
+			end
+		end
+	end
+	local st = s.Stats
+	if type(st) ~= "table" then
+		p[#p + 1] = "Stats is not a table"
+	else
+		for _, k in ipairs({ "Matches", "Wins", "TokensEarned", "Spins" }) do
+			if not int(st[k], 0, 1e12) then
+				p[#p + 1] = "Stats." .. k .. " = " .. tostring(st[k])
+			end
+		end
+		if type(st.BestTimes) ~= "table" then
+			p[#p + 1] = "Stats.BestTimes is not a table"
+		else
+			for id, sec in pairs(st.BestTimes) do
+				if not Config.GetDifficulty(id) or type(sec) ~= "number" or sec <= 0 then
+					p[#p + 1] = "Stats.BestTimes[" .. tostring(id) .. "] = " .. tostring(sec)
+				end
+			end
+		end
+		if type(st.Wins) == "number" and type(st.Matches) == "number" and st.Wins > st.Matches then
+			p[#p + 1] = "Stats.Wins " .. st.Wins .. " exceeds Stats.Matches " .. st.Matches
+		end
+	end
+	if s.SpotIndex ~= nil and not int(s.SpotIndex, 1, Config.Lobby.SpotCount) then
+		p[#p + 1] = "SpotIndex = " .. tostring(s.SpotIndex)
+	end
+	if type(s.Perks) ~= "table" then
+		p[#p + 1] = "Perks is not a table"
+	else
+		for key, cap in pairs(Config.Pets.PerkCaps) do
+			local v = s.Perks[key]
+			if type(v) ~= "number" or v ~= v or v < 0 or v > cap + 1e-9 then
+				p[#p + 1] = "Perks." .. key .. " = " .. tostring(v) .. " (0.." .. cap .. ")"
+			end
+		end
+		if PC and type(s.Equipped) == "table" then
+			local want = PC.SumPerks(s.Equipped)
+			for key in pairs(Config.Pets.PerkCaps) do
+				if type(s.Perks[key]) == "number" and math.abs(s.Perks[key] - (want[key] or 0)) > 1e-6 then
+					p[#p + 1] = "Perks." .. key .. " = " .. s.Perks[key] .. " but the equipped pets sum to " .. tostring(want[key])
+				end
+			end
+		end
+	end
+	return p
+end
+
+-- ARCHITECTURE_V2.md section 2: RouletteResult { Ok, Reason, RouletteId, PetId, IsNew, Count, Tokens, Strip }
+function V.rouletteResult(r)
+	local PC = M["shared/PetCatalog"]
+	local p = {}
+	if type(r) ~= "table" then
+		return { "payload is " .. type(r) }
+	end
+	if not isBool(r.Ok) then
+		p[#p + 1] = "Ok is " .. typeof(r.Ok)
+		return p
+	end
+	if r.Ok then
+		if not isStr(r.RouletteId) or not isStr(r.PetId) or not isBool(r.IsNew) or not isNum(r.Count) or r.Count < 1 or not isNum(r.Tokens) or r.Tokens < 0 then
+			p[#p + 1] = "RouletteId / PetId / IsNew / Count / Tokens"
+		end
+		if type(r.Strip) ~= "table" or #r.Strip < 34 then
+			p[#p + 1] = "Strip has " .. tostring(type(r.Strip) == "table" and #r.Strip or r.Strip) .. " entries (needs >= 34)"
+		elseif PC and isStr(r.RouletteId) then
+			local possible = {}
+			for _, def in ipairs(PC.PossiblePets(r.RouletteId)) do
+				possible[def.Id] = true
+			end
+			if r.Strip[34] ~= r.PetId then
+				p[#p + 1] = "Strip[34] is " .. tostring(r.Strip[34]) .. ", not the won pet " .. tostring(r.PetId)
+			end
+			for i, id in ipairs(r.Strip) do
+				if not possible[id] then
+					p[#p + 1] = "Strip[" .. i .. "] = " .. tostring(id) .. " cannot come out of " .. tostring(r.RouletteId)
+					break
+				end
+			end
+		end
+	elseif not isStr(r.Reason) then
+		p[#p + 1] = "a failed spin needs a Reason string"
 	end
 	return p
 end
@@ -1143,6 +1297,17 @@ function V.entry(e, Config)
 	elseif e.remote == "DashFx" then
 		if not isNum(a[1]) then
 			out[#out + 1] = "userId is " .. typeof(a[1])
+		end
+	elseif e.remote == "ProfileSync" then
+		out = V.profileSync(a[1])
+	elseif e.remote == "RouletteResult" then
+		out = V.rouletteResult(a[1])
+	elseif e.remote == "OpenPanel" then
+		if not isStr(a[1]) then
+			out[#out + 1] = "panelId is " .. typeof(a[1])
+		end
+		if a[2] ~= nil and type(a[2]) ~= "table" then
+			out[#out + 1] = "args is " .. typeof(a[2])
 		end
 	end
 	return out
@@ -2139,370 +2304,14 @@ S.match_slots = guarded("match_slots", function()
 end)
 
 ----------------------------------------------------------------------------------------------------
--- scenario: HazardService behaviours on a Saint course
-----------------------------------------------------------------------------------------------------
-local function pickHazardSeed(CB)
-	local want = { "SpinBarPlatform", "StormPlatform", "LightningPlatform", "Vanishing", "Moving", "Bounce", "PlateBridge" }
-	local bestSeed, bestScore = 1, -1
-	for seed = 1, 60 do
-		local layout = CB.GenerateLayout("Saint", seed)
-		local have = {}
-		for _, st in ipairs(layout.Steps) do
-			have[st.Kind] = true
-		end
-		local score = 0
-		for _, k in ipairs(want) do
-			if have[k] then
-				score = score + 1
-			end
-		end
-		if score > bestScore then
-			bestSeed, bestScore = seed, score
-		end
-		if score == #want then
-			break
-		end
-	end
-	return bestSeed
-end
-
--- Root position of a character standing on `part` (feet 0.1 stud inside the surface so the touch registers).
-local function topOf(part)
-	return part.Position + Vector3.new(0, part.Size.Y / 2 + 2.9, 0)
-end
-
-S.hazards = guarded("hazards", function()
-	if not needBoot() then
-		return
-	end
-	local Config = config()
-	local CB, HS = mod("CourseBuilder"), mod("HazardService")
-	local players = freshPlayers(1, "Haz")
-	local a = players[1]
-	a:SetAttribute("InMatch", true)
-	advance(2.0) -- spawn i-frames
-	local layout = CB.GenerateLayout("Saint", pickHazardSeed(CB))
-	local holder = Instance.new("Folder")
-	holder.Name = "SmokeHazards"
-	holder.Parent = workspace
-	local info = CB.Build(layout, Vector3.new(0, 3000, 0), holder)
-	local active = true
-	local staticParts = {}
-	for _, d in ipairs(info.Folder:GetDescendants()) do
-		staticParts[d] = true
-	end
-	local baseStats = Mock.Stats()
-	local stop = HS.Attach(info.Folder, { IsActive = function() return active end })
-	T.check(type(stop) == "function", "HazardService.Attach returns a stop function")
-	advance(0.5)
-	local function dmgEntries(kind, fromIndex)
-		local out = {}
-		for _, e in ipairs(remotesFor("DamageTaken", a.UserId, fromIndex)) do
-			if e.args[2] == kind then
-				out[#out + 1] = e
-			end
-		end
-		return out
-	end
-	local function away()
-		Mock.Teleport(a, Vector3.new(0, 3000 - 200, 0) + Vector3.new(500, 0, 0))
-		advance(0.1)
-	end
-	local function reset()
-		DS().SetHealthFraction(a, 1)
-		advance(Config.Damage.IFrames + 0.3)
-	end
-
-	-- SpinBar
-	local bars = tagged(Config.Tags.SpinBar, info.Folder)
-	if #bars > 0 then
-		local bar = bars[1]
-		local c0 = bar.CFrame
-		advance(0.5)
-		T.check(bar.CFrame ~= c0, "SpinBar rotates", "CFrame unchanged")
-		T.check((bar.CFrame.Position - c0.Position).Magnitude < 0.01, "SpinBar rotates around its own axis (position stays)")
-		local mark = logSize()
-		local dmg = bar:GetAttribute("Damage") or 15
-		Mock.Teleport(a, bar.Position)
-		advance(0.8)
-		local hits = dmgEntries("SpinBar", mark)
-		T.check(#hits >= 1 and hits[1].args[1] == dmg, "touching a SpinBar deals its Damage as 'SpinBar'", #hits .. " hits, first " .. (hits[1] and tostring(hits[1].args[1]) or "-") .. " expected " .. dmg)
-		away()
-		reset()
-		-- paused hazards are harmless and frozen
-		active = false
-		mark = logSize()
-		local c1 = bar.CFrame
-		Mock.Teleport(a, bar.Position)
-		advance(1.0)
-		T.eq(#dmgEntries("SpinBar", mark), 0, "hazards do nothing while matchHandle.IsActive() is false")
-		T.check(bar.CFrame == c1 or (bar.CFrame.Position - c1.Position).Magnitude < 0.01, "paused SpinBars stop turning", "")
-		active = true
-		away()
-		reset()
-	else
-		T.warn("hazards: the sampled course has no SpinBar")
-	end
-
-	-- MovingCloud
-	local movers = tagged(Config.Tags.MovingCloud, info.Folder)
-	if #movers > 0 then
-		local cloud = movers[1]
-		local offset = cloud:GetAttribute("EndOffset")
-		local period = cloud:GetAttribute("Period") or 3
-		local lo, hi = Vector3.new(huge, huge, huge), Vector3.new(-huge, -huge, -huge)
-		local sawVelocity = false
-		for _ = 1, math.floor(period * 30 * 2.2) do
-			advance(1 / 30)
-			local p = cloud.Position
-			lo = Vector3.new(math.min(lo.X, p.X), math.min(lo.Y, p.Y), math.min(lo.Z, p.Z))
-			hi = Vector3.new(math.max(hi.X, p.X), math.max(hi.Y, p.Y), math.max(hi.Z, p.Z))
-			if cloud.AssemblyLinearVelocity.Magnitude > 0.2 then
-				sawVelocity = true
-			end
-		end
-		local travelled = (hi - lo).Magnitude
-		if typeof(offset) == "Vector3" then
-			T.check(math.abs(travelled - offset.Magnitude) <= offset.Magnitude * 0.15 + 0.3, "MovingCloud travels EndOffset back and forth", "travelled " .. fmt(travelled) .. ", EndOffset " .. fmt(offset.Magnitude))
-		else
-			T.check(travelled > 1, "MovingCloud moves", "travelled " .. fmt(travelled))
-		end
-		-- passengers: either the server carries them or the cloud publishes its velocity as a moving surface
-		Mock.Teleport(a, topOf(cloud))
-		advance(0.1)
-		local startRoot, startCloud = root(a).Position, cloud.Position
-		advance(period / 4)
-		local movedRoot = root(a).Position - startRoot
-		local movedCloud = cloud.Position - startCloud
-		if movedCloud.Magnitude > 1 then
-			local carried = (movedRoot - movedCloud).Magnitude <= movedCloud.Magnitude * 0.5 + 0.5
-			T.check(carried or sawVelocity, "players standing on a MovingCloud are carried (CFrame nudge or published AssemblyLinearVelocity)", "cloud moved " .. fmt(movedCloud.Magnitude) .. ", player " .. fmt(movedRoot.Magnitude) .. ", velocity seen: " .. tostring(sawVelocity))
-		end
-		away()
-	end
-
-	-- StormCloud
-	local storms = tagged(Config.Tags.StormCloud, info.Folder)
-	if #storms > 0 then
-		local storm = storms[1]
-		local dps = storm:GetAttribute("DPS") or 8
-		local mark = logSize()
-		Mock.Teleport(a, storm.Position)
-		advance(2.1)
-		local hits = dmgEntries("Storm", mark)
-		local total = 0
-		for _, e in ipairs(hits) do
-			total = total + e.args[1]
-		end
-		T.check(#hits >= 4, "players inside a StormCloud are hit repeatedly (4 Hz ticks)", #hits .. " hits in 2 s")
-		T.check(total >= dps * 1.2 and total <= dps * 2.6, "StormCloud deals ~DPS per second", "total " .. fmt(total) .. " over 2 s with DPS " .. dps)
-		away()
-		reset()
-		mark = logSize()
-		advance(1.0)
-		T.eq(#dmgEntries("Storm", mark), 0, "no storm damage outside the cloud")
-	end
-
-	-- LightningZone
-	local zones = tagged(Config.Tags.LightningZone, info.Folder)
-	if #zones > 0 then
-		local zone = zones[1]
-		local interval = zone:GetAttribute("Interval") or 4
-		local warning = zone:GetAttribute("Warning") or 1.2
-		local dmg = zone:GetAttribute("Damage") or 28
-		local mark = logSize()
-		Mock.Teleport(a, Vector3.new(zone.Position.X, zone.Position.Y, zone.Position.Z))
-		-- a warning disc / bolt is any part above the zone's footprint that the course did not have before Attach
-		local known = staticParts
-		local reach = math.max(zone.Size.X, zone.Size.Z) / 2 + 3
-		local function newPartHere()
-			for _, d in ipairs(info.Folder:GetDescendants()) do
-				if not known[d] and d:IsA("BasePart") then
-					local dx, dz = d.Position.X - zone.Position.X, d.Position.Z - zone.Position.Z
-					if math.sqrt(dx * dx + dz * dz) <= reach then
-						return true
-					end
-				end
-			end
-			return false
-		end
-		local firstPartAt, hitAt, hit
-		local startedAt = Mock.Clock.now
-		local deadline = Mock.Clock.now + interval * 2 + warning + 3
-		while Mock.Clock.now < deadline do
-			advance(0.05)
-			if not firstPartAt and newPartHere() then
-				firstPartAt = Mock.Clock.now
-			end
-			hit = dmgEntries("Lightning", mark)[1]
-			if hit then
-				hitAt = Mock.Clock.now
-				break
-			end
-			-- keep the player fed so the test cannot kill them before the first strike
-			DS().SetHealthFraction(a, 1)
-		end
-		T.check(hit ~= nil, "a LightningZone strikes players inside its radius", "no 'Lightning' damage within " .. fmt(interval * 2 + warning + 3) .. " s")
-		-- the warning must be on screen before the bolt; if we saw it appear fresh it must last about Warning seconds
-		local warned = firstPartAt ~= nil and hitAt ~= nil and firstPartAt < hitAt
-		if warned and firstPartAt > startedAt + 0.2 then
-			warned = hitAt - firstPartAt >= warning * 0.6
-		end
-		T.check(warned, "a LightningZone shows a warning (new parts above the zone) before it strikes", firstPartAt and hitAt and ("warning at " .. fmt(firstPartAt, 2) .. ", strike at " .. fmt(hitAt, 2) .. ", Warning attr " .. warning) or "no warning parts seen")
-		if hit then
-			T.near(hit.args[1], dmg, 0.01, "lightning deals its Damage attribute")
-		end
-		away()
-		reset()
-		local function tempParts()
-			local n = 0
-			for _, d in ipairs(info.Folder:GetDescendants()) do
-				local lname = d.Name:lower()
-				if d:IsA("BasePart") and lname ~= "strikemark" and (lname:find("bolt") or lname:find("strike") or lname:find("flash")) then
-					n = n + 1
-				end
-			end
-			return n
-		end
-		local peak = 0
-		for _ = 1, 24 do
-			advance(interval / 2)
-			peak = math.max(peak, tempParts())
-		end
-		T.check(peak <= 90, "lightning bolts / warning discs are short-lived (bounded count)", "peak " .. peak .. " temporary parts")
-		W.tempParts = tempParts
-	end
-
-	-- VanishCloud
-	local vanish = tagged(Config.Tags.VanishCloud, info.Folder)
-	if #vanish > 0 then
-		local cloud = vanish[1]
-		local delay = cloud:GetAttribute("VanishDelay") or 0.9
-		local back = cloud:GetAttribute("ReturnDelay") or 3.5
-		Mock.Teleport(a, topOf(cloud))
-		advance(delay + 0.8)
-		Mock.Teleport(a, Vector3.new(500, 2800, 0))
-		T.check(cloud.CanCollide == false, "a VanishCloud turns non-solid after VanishDelay", "CanCollide " .. tostring(cloud.CanCollide))
-		T.check(cloud.Transparency >= 0.8, "...and fades out", "Transparency " .. tostring(cloud.Transparency))
-		advance(back + 2)
-		T.check(cloud.CanCollide == true, "a VanishCloud returns after ReturnDelay", "CanCollide " .. tostring(cloud.CanCollide))
-		T.check(cloud.Transparency <= 0.3, "...and becomes visible again", "Transparency " .. tostring(cloud.Transparency))
-		away()
-	end
-
-	-- BouncePad
-	local pads = tagged(Config.Tags.BouncePad, info.Folder)
-	if #pads > 0 then
-		local pad = pads[1]
-		local power = pad:GetAttribute("Power") or 90
-		root(a).AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-		Mock.Teleport(a, topOf(pad))
-		advance(0.3)
-		T.near(root(a).AssemblyLinearVelocity.Y, power, 1, "a BouncePad launches players with Power")
-		root(a).AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-		Mock.Touch(pad, root(a))
-		advance(0.05)
-		T.near(root(a).AssemblyLinearVelocity.Y, 0, 0.5, "BouncePad has a 0.3 s debounce")
-
-		-- LaunchSpeed: a moving player keeps their heading but leaves at the pad's horizontal speed;
-		-- a (nearly) standing player bounces straight up
-		local speed = pad:GetAttribute("LaunchSpeed")
-		if T.check(type(speed) == "number" and speed > 0, "BouncePads carry a LaunchSpeed attribute", tostring(speed)) then
-			advance(0.5)
-			root(a).AssemblyLinearVelocity = Vector3.new(3, 0, 4) -- 5 studs/s along (0.6, 0, 0.8)
-			Mock.Touch(pad, root(a))
-			advance(0.05)
-			local v = root(a).AssemblyLinearVelocity
-			T.near(v.Y, power, 1, "a moving player still gets the full Power")
-			T.near(math.sqrt(v.X * v.X + v.Z * v.Z), speed, 0.5, "a moving player leaves a BouncePad at LaunchSpeed")
-			T.near(v.X, speed * 0.6, 0.5, "...keeping the heading (X)")
-			T.near(v.Z, speed * 0.8, 0.5, "...keeping the heading (Z)")
-			advance(0.5)
-			root(a).AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-			Mock.Touch(pad, root(a))
-			advance(0.05)
-			v = root(a).AssemblyLinearVelocity
-			T.near(v.Y, power, 1, "a standing player gets the full Power")
-			T.near(math.sqrt(v.X * v.X + v.Z * v.Z), 0, 0.5, "a standing player bounces straight up")
-		end
-		away()
-	end
-
-	-- PressurePlate + PlateBridge
-	local plates = tagged(Config.Tags.PressurePlate, info.Folder)
-	if #plates > 0 then
-		local plate = plates[1]
-		local id = plate:GetAttribute("BridgeId")
-		local bridges = {}
-		for _, b in ipairs(tagged(Config.Tags.PlateBridge, info.Folder)) do
-			if b:GetAttribute("BridgeId") == id then
-				bridges[#bridges + 1] = b
-			end
-		end
-		T.check(id ~= nil and #bridges >= 1, "plate and bridge share a BridgeId", tostring(id))
-		local function solid()
-			for _, b in ipairs(bridges) do
-				if b.CanCollide then
-					return true
-				end
-			end
-			return false
-		end
-		advance(0.5)
-		T.check(not solid(), "bridges are not solid while nobody stands on the plate")
-		Mock.Teleport(a, topOf(plate))
-		advance(0.8)
-		T.check(solid(), "standing on a PressurePlate makes its PlateBridge solid")
-		local visible = false
-		for _, b in ipairs(bridges) do
-			visible = visible or b.Transparency < 0.5
-		end
-		T.check(visible, "...and visible")
-		away()
-		advance(0.4)
-		T.check(solid(), "the bridge stays ~1 s after the last player leaves")
-		advance(2.5)
-		T.check(not solid(), "the bridge retracts after the plate is released")
-	end
-
-	-- stop: nothing keeps running
-	stop()
-	advance(0.3)
-	local statsAfterStop = Mock.Stats()
-	local bar = bars[1]
-	local c2 = bar and bar.CFrame
-	local mark = logSize()
-	if bar then
-		Mock.Teleport(a, bar.Position)
-	end
-	advance(1.0)
-	if bar then
-		T.check(bar.CFrame == c2, "after stopFn() SpinBars no longer turn")
-		T.eq(#dmgEntries("SpinBar", mark), 0, "after stopFn() hazards no longer hurt")
-	end
-	T.check(statsAfterStop.connections["RunService.Heartbeat"] == baseStats.connections["RunService.Heartbeat"], "stopFn() disconnects the Heartbeat driver", tostring(statsAfterStop.connections["RunService.Heartbeat"]) .. " vs " .. tostring(baseStats.connections["RunService.Heartbeat"]))
-	pcall(stop) -- idempotent
-	away()
-	advance(6)
-	if W.tempParts then
-		local left = W.tempParts()
-		T.check(left <= 2, "after stopFn() no lightning bolts / discs linger", left .. " temporary parts after 6 s")
-		W.tempParts = nil
-	end
-	holder:Destroy()
-	advance(10)
-	local final = Mock.Stats()
-	T.check(final.pendingTasks <= baseStats.pendingTasks + 1, "hazard threads end after stopFn + Destroy", "pending " .. final.pendingTasks .. " vs " .. baseStats.pendingTasks)
-	removePlayers(players)
-	flushErrors("hazards")
-	flushWarnings("hazards")
-end)
-
-----------------------------------------------------------------------------------------------------
 -- scenario: DataStore persistence
 ----------------------------------------------------------------------------------------------------
+local function storedProfile(userId)
+	return Mock.DataStore.Data[config().Tokens.DataStoreName .. "/u_" .. userId]
+end
+
 local function storedTokens(userId)
-	local entry = Mock.DataStore.Data["NimbusClimb_v1/u_" .. userId]
+	local entry = storedProfile(userId)
 	return entry and entry.Tokens
 end
 
@@ -2520,7 +2329,11 @@ S.persistence = guarded("persistence", function()
 	T.eq(DataService.GetTokens(p), 12, "tokens are kept in memory")
 	Mock.RemovePlayer(p)
 	advance(1.5)
-	T.eq(storedTokens(777001), 12, "PlayerRemoving saves { Tokens = n } under 'NimbusClimb_v1' / 'u_<UserId>'", tostring(storedTokens(777001)))
+	T.eq(storedTokens(777001), 12, "PlayerRemoving saves the profile under Config.Tokens.DataStoreName / 'u_<UserId>'", tostring(storedTokens(777001)))
+	local saved = storedProfile(777001)
+	T.check(type(saved) == "table" and saved.Version == 2 and type(saved.Pets) == "table" and type(saved.Equipped) == "table" and type(saved.Items) == "table" and type(saved.Stats) == "table",
+		"the stored profile is a v2 profile (Version, Tokens, Pets, Equipped, Items, Stats)", saved and ("Version " .. tostring(saved.Version)) or "nothing stored")
+	T.check(Mock.DataStore.Data[Config.Tokens.LegacyDataStoreName .. "/u_777001"] == nil, "the legacy v1 store is never written")
 	local again = Mock.AddPlayer("Saver", 777001)
 	advance(1.2)
 	T.eq(again:GetAttribute("CloudTokens"), 12, "a returning player gets the saved tokens")
