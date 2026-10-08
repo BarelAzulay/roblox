@@ -41,8 +41,16 @@ echo    2. In Roblox Studio: open a Baseplate place, then Plugins - Rojo - Conne
 echo    3. Press Play.
 echo.
 "%ROJO_EXE%" serve default.project.json
+set "ROJO_RC=%ERRORLEVEL%"
 echo.
 echo  The Rojo server stopped.
+if "%ROJO_RC%"=="0" goto :end
+echo.
+echo  If you did not close it on purpose, read the message above:
+echo   - "may already be in use": another Rojo window is probably still open.
+echo     Close it, then double-click this file again.
+echo   - "Access is denied" or "blocked": Windows or your antivirus stopped rojo.exe.
+echo     Allow it, or delete the folder %%LOCALAPPDATA%%\NimbusClimb and run this file again.
 
 :end
 echo.

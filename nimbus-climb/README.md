@@ -39,6 +39,20 @@ text goes through one small `Theme` module, so the whole game shares the same ro
 | Dash (also in the air) | `Q` | **DASH** button | `B` |
 | Leave party / match | on-screen **Leave** buttons | same | same |
 
+## One-click start
+
+Extract the downloaded ZIP first (do not run anything from inside the ZIP). Then start the Rojo server with the launcher for your computer. The first run downloads Rojo 7.7.1 (about 5 MB) and asks nothing more. Keep the window open while you work, then connect from Roblox Studio (Plugins - Rojo - Connect).
+
+**Windows:** double-click `Start-Rojo-Windows.bat`. If the window says the Rojo server stopped and mentions "already in use", another Rojo window is still open: close it and try again.
+
+**Mac:** macOS blocks a script that came from a downloaded ZIP the first time you double-click it. Use one of these (needed only once):
+
+- **Option A, works on every macOS version and is the simplest.** Open Terminal and type `bash ` (with a trailing space). Drag `Start-Rojo-Mac.command` from Finder into the Terminal window, then press Enter.
+- **Option B, macOS 14 and earlier.** Right-click (or Control-click) `Start-Rojo-Mac.command`, choose **Open**, then click **Open** in the dialog.
+- **Option C, macOS 15 and later.** Double-click it once and click **Done** (do NOT click Move to Trash). Open System Settings > Privacy & Security and scroll to the Security section. Click **Open Anyway** next to `Start-Rojo-Mac.command`, enter your password or Touch ID, and click **Open Anyway** again. The button only appears for about an hour after the blocked attempt. If it is gone, double-click the file again.
+
+If macOS asks to let Terminal access your Downloads folder, click **Allow**. If you click Don't Allow, the launcher may wrongly say it cannot find `default.project.json`.
+
 ## Open it in Roblox Studio (Rojo)
 
 The repository is a [Rojo](https://rojo.space) project (`default.project.json`):

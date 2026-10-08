@@ -21,6 +21,7 @@ echo
 if [ ! -f "default.project.json" ]; then
 	echo " ERROR: I can't find default.project.json next to this file."
 	echo " Open the unzipped \"nimbus-climb\" folder and double-click this file from there."
+	echo " If macOS asked to let Terminal access your Downloads folder, choose Allow, then run this again."
 	finish 1
 fi
 
@@ -59,6 +60,11 @@ echo "   3. Press Play."
 echo
 
 "$ROJO_BIN" serve default.project.json
+rc=$?
 echo
 echo " The Rojo server stopped."
+if [ "$rc" -ne 0 ]; then
+	echo " If you did not close it on purpose, read the message above."
+	echo " If it says the address is already in use, another Rojo window may still be open. Close it, then run this again."
+fi
 finish 0
