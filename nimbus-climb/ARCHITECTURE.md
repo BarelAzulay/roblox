@@ -1,3 +1,5 @@
+> **v2 update:** read `ARCHITECTURE_V2.md` too. It supersedes this file wherever they disagree (five difficulties, pets, spots, new UI, new course generator).
+
 # Nimbus Climb — architecture & module contracts
 
 A co-op cloud-parkour hobby game for Roblox. Players hang out in a pretty cloud-village **lobby**,

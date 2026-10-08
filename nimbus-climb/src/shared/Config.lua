@@ -46,6 +46,11 @@ Config.Tags = {
 	BouncePad = "NC_BouncePad", -- attrs Power, LaunchSpeed (horizontal studs/s when the player is moving)
 	PressurePlate = "NC_PressurePlate", -- attr BridgeId (string)
 	PlateBridge = "NC_PlateBridge", -- attr BridgeId (string)
+	-- v2 hazards / elements
+	Pendulum = "NC_Pendulum", -- the beam part; attrs Hinge (Vector3 world pivot), Axis (Vector3 world unit, swing axis), Period, Arc (deg each side), Damage
+	WindGust = "NC_WindGust", -- invisible volume part; attrs Force (studs/s push), Direction (Vector3 unit), Interval, Warning
+	CloudCannon = "NC_CloudCannon", -- the pad part; attrs Target (Vector3 world landing point), FlightTime (s)
+	GoldenToken = "NC_GoldenToken", -- a CloudToken whose Value is 5 (also carries CloudToken tag)
 }
 
 -- Attributes set on Player instances by the server (client HUD reads them).
@@ -55,6 +60,9 @@ Config.Attr = {
 	InMatch = "InMatch", -- bool
 	Downed = "Downed", -- bool (KO'd inside a match)
 	Stamina = "Stamina", -- number, written by the client controller only
+	EquippedPets = "EquippedPets", -- csv of pet ids, e.g. "cloudy_dragon,pebble_pup" ("" when none)
+	SpotIndex = "SpotIndex", -- lobby spot number (1..Config.Lobby.SpotCount), absent when none
+	PerkStaminaRegen = "PerkStaminaRegen", -- number, e.g. 0.2 = +20% stamina regen (server writes)
 }
 
 Config.Remotes = {
@@ -65,10 +73,20 @@ Config.Remotes = {
 	"MatchState", -- (state:table|nil)  see ARCHITECTURE.md
 	"MatchResult", -- (result:table)
 	"DashFx", -- (userId:number)  server -> all clients, for others' trails
+	"ProfileSync", -- (snapshot:table)  see ARCHITECTURE_V2.md
+	"RouletteResult", -- (result:table)    see ARCHITECTURE_V2.md
+	"OpenPanel", -- (panelId:string, args:table|nil)  e.g. ("Shop", {Tab="Roulette", RouletteId="Cloud"})
 	-- client -> server
 	"Dash", -- ()
 	"LeaveParty", -- ()
 	"LeaveMatch", -- ()
+	"RequestProfile", -- ()  asks for a fresh ProfileSync
+	"BuyRoulette", -- (rouletteId:string)
+	"EquipPet", -- (petId:string)
+	"UnequipPet", -- (petId:string)
+	"BuyItem", -- (itemId:string, qty:number|nil)
+	"UseItem", -- (itemId:string)
+	"GoToSpot", -- ()
 }
 
 ----------------------------------------------------------------------
@@ -79,18 +97,21 @@ Config.Damage = {
 	DownedHealth = 1, -- Humanoid.Health a downed player is held at
 	ReviveHealthFraction = 0.5, -- revived players come back with 50%
 	CheckpointHealFraction = 0.35, -- everyone alive heals this much at a checkpoint
-	VoidDamage = { Breeze = 15, Gale = 22, Thunderstorm = 30 },
-	Kinds = { "Void", "Lightning", "SpinBar", "Storm", "Other" },
+	VoidDamage = { Easy = 10, Medium = 15, Hard = 22, Extreme = 30, Saint = 40 },
+	Kinds = { "Void", "Lightning", "SpinBar", "Storm", "Pendulum", "Other" },
 }
 
 ----------------------------------------------------------------------
--- Lobby (a floating cloud village high in the sky)
+-- Lobby (a big floating cloud village high in the sky)
 ----------------------------------------------------------------------
 Config.Lobby = {
 	Origin = Vector3.new(0, 300, 0), -- centre of the main plaza surface
-	PlazaRadius = 70,
-	PortalRingRadius = 62,
-	KillY = 150, -- fall below this -> teleport back to the plaza
+	PlazaRadius = 110,
+	PortalRingRadius = 88, -- the five portal gates stand on this ring
+	SpotRingRadius = 215, -- the player spots (personal cloud homes) stand on this ring
+	SpotCount = 16, -- one saved spot per player; set the place's Max Players to <= this
+	ShopOffset = Vector3.new(0, 0, -150), -- shop island centre relative to Origin
+	KillY = 100, -- fall below this -> teleport back to the plaza
 }
 
 ----------------------------------------------------------------------
@@ -106,61 +127,130 @@ Config.Match = {
 	ArenaOrigin = Vector3.new(4000, 800, 0), -- start-platform centre of slot 1
 	SlotSpacing = 800, -- studs between concurrent matches along +X
 	MaxConcurrent = 6,
-	TokenBonusOnWin = { Breeze = 10, Gale = 20, Thunderstorm = 40 },
+	TokenBonusOnWin = { Easy = 10, Medium = 20, Hard = 35, Extreme = 60, Saint = 100 },
 }
 
--- Order here == order of portals around the lobby.
+-- Overall shape of a course, and the stage themes a course is assembled from.
+-- (Semantics in ARCHITECTURE_V2.md. CourseBuilder owns the geometry.)
+Config.Archetypes = { "Straight", "Zigzag", "Serpent", "Spiral" }
+Config.StageThemes = {
+	"Stones", -- plain steps of varied size/shape
+	"Beams", -- narrow beams to balance on
+	"Bounce", -- bounce pads launching to higher steps
+	"Moving", -- clouds sliding back and forth
+	"Spin", -- spinning-bar platforms
+	"Storm", -- dark rain clouds that drizzle damage
+	"Lightning", -- warned lightning strike zones
+	"Vanish", -- steps that fade after you land
+	"Cannon", -- cloud cannons that fling you to the next island
+	"Wind", -- periodic wind gusts pushing sideways
+	"Pendulum", -- swinging beams over narrow steps
+	"Plates", -- co-op pressure-plate bridges
+	"DashGap", -- gaps that need a dash
+	"Gauntlet", -- short mixed hazard run
+}
+Config.Course = {
+	MaxRadius = 170, -- no step further than this (horizontal) from the start platform centre
+	Clearance = 8, -- min free headroom above any walkable top surface (no overhanging steps)
+}
+
+-- Order here == order of portals around the lobby (easy -> hardest).
 -- Course rules are in STUDS. All gaps are edge-to-edge. Physics-safe by construction:
--- MaxGap <= ~0.75 * MaxRunGap (14.3) so every non-dash gap is comfortably runnable.
+-- run gaps <= ~0.8 * MaxRunGap (14.3); rises <= 0.7 * JumpHeight (~4.8).
+-- Archetypes / Themes are weight tables (higher = more likely).
 Config.Difficulties = {
 	{
-		Id = "Breeze",
-		DisplayName = "Soft Breeze",
-		Blurb = "A gentle climb. Great for warming up.",
-		Color = Color3.fromRGB(120, 220, 255),
-		Stages = 4, -- each stage = ~5-7 steps + 1 checkpoint
+		Id = "Easy",
+		DisplayName = "Easy",
+		Blurb = "Chill clouds and wide steps. Perfect for new climbers.",
+		Color = Color3.fromRGB(96, 190, 140),
+		Stars = 1,
+		Stages = 4, -- each stage = StepsPerStage steps + 1 checkpoint
 		StepsPerStage = { 5, 7 },
-		GapMin = 4, GapMax = 8,
-		RiseMax = 3.5, -- max step up between consecutive platforms
-		PlatformMin = 10, PlatformMax = 16,
-		HazardChance = 0.15,
+		GapMin = 4, GapMax = 7.5,
+		RiseMax = 3,
+		PlatformMin = 11, PlatformMax = 17,
+		HazardChance = 0.10,
 		DashGapChance = 0,
 		TokensPerStage = 4,
-		TimeLimit = 600,
-		Stars = 1,
+		TimeLimit = 540,
+		Archetypes = { Straight = 3, Serpent = 2 },
+		Themes = { Stones = 4, Bounce = 3, Moving = 1 },
 	},
 	{
-		Id = "Gale",
-		DisplayName = "Gale Force",
-		Blurb = "Moving clouds, spinning bars, tight landings.",
-		Color = Color3.fromRGB(255, 190, 90),
+		Id = "Medium",
+		DisplayName = "Medium",
+		Blurb = "Moving clouds, spinning bars and your first co-op bridge.",
+		Color = Color3.fromRGB(96, 160, 224),
+		Stars = 2,
+		Stages = 5,
+		StepsPerStage = { 6, 8 },
+		GapMin = 5.5, GapMax = 9,
+		RiseMax = 3.8,
+		PlatformMin = 8, PlatformMax = 13,
+		HazardChance = 0.30,
+		DashGapChance = 0,
+		TokensPerStage = 4,
+		TimeLimit = 720,
+		Archetypes = { Straight = 2, Zigzag = 3, Serpent = 2 },
+		Themes = { Stones = 3, Bounce = 2, Moving = 3, Spin = 2, Plates = 2, Cannon = 1 },
+	},
+	{
+		Id = "Hard",
+		DisplayName = "Hard",
+		Blurb = "Vanishing steps, lightning and swinging beams.",
+		Color = Color3.fromRGB(226, 150, 74),
+		Stars = 3,
 		Stages = 6,
 		StepsPerStage = { 6, 8 },
-		GapMin = 6, GapMax = 10.5,
-		RiseMax = 4.5,
-		PlatformMin = 7, PlatformMax = 12,
-		HazardChance = 0.4,
-		DashGapChance = 0.08,
-		TokensPerStage = 4,
+		GapMin = 6.5, GapMax = 10,
+		RiseMax = 4.3,
+		PlatformMin = 6, PlatformMax = 10,
+		HazardChance = 0.50,
+		DashGapChance = 0.06,
+		DashGapMin = 14, DashGapMax = 17,
+		TokensPerStage = 5,
 		TimeLimit = 900,
-		Stars = 2,
+		Archetypes = { Zigzag = 3, Serpent = 2, Spiral = 3 },
+		Themes = { Stones = 1, Moving = 2, Spin = 2, Vanish = 3, Lightning = 2, Pendulum = 2, Wind = 2, Plates = 2, Cannon = 2, Beams = 2 },
 	},
 	{
-		Id = "Thunderstorm",
-		DisplayName = "Thunderstorm",
-		Blurb = "Lightning, vanishing clouds and dash-only gaps. Bring friends.",
-		Color = Color3.fromRGB(190, 120, 255),
+		Id = "Extreme",
+		DisplayName = "Extreme",
+		Blurb = "Dash-only gaps, storms and narrow beams. Bring friends.",
+		Color = Color3.fromRGB(214, 92, 104),
+		Stars = 4,
 		Stages = 8,
-		StepsPerStage = { 6, 9 },
-		GapMin = 8, GapMax = 11,
-		RiseMax = 5,
-		PlatformMin = 5, PlatformMax = 9,
-		HazardChance = 0.65,
-		DashGapChance = 0.2,
-		DashGapMin = 15, DashGapMax = 19, -- needs a dash; ~0.75 * MaxDashGap
+		StepsPerStage = { 7, 9 },
+		GapMin = 7.5, GapMax = 11,
+		RiseMax = 4.6,
+		PlatformMin = 5, PlatformMax = 8,
+		HazardChance = 0.70,
+		DashGapChance = 0.15,
+		DashGapMin = 15, DashGapMax = 19,
 		TokensPerStage = 5,
 		TimeLimit = 1200,
-		Stars = 3,
+		Archetypes = { Zigzag = 2, Serpent = 2, Spiral = 4 },
+		Themes = { Beams = 3, Spin = 2, Vanish = 3, Lightning = 3, Storm = 3, Pendulum = 3, Wind = 3, Plates = 2, Cannon = 2, DashGap = 3, Gauntlet = 2 },
+	},
+	{
+		Id = "Saint",
+		DisplayName = "Saint",
+		Blurb = "Only the saintly finish. Tiny steps, relentless hazards.",
+		Color = Color3.fromRGB(226, 190, 96),
+		Stars = 5,
+		Stages = 10,
+		StepsPerStage = { 7, 10 },
+		GapMin = 8, GapMax = 11.5,
+		RiseMax = 4.7,
+		PlatformMin = 4, PlatformMax = 7,
+		HazardChance = 0.85,
+		DashGapChance = 0.25,
+		DashGapMin = 16, DashGapMax = 20,
+		TokensPerStage = 6,
+		TimeLimit = 1500,
+		Archetypes = { Spiral = 4, Serpent = 2, Zigzag = 2 },
+		Themes = { Beams = 3, Vanish = 3, Lightning = 3, Storm = 3, Pendulum = 3, Wind = 3, Plates = 2, Cannon = 2, DashGap = 4, Gauntlet = 4, Spin = 2 },
 	},
 }
 
@@ -178,9 +268,68 @@ end
 ----------------------------------------------------------------------
 Config.Tokens = {
 	DefaultValue = 1,
+	GoldenValue = 5,
 	RespawnSeconds = nil, -- tokens are one-shot per match
-	DataStoreName = "NimbusClimb_v1",
+	DataStoreName = "NimbusClimb_v2",
+	LegacyDataStoreName = "NimbusClimb_v1", -- read once to migrate v1 saves ({Tokens=n})
 	AutosaveSeconds = 90,
+}
+
+----------------------------------------------------------------------
+-- Pets (collectible winged companions), roulettes and items
+----------------------------------------------------------------------
+Config.Rarities = {
+	{ Id = "Common", Order = 1, Color = Color3.fromRGB(168, 178, 194) },
+	{ Id = "Uncommon", Order = 2, Color = Color3.fromRGB(104, 196, 128) },
+	{ Id = "Rare", Order = 3, Color = Color3.fromRGB(88, 158, 232) },
+	{ Id = "Epic", Order = 4, Color = Color3.fromRGB(176, 108, 232) },
+	{ Id = "Legendary", Order = 5, Color = Color3.fromRGB(242, 182, 68) },
+	{ Id = "Mythic", Order = 6, Color = Color3.fromRGB(238, 98, 140) },
+}
+
+Config.Pets = {
+	MaxEquipped = 3, -- pets flying beside you
+	MaxPerStack = 99,
+	-- Perks pets can give (fractions, e.g. 0.1 = +10%). Totals are capped so nothing breaks the course physics.
+	-- Pets never change run speed or jump power (courses are validated against Config.Physics).
+	PerkCaps = { MaxHealth = 0.5, TokenBonus = 1.0, StaminaRegen = 0.6, CheckpointHeal = 1.0 },
+}
+
+-- Cost in cloud tokens. Odds are relative weights per rarity (pets inside a rarity are equally likely).
+Config.Roulettes = {
+	{
+		Id = "Cloud",
+		DisplayName = "Cloud Roulette",
+		Price = 50,
+		Color = Color3.fromRGB(120, 190, 235),
+		Odds = { Common = 60, Uncommon = 28, Rare = 10, Epic = 2 },
+	},
+	{
+		Id = "Storm",
+		DisplayName = "Storm Roulette",
+		Price = 250,
+		Color = Color3.fromRGB(128, 120, 214),
+		Odds = { Uncommon = 35, Rare = 40, Epic = 20, Legendary = 5 },
+	},
+	{
+		Id = "Sky",
+		DisplayName = "Sky Roulette",
+		Price = 1000,
+		Color = Color3.fromRGB(240, 180, 90),
+		Odds = { Rare = 35, Epic = 45, Legendary = 17, Mythic = 3 },
+	},
+	{
+		Id = "Celestial",
+		DisplayName = "Celestial Roulette",
+		Price = 5000,
+		Color = Color3.fromRGB(236, 120, 170),
+		Odds = { Epic = 45, Legendary = 40, Mythic = 15 },
+	},
+}
+
+Config.Items = {
+	MaxCarry = 5, -- per item type
+	HotbarSlots = 4, -- keys 1-4
 }
 
 return Config
