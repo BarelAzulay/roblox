@@ -1,0 +1,64 @@
+{
+  "_comment": "Public API of every module, taken from ARCHITECTURE.md. Read by tools/check.mjs (static) and tools/smoke.py (runtime). Keys are paths below src/ without .lua. 'functions' must be callable, 'signals' must expose Connect + Fire, 'fields' must merely exist (non-nil).",
+  "modules": {
+    "shared/Config": {
+      "functions": ["GetDifficulty"],
+      "fields": ["GameName", "Tagline", "Physics", "Tags", "Attr", "Remotes", "Damage", "Lobby", "Match", "Difficulties", "Tokens"]
+    },
+    "shared/Theme": {
+      "functions": ["HealthColor", "Style", "Label", "Corner", "Stroke", "Gradient", "Panel"],
+      "fields": ["Fonts", "Colors"]
+    },
+    "shared/Util": {
+      "functions": ["Create", "Signal", "Clamp", "Lerp", "Round", "FormatTime", "Commas", "GetCharacter", "GetHumanoid", "GetRoot", "PlayerFromPart", "Tween", "NewRng"]
+    },
+    "shared/Remotes": {
+      "functions": ["Init", "Get"]
+    },
+    "server/Services/LightingService": {
+      "functions": ["Init"]
+    },
+    "server/Services/LobbyBuilder": {
+      "functions": ["Build"]
+    },
+    "server/Services/PlayerService": {
+      "functions": ["Init", "SetSpawnProvider", "SendToLobby", "GetLobbySpawnCFrame", "ApplyHumanoidStats"]
+    },
+    "server/Services/DataService": {
+      "functions": ["Load", "Save", "StartAutosave", "BindToClose", "AddTokens", "GetTokens"]
+    },
+    "server/Services/DamageService": {
+      "functions": ["Init", "Damage", "Heal", "HealFraction", "SetHealthFraction", "GrantInvulnerability", "IsInvulnerable", "IsDowned", "Revive"],
+      "signals": ["PlayerDowned"]
+    },
+    "server/Services/TokenService": {
+      "functions": ["Init", "Watch", "MakeTokenPart"]
+    },
+    "server/Services/HazardService": {
+      "functions": ["Attach"]
+    },
+    "server/Services/CourseBuilder": {
+      "functions": ["GenerateLayout", "ValidateLayout", "Build"]
+    },
+    "server/Services/MatchService": {
+      "functions": ["Init", "StartMatch", "GetMatchOf", "GetRespawnCFrame", "LeaveMatch"],
+      "signals": ["MatchEnded"]
+    },
+    "server/Services/PortalService": {
+      "functions": ["Init", "RemovePlayer", "GetParty"]
+    },
+    "client/Controllers/MovementController": {
+      "functions": ["Init", "GetDashCooldownFraction"]
+    },
+    "client/Controllers/HudController": {
+      "functions": ["Init"]
+    },
+    "client/Controllers/DamageFx": {
+      "functions": ["Init"]
+    },
+    "client/Controllers/NotifyController": {
+      "functions": ["Init"]
+    }
+  },
+  "scripts": ["server/Main", "client/Main"]
+}

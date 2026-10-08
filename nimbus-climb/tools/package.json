@@ -1,0 +1,13 @@
+{
+  "name": "nimbus-climb-tools",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Static checks and smoke tests for Nimbus Climb (tools only, not shipped to Roblox)",
+  "type": "module",
+  "scripts": {
+    "check": "node check.mjs"
+  },
+  "dependencies": {
+    "luaparse": "0.3.1"
+  }
+}
