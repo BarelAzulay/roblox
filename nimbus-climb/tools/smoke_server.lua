@@ -350,6 +350,126 @@ S.mock_selftest = guarded("mock_selftest", function()
 	T.check(raises(function()
 		ds:SetAsync("bad", { v = Vector3.new() })
 	end), "DataStore rejects Vector3 values")
+	-- v2: ProximityPrompt fixtures, GUI layout engine, ViewportFrame
+	local prompt = Instance.new("ProximityPrompt")
+	local triggeredBy
+	prompt.Triggered:Connect(function(who)
+		triggeredBy = who
+	end)
+	Mock.Trigger(prompt, Players:GetPlayers()[1] or "nobody")
+	T.check(triggeredBy ~= nil, "Mock.Trigger fires ProximityPrompt.Triggered with the player")
+	local vp = Instance.new("ViewportFrame")
+	local world = Instance.new("WorldModel")
+	local vcam = Instance.new("Camera")
+	world.Parent = vp
+	vcam.Parent = vp
+	vp.CurrentCamera = vcam
+	T.check(vp.CurrentCamera == vcam and vp:IsA("GuiObject"), "ViewportFrame accepts a Camera and a WorldModel")
+	local function px(v)
+		return math.floor(v + 0.5)
+	end
+	local savedViewport = Mock.Viewport
+	Mock.SetViewport(1920, 1080)
+	local gui = Instance.new("ScreenGui")
+	gui.IgnoreGuiInset = true
+	local centred = Instance.new("Frame")
+	centred.Size = UDim2.new(0, 200, 0, 100)
+	centred.Position = UDim2.new(0.5, 0, 0.5, 0)
+	centred.AnchorPoint = Vector2.new(0.5, 0.5)
+	centred.Parent = gui
+	T.check(px(centred.AbsolutePosition.X) == 860 and px(centred.AbsolutePosition.Y) == 490 and centred.AbsoluteSize.X == 200, "layout: centre-anchored frame at 1920x1080", tostring(centred.AbsolutePosition))
+	gui.IgnoreGuiInset = false
+	T.check(px(centred.AbsolutePosition.Y) == px((1080 - Mock.TopInset) / 2 - 50), "layout: IgnoreGuiInset = false shrinks the ScreenGui area by the top bar", tostring(centred.AbsolutePosition))
+	gui.IgnoreGuiInset = true
+	centred.Position = UDim2.new(0, 10, 0, 20)
+	centred.AnchorPoint = Vector2.new(0, 0)
+	T.check(centred.AbsolutePosition.X == 10 and centred.AbsolutePosition.Y == 20, "layout: results follow property changes (cache invalidation)", tostring(centred.AbsolutePosition))
+	local padded = Instance.new("Frame")
+	padded.Size = UDim2.new(0, 400, 0, 300)
+	padded.Parent = gui
+	local pad = Instance.new("UIPadding")
+	pad.PaddingLeft, pad.PaddingTop, pad.PaddingRight, pad.PaddingBottom = UDim.new(0, 10), UDim.new(0, 20), UDim.new(0, 30), UDim.new(0, 40)
+	pad.Parent = padded
+	local inner = Instance.new("Frame")
+	inner.Size = UDim2.new(1, 0, 1, 0)
+	inner.Parent = padded
+	T.check(inner.AbsoluteSize.X == 360 and inner.AbsoluteSize.Y == 240 and inner.AbsolutePosition.X == 10 and inner.AbsolutePosition.Y == 20, "layout: UIPadding shrinks the children's area", tostring(inner.AbsoluteSize) .. " at " .. tostring(inner.AbsolutePosition))
+	local scaled = Instance.new("Frame")
+	scaled.Size = UDim2.new(0, 100, 0, 50)
+	scaled.AnchorPoint = Vector2.new(1, 1)
+	scaled.Position = UDim2.new(1, -10, 1, -10)
+	scaled.Parent = gui
+	local us = Instance.new("UIScale")
+	us.Scale = 2
+	us.Parent = scaled
+	local kid = Instance.new("Frame")
+	kid.Size = UDim2.new(0, 10, 0, 10)
+	kid.Parent = scaled
+	T.check(scaled.AbsoluteSize.X == 200 and px(scaled.AbsolutePosition.X) == 1920 - 10 - 200 and px(scaled.AbsolutePosition.Y) == 1080 - 10 - 100, "layout: UIScale grows an object around its AnchorPoint", tostring(scaled.AbsolutePosition) .. " " .. tostring(scaled.AbsoluteSize))
+	T.check(kid.AbsoluteSize.X == 20, "layout: UIScale also scales the offsets of the children", tostring(kid.AbsoluteSize))
+	local list = Instance.new("Frame")
+	list.Size = UDim2.new(0, 200, 0, 400)
+	list.Parent = gui
+	local ll = Instance.new("UIListLayout")
+	ll.Padding = UDim.new(0, 5)
+	ll.SortOrder = Enum.SortOrder.LayoutOrder
+	ll.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	ll.VerticalAlignment = Enum.VerticalAlignment.Center
+	ll.Parent = list
+	local rows = {}
+	for i = 1, 3 do
+		local row = Instance.new("Frame")
+		row.Size = UDim2.new(0, 100, 0, 20)
+		row.LayoutOrder = 4 - i
+		row.Parent = list
+		rows[i] = row
+	end
+	local lp = list.AbsolutePosition
+	T.check(px(rows[1].AbsolutePosition.Y - lp.Y) == 215 and px(rows[2].AbsolutePosition.Y - lp.Y) == 190, "layout: UIListLayout stacks children in LayoutOrder (rows 25 studs apart)", tostring(rows[1].AbsolutePosition.Y - lp.Y))
+	T.check(px(rows[3].AbsolutePosition.Y - lp.Y) == px((400 - 70) / 2) and px(rows[3].AbsolutePosition.X - lp.X) == 50, "layout: UIListLayout centres a vertical stack and its rows", tostring(rows[3].AbsolutePosition - lp))
+	local grid = Instance.new("Frame")
+	grid.Size = UDim2.new(0, 230, 0, 300)
+	grid.Parent = gui
+	local gl = Instance.new("UIGridLayout")
+	gl.CellSize = UDim2.new(0, 50, 0, 50)
+	gl.CellPadding = UDim2.new(0, 10, 0, 10)
+	gl.SortOrder = Enum.SortOrder.LayoutOrder
+	gl.Parent = grid
+	local cells = {}
+	for i = 1, 9 do
+		local cell = Instance.new("Frame")
+		cell.LayoutOrder = i
+		cell.Parent = grid
+		cells[i] = cell
+	end
+	local gp = grid.AbsolutePosition
+	T.check(cells[1].AbsoluteSize.X == 50 and px(cells[4].AbsolutePosition.X - gp.X) == 180 and px(cells[5].AbsolutePosition.Y - gp.Y) == 60 and px(cells[5].AbsolutePosition.X - gp.X) == 0, "layout: UIGridLayout wraps rows of 4 cells (230 wide)", tostring(cells[4].AbsolutePosition - gp) .. " " .. tostring(cells[5].AbsolutePosition - gp))
+	local auto = Instance.new("TextLabel")
+	auto.AutomaticSize = Enum.AutomaticSize.Y
+	auto.Size = UDim2.new(0, 100, 0, 0)
+	auto.TextSize = 20
+	auto.TextWrapped = true
+	auto.Text = "alpha beta gamma delta epsilon zeta"
+	auto.Parent = gui
+	T.check(auto.AbsoluteSize.Y >= 40 and auto.AbsoluteSize.X == 100, "layout: AutomaticSize.Y grows a wrapped TextLabel", tostring(auto.AbsoluteSize))
+	local box = Instance.new("Frame")
+	box.AutomaticSize = Enum.AutomaticSize.XY
+	box.Size = UDim2.new(0, 0, 0, 0)
+	box.Parent = gui
+	local b1 = Instance.new("Frame")
+	b1.Size = UDim2.new(0, 70, 0, 30)
+	b1.Position = UDim2.new(0, 10, 0, 5)
+	b1.Parent = box
+	T.check(box.AbsoluteSize.X == 80 and box.AbsoluteSize.Y == 35, "layout: AutomaticSize.XY wraps the children", tostring(box.AbsoluteSize))
+	Mock.SetViewport(390, 844)
+	T.check(px(Mock.GuiBox(gui).w) == 390, "layout: Mock.SetViewport changes every ScreenGui")
+	Mock.Viewport = savedViewport
+	Mock.GuiEpoch = Mock.GuiEpoch + 1
+	-- DataStore keys are "<store>/<key>" so legacy saves can be seeded
+	Mock.DataStore.Data["SelfTest/seed"] = { n = 7 }
+	T.eq(ds:GetAsync("seed").n, 7, "Mock.DataStore.Data['<store>/<key>'] seeds a store")
+	Mock.DataStore.Data["SelfTest/seed"] = nil
+	Mock.DataStore.Data["SelfTest/k"] = nil
 	flushErrors("mock selftest")
 end)
 
@@ -456,364 +576,7 @@ S.contract = guarded("contract", function()
 end)
 
 ----------------------------------------------------------------------------------------------------
--- scenario: procedural layouts
-----------------------------------------------------------------------------------------------------
-local function xzGap(a, b)
-	local dx = math.max(0, math.abs(a.Pos.X - b.Pos.X) - (a.Size.X + b.Size.X) / 2)
-	local dz = math.max(0, math.abs(a.Pos.Z - b.Pos.Z) - (a.Size.Z + b.Size.Z) / 2)
-	return math.sqrt(dx * dx + dz * dz)
-end
-
-local function boxSeparation(a, b)
-	local function axis(a0, a1, b0, b1)
-		return math.max(0, b0 - a1, a0 - b1)
-	end
-	local dx = axis(a.Pos.X - a.Size.X / 2, a.Pos.X + a.Size.X / 2, b.Pos.X - b.Size.X / 2, b.Pos.X + b.Size.X / 2)
-	local dy = axis(a.Pos.Y - a.Size.Y, a.Pos.Y, b.Pos.Y - b.Size.Y, b.Pos.Y)
-	local dz = axis(a.Pos.Z - a.Size.Z / 2, a.Pos.Z + a.Size.Z / 2, b.Pos.Z - b.Size.Z / 2, b.Pos.Z + b.Size.Z / 2)
-	return math.sqrt(dx * dx + dy * dy + dz * dz)
-end
-
--- Independent check of the ARCHITECTURE.md guarantees. Returns a list of problems and a stats table.
-local function auditLayout(layout, diff, Config)
-	local problems = {}
-	local function bad(msg)
-		if #problems < 6 then
-			problems[#problems + 1] = msg
-		end
-	end
-	local P = Config.Physics
-	local steps = layout.Steps
-	local stats = { steps = 0, tokens = 0, maxGap = 0, maxRise = 0, dash = 0, bridges = 0, hazards = 0 }
-	if type(steps) ~= "table" or #steps < 4 then
-		bad("Steps missing or too short")
-		return problems, stats
-	end
-	stats.steps = #steps
-	if layout.DifficultyId ~= diff.Id then
-		bad("DifficultyId is " .. tostring(layout.DifficultyId))
-	end
-	if steps[1].Kind ~= "Start" or steps[1].Stage ~= 0 then
-		bad("first step must be Start with Stage 0")
-	end
-	if steps[#steps].Kind ~= "Finish" then
-		bad("last step must be Finish")
-	end
-	local sx, sz = steps[1].Size.X, steps[1].Size.Z
-	if sx < 24 or sz < 24 then
-		bad("Start platform smaller than 24x24 (" .. fmt(sx) .. "x" .. fmt(sz) .. ")")
-	end
-	local fin = steps[#steps]
-	if fin.Size.X < 28 or fin.Size.Z < 28 then
-		bad("Finish platform smaller than 28x28")
-	end
-	if fin.Pos.Z <= steps[1].Pos.Z + 20 then
-		bad("course does not progress toward +Z")
-	end
-	local tokenCount, tokenSteps = 0, {}
-	local stageSteps, stageCheckpointStep = {}, {}
-	local minTop = 0
-	for i, s in ipairs(steps) do
-		if s.Index ~= i then
-			bad("step " .. i .. " has Index " .. tostring(s.Index))
-		end
-		minTop = math.min(minTop, s.Pos.Y)
-		if math.abs(s.Pos.X) > 35.5 then
-			bad("step " .. i .. " wanders to X=" .. fmt(s.Pos.X) .. " (limit 35)")
-		end
-		if s.Kind == "Checkpoint" then
-			if s.Size.X < 14 or s.Size.Z < 14 then
-				bad("checkpoint step " .. i .. " smaller than 14x14")
-			end
-			stageCheckpointStep[s.Stage] = i
-		elseif s.Kind == "Platform" then
-			local lo, hi = diff.PlatformMin - 0.01, diff.PlatformMax + 0.01
-			if s.Size.X < lo or s.Size.X > hi or s.Size.Z < lo or s.Size.Z > hi then
-				bad("Platform step " .. i .. " size " .. fmt(s.Size.X) .. "x" .. fmt(s.Size.Z) .. " outside [" .. diff.PlatformMin .. ", " .. diff.PlatformMax .. "]")
-			end
-		elseif s.Kind == "DashGap" then
-			stats.dash = stats.dash + 1
-		elseif s.Kind == "PlateBridge" then
-			stats.bridges = stats.bridges + 1
-			if diff.Id == "Breeze" then
-				bad("PlateBridge step on Breeze (Gale/Thunderstorm only)")
-			end
-		end
-		if s.Hazard ~= nil then
-			stats.hazards = stats.hazards + 1
-			if type(s.Hazard) ~= "table" then
-				bad("step " .. i .. " Hazard must be a table")
-			else
-				local function plain(v, path, depth)
-					local tv = typeof(v)
-					if tv == "table" then
-						if depth > 4 then
-							bad("step " .. i .. " Hazard." .. path .. " is nested too deeply")
-							return
-						end
-						for k2, v2 in pairs(v) do
-							plain(v2, path .. "." .. tostring(k2), depth + 1)
-						end
-					elseif tv ~= "number" and tv ~= "Vector3" and tv ~= "string" and tv ~= "boolean" then
-						bad("step " .. i .. " Hazard." .. path .. " is a " .. tv .. " (numeric params only)")
-					end
-				end
-				for k, v in pairs(s.Hazard) do
-					plain(v, tostring(k), 1)
-				end
-			end
-		end
-		if s.Tokens and #s.Tokens > 0 then
-			tokenSteps[i] = true
-			for _, off in ipairs(s.Tokens) do
-				tokenCount = tokenCount + 1
-				if typeof(off) ~= "Vector3" then
-					bad("step " .. i .. " token offset is a " .. typeof(off))
-				elseif off.Y < 2.9 or off.Y > 4.6 then
-					bad("step " .. i .. " token Y offset " .. fmt(off.Y) .. " not in [3, 4.5]")
-				end
-			end
-		end
-		if s.Stage and s.Stage >= 1 and s.Kind ~= "Finish" then
-			stageSteps[s.Stage] = stageSteps[s.Stage] or {}
-			table.insert(stageSteps[s.Stage], i)
-		end
-		-- gaps and rises relative to the previous step
-		if i > 1 then
-			local prev = steps[i - 1]
-			local gap = xzGap(prev, s)
-			local rise = s.Pos.Y - prev.Pos.Y
-			if s.Kind == "DashGap" then
-				if gap > 0.85 * P.MaxDashGap + 0.05 or gap <= 0.75 * P.MaxRunGap then
-					bad("DashGap step " .. i .. " gap " .. fmt(gap) .. " outside (0.75*MaxRunGap, 0.85*MaxDashGap]")
-				end
-				if diff.DashGapMin and (gap < diff.DashGapMin - 0.2 or gap > diff.DashGapMax + 0.2) then
-					bad("DashGap step " .. i .. " gap " .. fmt(gap) .. " outside [" .. diff.DashGapMin .. ", " .. diff.DashGapMax .. "]")
-				end
-			elseif s.Kind == "PlateBridge" then
-				-- the bridge spans this gap: it is only walkable while a teammate holds the plate
-				stats.bridgeSpan = math.max(stats.bridgeSpan or 0, gap)
-			else
-				if gap < diff.GapMin - 0.2 or gap > diff.GapMax + 0.2 then
-					bad("step " .. i .. " (" .. tostring(s.Kind) .. ") gap " .. fmt(gap) .. " outside [" .. diff.GapMin .. ", " .. diff.GapMax .. "]")
-				end
-				stats.maxGap = math.max(stats.maxGap, gap)
-			end
-			if rise > diff.RiseMax + 0.01 or rise > P.JumpHeight * 0.7 + 0.01 then
-				bad("step " .. i .. " rise " .. fmt(rise) .. " exceeds min(RiseMax " .. diff.RiseMax .. ", 0.7*JumpHeight " .. fmt(P.JumpHeight * 0.7) .. ")")
-			end
-			if rise < -4.01 then
-				bad("step " .. i .. " drops " .. fmt(-rise) .. " (> 4)")
-			end
-			stats.maxRise = math.max(stats.maxRise, rise)
-		end
-	end
-	if minTop < -10.01 then
-		bad("course goes down to Y=" .. fmt(minTop) .. " (limit -10)")
-	end
-	stats.tokens = tokenCount
-	if layout.TotalTokens ~= tokenCount then
-		bad("TotalTokens " .. tostring(layout.TotalTokens) .. " but steps carry " .. tokenCount .. " tokens")
-	end
-	-- non-adjacent steps must keep 2 studs apart
-	local nsteps = #steps
-	local overlaps = 0
-	for i = 1, nsteps - 2 do
-		for j = i + 2, nsteps do
-			if boxSeparation(steps[i], steps[j]) < 1.999 then
-				overlaps = overlaps + 1
-				if overlaps <= 2 then
-					bad("steps " .. i .. " and " .. j .. " are closer than 2 studs")
-				end
-			end
-		end
-	end
-	-- stages and checkpoints
-	local cps = layout.Checkpoints
-	local ncp = 0
-	if type(cps) == "table" then
-		for _ in pairs(cps) do
-			ncp = ncp + 1
-		end
-	end
-	if ncp ~= diff.Stages then
-		bad("expected " .. diff.Stages .. " checkpoints, got " .. ncp)
-	else
-		for stage = 1, diff.Stages do
-			local idx = cps[stage]
-			if not idx or not steps[idx] or steps[idx].Kind ~= "Checkpoint" then
-				bad("Checkpoints[" .. stage .. "] does not point at a Checkpoint step")
-			end
-			local list = stageSteps[stage] or {}
-			local withCp, withoutCp = #list, #list - 1
-			local lo, hi = diff.StepsPerStage[1], diff.StepsPerStage[2]
-			local fits = (withCp >= lo and withCp <= hi) or (withoutCp >= lo and withoutCp <= hi)
-			if not fits then
-				bad("stage " .. stage .. " has " .. withCp .. " steps (StepsPerStage " .. lo .. "-" .. hi .. ")")
-			end
-			local withTokens = 0
-			for _, idx2 in ipairs(list) do
-				if tokenSteps[idx2] then
-					withTokens = withTokens + 1
-				end
-			end
-			if withTokens < diff.TokensPerStage then
-				bad("stage " .. stage .. " has tokens on " .. withTokens .. " steps (need " .. diff.TokensPerStage .. ")")
-			end
-		end
-		if cps[diff.Stages] and cps[diff.Stages] ~= nsteps - 1 then
-			bad("last checkpoint (step " .. tostring(cps[diff.Stages]) .. ") is not right before the Finish (step " .. nsteps .. ")")
-		end
-	end
-	local plateStages = {}
-	for _, s in ipairs(steps) do
-		if s.Kind == "PlateBridge" then
-			plateStages[s.Stage] = (plateStages[s.Stage] or 0) + 1
-			if plateStages[s.Stage] > 1 then
-				bad("more than one PlateBridge in stage " .. tostring(s.Stage))
-			end
-		end
-	end
-	if layout.Bounds then
-		local b = layout.Bounds
-		if typeof(b.Min) ~= "Vector3" or typeof(b.Max) ~= "Vector3" then
-			bad("Bounds.Min / Bounds.Max must be Vector3")
-		else
-			for _, s in ipairs(steps) do
-				if s.Pos.X < b.Min.X - 1 or s.Pos.X > b.Max.X + 1 or s.Pos.Z < b.Min.Z - 1 or s.Pos.Z > b.Max.Z + 1 or s.Pos.Y > b.Max.Y + 1 then
-					bad("step " .. s.Index .. " lies outside Bounds")
-					break
-				end
-			end
-		end
-	else
-		bad("Bounds missing")
-	end
-	return problems, stats
-end
-
-S.layouts = guarded("layouts", function()
-	local CB = mod("CourseBuilder")
-	local Config = config()
-	if not CB or not Config then
-		T.fail("layouts need CourseBuilder and Config")
-		return
-	end
-	local seeds = ARGS.seeds
-	local total, failures = 0, 0
-	for _, diff in ipairs(Config.Difficulties) do
-		local agg = { steps = { 1e9, 0, 0 }, tokens = { 1e9, 0, 0 }, maxGap = 0, maxRise = 0, dash = 0, bridges = 0, hazards = 0, invalid = 0, bad = 0 }
-		local firstProblems = {}
-		local t0 = Mock.RealClock()
-		for seed = 1, seeds do
-			local ok, layout = pcall(CB.GenerateLayout, diff.Id, seed)
-			total = total + 1
-			if not ok or type(layout) ~= "table" then
-				failures = failures + 1
-				agg.bad = agg.bad + 1
-				if #firstProblems < 3 then
-					firstProblems[#firstProblems + 1] = "seed " .. seed .. ": GenerateLayout raised " .. tostring(layout)
-				end
-			else
-				local vok, valid, vproblems = pcall(CB.ValidateLayout, layout)
-				if not vok then
-					agg.invalid = agg.invalid + 1
-					if #firstProblems < 3 then
-						firstProblems[#firstProblems + 1] = "seed " .. seed .. ": ValidateLayout raised " .. tostring(valid)
-					end
-				elseif valid ~= true then
-					agg.invalid = agg.invalid + 1
-					if #firstProblems < 3 then
-						firstProblems[#firstProblems + 1] = "seed " .. seed .. ": ValidateLayout rejected own layout: " .. tostring(type(vproblems) == "table" and vproblems[1] or vproblems)
-					end
-				end
-				local problems, stats = auditLayout(layout, diff, Config)
-				if #problems > 0 then
-					agg.bad = agg.bad + 1
-					if #firstProblems < 3 then
-						firstProblems[#firstProblems + 1] = "seed " .. seed .. ": " .. problems[1] .. (#problems > 1 and (" (+" .. (#problems - 1) .. " more)") or "")
-					end
-				end
-				agg.steps[1] = math.min(agg.steps[1], stats.steps)
-				agg.steps[2] = math.max(agg.steps[2], stats.steps)
-				agg.steps[3] = agg.steps[3] + stats.steps
-				agg.tokens[1] = math.min(agg.tokens[1], stats.tokens)
-				agg.tokens[2] = math.max(agg.tokens[2], stats.tokens)
-				agg.tokens[3] = agg.tokens[3] + stats.tokens
-				agg.maxGap = math.max(agg.maxGap, stats.maxGap)
-				agg.maxRise = math.max(agg.maxRise, stats.maxRise)
-				agg.dash = agg.dash + stats.dash
-				agg.bridges = agg.bridges + stats.bridges
-				agg.hazards = agg.hazards + stats.hazards
-				if seed % 25 == 1 then
-					-- deterministic for (difficulty, seed)
-					local ok2, again = pcall(CB.GenerateLayout, diff.Id, seed)
-					local same = ok2 and #again.Steps == #layout.Steps and again.TotalTokens == layout.TotalTokens
-					if same then
-						for i, s in ipairs(layout.Steps) do
-							local o = again.Steps[i]
-							if o.Kind ~= s.Kind or o.Pos ~= s.Pos or o.Size ~= s.Size then
-								same = false
-								break
-							end
-						end
-					end
-					if not same then
-						agg.bad = agg.bad + 1
-						if #firstProblems < 3 then
-							firstProblems[#firstProblems + 1] = "seed " .. seed .. ": GenerateLayout is not deterministic"
-						end
-					end
-				end
-			end
-		end
-		local n = seeds
-		T.info(string.format(
-			"*%-12s %3d seeds | steps %d-%d (avg %.0f) | tokens %d-%d (avg %.0f) | max gap %.1f | max rise %.1f | dash gaps %d | plate bridges %d | hazard steps %d | %.1fs",
-			diff.Id, n, agg.steps[1], agg.steps[2], agg.steps[3] / n, agg.tokens[1], agg.tokens[2], agg.tokens[3] / n, agg.maxGap, agg.maxRise, agg.dash, agg.bridges, agg.hazards, Mock.RealClock() - t0
-		))
-		if agg.invalid == 0 and agg.bad == 0 then
-			T.ok(diff.Id .. ": " .. n .. " layouts valid and within the ARCHITECTURE.md guarantees")
-		else
-			T.fail(diff.Id .. ": " .. agg.bad .. " layout(s) break the guarantees, " .. agg.invalid .. " rejected by ValidateLayout", table.concat(firstProblems, "\n"))
-		end
-		if diff.Id == "Breeze" then
-			T.check(agg.dash == 0, "Breeze never needs a dash", agg.dash .. " DashGap steps")
-		end
-		if diff.DashGapChance and diff.DashGapChance >= 0.2 then
-			T.check(agg.dash > 0, diff.Id .. " produces dash gaps", "none in " .. n .. " seeds")
-		end
-		if diff.Id ~= "Breeze" then
-			T.check(agg.bridges > 0, diff.Id .. " produces PlateBridge co-op sections", "none in " .. n .. " seeds")
-		end
-		T.check(agg.hazards > 0, diff.Id .. " has hazards", "none in " .. n .. " seeds")
-	end
-	-- the validator must notice a broken layout
-	local layout = CB.GenerateLayout("Gale", 11)
-	local function clone(l)
-		local c = { DifficultyId = l.DifficultyId, Seed = l.Seed, Checkpoints = l.Checkpoints, TotalTokens = l.TotalTokens, Bounds = l.Bounds, Steps = {} }
-		for i, s in ipairs(l.Steps) do
-			local ns = {}
-			for k, v in pairs(s) do
-				ns[k] = v
-			end
-			c.Steps[i] = ns
-		end
-		return c
-	end
-	local far = clone(layout)
-	far.Steps[4].Pos = far.Steps[4].Pos + Vector3.new(0, 0, 40)
-	local okFar, valid = pcall(CB.ValidateLayout, far)
-	T.check(okFar and valid == false, "ValidateLayout rejects a layout with a 40 stud hole", "valid=" .. tostring(valid))
-	local high = clone(layout)
-	high.Steps[5].Pos = high.Steps[5].Pos + Vector3.new(0, 25, 0)
-	local okHigh, validHigh = pcall(CB.ValidateLayout, high)
-	T.check(okHigh and validHigh == false, "ValidateLayout rejects a 25 stud cliff", "valid=" .. tostring(validHigh))
-	flushErrors("layouts")
-end)
-
-----------------------------------------------------------------------------------------------------
--- scenario: build one course per difficulty and inspect the parts
+-- shared scenario state + helpers (the layout and course scenarios live in smoke_content.lua)
 ----------------------------------------------------------------------------------------------------
 local W = { lobbyInfo = nil, matches = 0 } -- world state shared by the scenarios
 
@@ -836,142 +599,6 @@ local function courseFolders()
 	end
 	return out
 end
-
-S.courses = guarded("courses", function()
-	local CB, Config = mod("CourseBuilder"), config()
-	local TokenService = mod("TokenService")
-	if TokenService and TokenService.Init then
-		pcall(TokenService.Init)
-	end
-	local holder = Instance.new("Folder")
-	holder.Name = "SmokeCourses"
-	holder.Parent = workspace
-	for index, diff in ipairs(Config.Difficulties) do
-		local layout = CB.GenerateLayout(diff.Id, 100 + index)
-		local origin = Vector3.new(0, 2000 + index * 500, 0)
-		local before = Mock.Stats()
-		local t0 = Mock.RealClock()
-		local ok, info = pcall(CB.Build, layout, origin, holder)
-		if not ok then
-			T.fail(diff.Id .. " course builds", tostring(info))
-		else
-			local took = Mock.RealClock() - t0
-			local folder = info.Folder
-			T.check(typeof(folder) == "Instance" and folder:IsA("Folder"), diff.Id .. ": CourseInfo.Folder is a Folder")
-			T.check(folder.Name == "Course_" .. tostring(layout.Seed), diff.Id .. ": folder is named Course_<seed>", folder.Name)
-			T.check(folder.Parent == holder, diff.Id .. ": folder is parented to the requested parent")
-			local parts = Mock.CountDescendants(folder, "BasePart")
-			T.check(parts <= 1500, diff.Id .. ": course has at most ~1500 parts", parts .. " parts")
-			T.info(string.format("*%-12s course: %d parts, %d steps, %d tokens, built in %.2fs", diff.Id, parts, info.TotalSteps or -1, info.TotalTokens or -1, took))
-			local welded = {}
-			for _, d in ipairs(folder:GetDescendants()) do
-				if d:IsA("WeldConstraint") and d.Part0 and d.Part1 and d.Part0.Anchored then
-					welded[d.Part1] = true
-				end
-			end
-			local loose = 0
-			for _, d in ipairs(folder:GetDescendants()) do
-				if d:IsA("BasePart") and not d.Anchored and not welded[d] then
-					loose = loose + 1
-				end
-			end
-			T.check(loose == 0, diff.Id .. ": every course part is Anchored (or welded to an anchored part)", loose .. " loose unanchored parts")
-			T.check(typeof(info.StartCFrame) == "CFrame", diff.Id .. ": StartCFrame is a CFrame")
-			if typeof(info.StartCFrame) == "CFrame" then
-				local startStep = layout.Steps[1]
-				local d = (info.StartCFrame.Position - (origin + startStep.Pos)).Magnitude
-				T.check(d < 14, diff.Id .. ": StartCFrame is on the start platform", "distance " .. fmt(d))
-			end
-			T.near(info.KillY, origin.Y - 60, 0.01, diff.Id .. ": KillY is origin.Y - 60")
-			T.eq(info.TotalTokens, layout.TotalTokens, diff.Id .. ": CourseInfo.TotalTokens matches the layout")
-			T.eq(info.TotalSteps, #layout.Steps, diff.Id .. ": CourseInfo.TotalSteps matches the layout")
-			-- checkpoints
-			local ncp = 0
-			for i, cp in pairs(info.Checkpoints or {}) do
-				ncp = ncp + 1
-				local okcp = typeof(cp.Part) == "Instance" and cp.Part:IsA("BasePart") and cp.Index == i and typeof(cp.SpawnCFrame) == "CFrame" and cp.Stage ~= nil
-				if not okcp then
-					T.fail(diff.Id .. ": Checkpoints[" .. tostring(i) .. "] has Part/Index/SpawnCFrame/Stage")
-				else
-					T.check(CollectionService:HasTag(cp.Part, Config.Tags.Checkpoint), diff.Id .. ": checkpoint " .. i .. " part is tagged Checkpoint")
-					T.eq(cp.Part:GetAttribute("CheckpointIndex"), i, diff.Id .. ": checkpoint " .. i .. " has attribute CheckpointIndex")
-				end
-			end
-			T.eq(ncp, diff.Stages, diff.Id .. ": number of checkpoints equals Stages")
-			T.check(typeof(info.Finish) == "Instance" and CollectionService:HasTag(info.Finish, Config.Tags.FinishPad), diff.Id .. ": Finish is tagged FinishPad")
-			-- tokens
-			local tokens = tagged(Config.Tags.CloudToken, folder)
-			T.eq(#tokens, layout.TotalTokens, diff.Id .. ": one tagged cloud token per layout token")
-			local badTokens = 0
-			for _, tk in ipairs(tokens) do
-				if tk.CanCollide or not tk.Anchored or type(tk:GetAttribute("Value")) ~= "number" then
-					badTokens = badTokens + 1
-				end
-			end
-			T.check(badTokens == 0, diff.Id .. ": tokens are anchored, non-colliding and carry a numeric Value", badTokens .. " bad tokens")
-			-- hazards declared by the layout exist as tagged parts
-			local expect = { SpinBarPlatform = "SpinBar", StormPlatform = "StormCloud", LightningPlatform = "LightningZone", Vanishing = "VanishCloud", Moving = "MovingCloud", Bounce = "BouncePad" }
-			local counts = {}
-			for _, st in ipairs(layout.Steps) do
-				local tag = expect[st.Kind]
-				if tag then
-					counts[tag] = (counts[tag] or 0) + 1
-				end
-			end
-			for kind, tagName in pairs(expect) do
-				local want = counts[tagName] or 0
-				local have = #tagged(Config.Tags[tagName], folder)
-				if want > 0 then
-					T.check(have >= want, diff.Id .. ": " .. want .. " " .. kind .. " step(s) produce tagged " .. tagName .. " parts", "found " .. have)
-				end
-			end
-			local plateSteps = 0
-			for _, st in ipairs(layout.Steps) do
-				if st.Kind == "PlateBridge" then
-					plateSteps = plateSteps + 1
-				end
-			end
-			if plateSteps > 0 then
-				T.check(#tagged(Config.Tags.PressurePlate, folder) >= plateSteps, diff.Id .. ": PlateBridge steps produce PressurePlate parts")
-				T.check(#tagged(Config.Tags.PlateBridge, folder) >= plateSteps, diff.Id .. ": PlateBridge steps produce PlateBridge parts")
-			end
-			-- dash hint sign before every DashGap
-			local dashSteps = 0
-			for _, st in ipairs(layout.Steps) do
-				if st.Kind == "DashGap" then
-					dashSteps = dashSteps + 1
-				end
-			end
-			if dashSteps > 0 then
-				local dashText = 0
-				for _, d in ipairs(folder:GetDescendants()) do
-					if d:IsA("TextLabel") and tostring(d.Text):upper():find("DASH") then
-						dashText = dashText + 1
-					end
-				end
-				T.check(dashText >= dashSteps, diff.Id .. ": every DashGap has a DASH! hint sign", dashText .. " DASH texts for " .. dashSteps .. " gaps")
-			end
-			-- START / FINISH signs
-			local hasStart, hasFinish = false, false
-			for _, d in ipairs(folder:GetDescendants()) do
-				if d:IsA("TextLabel") then
-					local t = tostring(d.Text):upper()
-					hasStart = hasStart or t:find("START") ~= nil
-					hasFinish = hasFinish or t:find("FINISH") ~= nil
-				end
-			end
-			T.check(hasStart and hasFinish, diff.Id .. ": START and FINISH signs exist")
-			-- a course must not need any module-level cleanup besides Destroy
-			local ok2, err2 = pcall(function()
-				folder:Destroy()
-			end)
-			T.check(ok2, diff.Id .. ": course folder can be destroyed", tostring(err2))
-		end
-		flushErrors("course build " .. diff.Id)
-		flushWarnings("course build " .. diff.Id)
-	end
-	holder:Destroy()
-end)
 
 ----------------------------------------------------------------------------------------------------
 -- scenario: boot the real Main.server.lua
@@ -1021,13 +648,56 @@ S.boot = guarded("boot", function()
 		end
 	end
 
-	-- lighting + global settings
+	-- lighting + global settings: the v2 "late-afternoon calm" look (ARCHITECTURE_V2.md section 6)
 	local Lighting = game:GetService("Lighting")
-	T.check(Lighting.ClockTime >= 16 and Lighting.ClockTime <= 19.5, "Lighting is golden hour", "ClockTime " .. tostring(Lighting.ClockTime))
-	for _, cls in ipairs({ "Atmosphere", "BloomEffect", "SunRaysEffect", "ColorCorrectionEffect", "DepthOfFieldEffect" }) do
+	T.near(Lighting.ClockTime, 15.2, 1.0, "Lighting.ClockTime is late afternoon (~15.2)")
+	T.near(Lighting.Brightness, 1.5, 0.45, "Lighting.Brightness is lowered (~1.5)")
+	local function rgb255(c)
+		return c.R * 255, c.G * 255, c.B * 255
+	end
+	local function nearColor(c, r, g, b, tol, name)
+		local cr, cg, cb = rgb255(c)
+		T.check(math.abs(cr - r) <= tol and math.abs(cg - g) <= tol and math.abs(cb - b) <= tol, name, string.format("got %.0f,%.0f,%.0f expected ~%d,%d,%d", cr, cg, cb, r, g, b))
+	end
+	nearColor(Lighting.Ambient, 84, 96, 128, 24, "Lighting.Ambient is a dim blue (~84,96,128)")
+	nearColor(Lighting.OutdoorAmbient, 108, 120, 152, 24, "Lighting.OutdoorAmbient is a dim blue (~108,120,152)")
+	T.check(Lighting.ExposureCompensation <= -0.1 and Lighting.ExposureCompensation >= -0.6, "Lighting.ExposureCompensation is slightly negative (~-0.3)", tostring(Lighting.ExposureCompensation))
+	T.near(Lighting.EnvironmentDiffuseScale, 0.5, 0.25, "Lighting.EnvironmentDiffuseScale ~0.5")
+	T.near(Lighting.EnvironmentSpecularScale, 0.4, 0.25, "Lighting.EnvironmentSpecularScale ~0.4")
+	T.eq(Lighting.GlobalShadows, true, "Lighting.GlobalShadows is on")
+	T.near(Lighting.ShadowSoftness, 0.25, 0.15, "Lighting.ShadowSoftness ~0.25 (soft shadows)")
+	for _, cls in ipairs({ "Atmosphere", "BloomEffect", "SunRaysEffect", "ColorCorrectionEffect" }) do
 		T.check(Lighting:FindFirstChildOfClass(cls) ~= nil, "Lighting has " .. cls)
 	end
 	T.check(Lighting:FindFirstChildOfClass("Sky") ~= nil, "Lighting has a Sky")
+	local atm = Lighting:FindFirstChildOfClass("Atmosphere")
+	if atm then
+		T.near(atm.Density, 0.3, 0.12, "Atmosphere.Density ~0.3")
+		T.near(atm.Offset, 0.25, 0.15, "Atmosphere.Offset ~0.25")
+		T.near(atm.Glare, 0.2, 0.2, "Atmosphere.Glare ~0.2")
+		T.near(atm.Haze, 1.2, 0.8, "Atmosphere.Haze ~1.2")
+		local cr, cg, cb = rgb255(atm.Color)
+		T.check(cb >= cr, "Atmosphere.Color is blue-grey", string.format("%.0f,%.0f,%.0f", cr, cg, cb))
+		local dr, dg, db = rgb255(atm.Decay)
+		T.check(dr >= db, "Atmosphere.Decay is a soft peach", string.format("%.0f,%.0f,%.0f", dr, dg, db))
+	end
+	local bloom = Lighting:FindFirstChildOfClass("BloomEffect")
+	if bloom then
+		T.check(bloom.Intensity <= 0.3 and bloom.Threshold >= 1.2, "Bloom is subtle (Intensity <= 0.3, Threshold >= 1.2)", "Intensity " .. bloom.Intensity .. " Threshold " .. bloom.Threshold)
+		T.near(bloom.Size, 16, 10, "Bloom.Size ~16")
+	end
+	local rays = Lighting:FindFirstChildOfClass("SunRaysEffect")
+	if rays then
+		T.check(rays.Intensity <= 0.1, "SunRays are faint (<= 0.1)", tostring(rays.Intensity))
+	end
+	local cc = Lighting:FindFirstChildOfClass("ColorCorrectionEffect")
+	if cc then
+		T.near(cc.Contrast, 0.14, 0.12, "ColorCorrection.Contrast ~0.14")
+		T.near(cc.Saturation, 0.08, 0.12, "ColorCorrection.Saturation ~0.08 (not neon)")
+		T.near(cc.Brightness, -0.03, 0.06, "ColorCorrection.Brightness ~-0.03")
+	end
+	local dof = Lighting:FindFirstChildOfClass("DepthOfFieldEffect")
+	T.check(dof == nil or dof.Enabled == false or (dof.FarIntensity <= 0.2 and dof.NearIntensity <= 0.2), "DepthOfField is off or extremely subtle")
 	T.near(workspace.Gravity, Config.Physics.Gravity, 0.001, "workspace.Gravity == Config.Physics.Gravity")
 	T.eq(workspace.FallenPartsDestroyHeight, -2000, "FallenPartsDestroyHeight is -2000")
 	T.eq(Players.CharacterAutoLoads, true, "Players.CharacterAutoLoads is true")
@@ -1045,33 +715,119 @@ S.boot = guarded("boot", function()
 end)
 
 ----------------------------------------------------------------------------------------------------
--- scenario: the lobby
+-- scenario: the lobby (v2: five gates, 16 spots, shop island)
 ----------------------------------------------------------------------------------------------------
+-- World palette rules (ARCHITECTURE_V2.md): no pure-white parts, Neon only for small accents.
+-- Returns { parts = n, white = {paths}, neon = {paths}, neonCount = n }.
+local function paletteAudit(container, limits)
+	limits = limits or {}
+	local maxNeonFace = limits.maxNeonFace or 160 -- studs^2 of the largest face of an opaque Neon part
+	local out = { parts = 0, white = {}, bigNeon = {}, neonCount = 0, whiteCount = 0, bigNeonCount = 0 }
+	for _, d in ipairs(container:GetDescendants()) do
+		if d:IsA("BasePart") and not d:IsA("Terrain") then
+			out.parts = out.parts + 1
+			local c = d.Color
+			local size = d.Size
+			if c.R >= 0.975 and c.G >= 0.975 and c.B >= 0.975 and d.Transparency < 0.9 and math.max(size.X, size.Y, size.Z) >= 2.5 then
+				out.whiteCount = out.whiteCount + 1
+				if #out.white < 5 then
+					out.white[#out.white + 1] = d:GetFullName() .. " " .. tostring(size)
+				end
+			end
+			if d.Material == Enum.Material.Neon then
+				out.neonCount = out.neonCount + 1
+				local a, b, cc = size.X, size.Y, size.Z
+				local face = math.max(a * b, a * cc, b * cc)
+				if d.Shape == Enum.PartType.Ball or d.Shape == Enum.PartType.Cylinder then
+					-- a ball / cylinder shows its biggest circle, not the bounding face
+					face = math.max(a, b, cc) ^ 2 * 0.785
+				end
+				if face > maxNeonFace and d.Transparency < 0.5 then
+					out.bigNeonCount = out.bigNeonCount + 1
+					if #out.bigNeon < 5 then
+						out.bigNeon[#out.bigNeon + 1] = d:GetFullName() .. " " .. tostring(size)
+					end
+				end
+			end
+		end
+	end
+	return out
+end
+
+local function shortPath(inst)
+	local name = inst:GetFullName()
+	return (name:gsub("^Game%.", ""))
+end
+
+local function textsUnder(inst)
+	local out = {}
+	for _, d in ipairs(inst:GetDescendants()) do
+		if d:IsA("TextLabel") or d:IsA("TextButton") then
+			out[#out + 1] = tostring(d.Text)
+		end
+	end
+	return out
+end
+
+local function plainText(list)
+	return (table.concat(list, "\n"):gsub("<[^>]*>", ""))
+end
+
+local function countStars(list)
+	local n = 0
+	for _, t in ipairs(list) do
+		local _, c = tostring(t):gsub("\226\152\133", "")
+		n = math.max(n, c)
+	end
+	return n
+end
+
+local function colorDistance255(a, b)
+	return math.sqrt(((a.R - b.R) * 255) ^ 2 + ((a.G - b.G) * 255) ^ 2 + ((a.B - b.B) * 255) ^ 2)
+end
+
+-- Is there a collidable surface right under `pos` (within `depth` studs)?
+local function groundBelow(pos, depth)
+	local params = RaycastParams.new()
+	params.RespectCanCollide = true
+	local hit = workspace:Raycast(pos + Vector3.new(0, 3, 0), Vector3.new(0, -(depth or 14), 0), params)
+	return hit ~= nil, hit
+end
+
 S.lobby = guarded("lobby", function()
 	local Config = config()
 	local info = W.lobbyInfo
 	if not T.check(type(info) == "table", "LobbyBuilder.Build() returned a LobbyInfo table", "boot did not run or Main did not call LobbyBuilder.Build") then
 		return
 	end
-	T.check(typeof(info.Folder) == "Instance" and info.Folder.Name == "NimbusLobby" and info.Folder.Parent == workspace, "LobbyInfo.Folder is workspace.NimbusLobby")
+	local folder = info.Folder
+	T.check(typeof(folder) == "Instance" and folder.Name == "NimbusLobby" and folder.Parent == workspace, "LobbyInfo.Folder is workspace.NimbusLobby")
 	T.check(typeof(info.SpawnCFrame) == "CFrame", "LobbyInfo.SpawnCFrame is a CFrame")
 	if typeof(info.SpawnCFrame) == "CFrame" then
 		local p = info.SpawnCFrame.Position
 		local horiz = math.sqrt((p.X - Config.Lobby.Origin.X) ^ 2 + (p.Z - Config.Lobby.Origin.Z) ^ 2)
 		T.check(horiz <= Config.Lobby.PlazaRadius, "spawn is on the plaza", "horizontal distance " .. fmt(horiz))
 		T.check(math.abs(p.Y - (Config.Lobby.Origin.Y + 3)) <= 4, "spawn is ~3 studs above the plaza surface", "y=" .. fmt(p.Y))
+		T.check(groundBelow(p, 12), "the plaza spawn stands on a solid surface")
 	end
-	local folder = info.Folder
+	-- size + budget
 	local parts = Mock.CountDescendants(folder, "BasePart")
-	T.check(parts < 900, "lobby has fewer than 900 parts", parts .. " parts")
-	T.info("*lobby: " .. parts .. " parts, " .. Mock.CountDescendants(folder) .. " instances")
-	local loose = 0
+	T.check(parts < 2500, "lobby has fewer than 2500 parts", parts .. " parts")
+	T.check(parts > 800, "the v2 lobby is big (more than 800 parts)", parts .. " parts")
+	T.info("*lobby: " .. parts .. " parts, " .. Mock.CountDescendants(folder) .. " instances, " .. Mock.CountDescendants(folder, "ParticleEmitter") .. " emitters, " .. Mock.CountDescendants(folder, "PointLight") .. " lights")
+	local loose, bigCasters = 0, 0
 	for _, d in ipairs(folder:GetDescendants()) do
-		if d:IsA("BasePart") and not d.Anchored then
-			loose = loose + 1
+		if d:IsA("BasePart") then
+			if not d.Anchored then
+				loose = loose + 1
+			end
+			if d.CastShadow and math.max(d.Size.X, d.Size.Y, d.Size.Z) < 1.5 then
+				bigCasters = bigCasters + 1
+			end
 		end
 	end
 	T.check(loose == 0, "all lobby parts are Anchored", loose .. " unanchored")
+	T.check(bigCasters <= parts * 0.05, "small lobby parts have CastShadow = false (at most 5% exceptions)", bigCasters .. " small parts cast shadows")
 	T.check(#tagged(Config.Tags.CloudToken, folder) == 0, "decorative lobby tokens are not tagged CloudToken (no collection in the lobby)")
 	local spawns = 0
 	for _, d in ipairs(workspace:GetDescendants()) do
@@ -1080,21 +836,29 @@ S.lobby = guarded("lobby", function()
 		end
 	end
 	T.eq(spawns, 0, "no SpawnLocation is used (players are placed with SpawnCFrame)")
-	local neon = 0
-	for _, d in ipairs(folder:GetDescendants()) do
-		if d:IsA("BasePart") and d.Material == Enum.Material.Neon then
-			neon = neon + 1
-		end
-	end
-	T.check(neon >= 6 + 3, "lobby has neon rainbow arcs and portal rings", neon .. " neon parts")
+	-- palette
+	local pal = paletteAudit(folder)
+	T.check(pal.whiteCount == 0, "no lobby part is pure white", pal.whiteCount .. " parts, e.g. " .. table.concat(pal.white, "; "))
+	T.check(pal.bigNeonCount == 0, "Neon is used for small accents only (no big opaque Neon surfaces)", pal.bigNeonCount .. " big parts, e.g. " .. table.concat(pal.bigNeon, "; "))
+	T.check(pal.neonCount >= 6, "lobby has neon accents (arch, portal rings)", pal.neonCount .. " neon parts")
 	T.check(Mock.CountDescendants(folder, "ParticleEmitter") >= 3, "lobby has particle emitters (portal swirls, fireflies)")
 	T.check(Mock.CountDescendants(folder, "PointLight") >= 3, "lobby has point lights (portals, lanterns)")
-	-- portals
+	local prompts = Mock.CountDescendants(folder, "ProximityPrompt")
+	T.check(prompts >= #Config.Roulettes + 1, "PetService / ItemService created the shop ProximityPrompts", prompts .. " prompts")
+
+	-- portals: one per difficulty
+	local nPortals = 0
+	for _ in pairs(info.Portals or {}) do
+		nPortals = nPortals + 1
+	end
+	T.eq(nPortals, #Config.Difficulties, "LobbyInfo.Portals holds exactly one portal per difficulty")
+	for _, id in ipairs(CONTRACT.v2.oldDifficultyIds) do
+		T.check(info.Portals[id] == nil, "no portal for the removed difficulty " .. id)
+	end
+	local lastAngle
 	for _, diff in ipairs(Config.Difficulties) do
 		local p = info.Portals and info.Portals[diff.Id]
-		if not T.check(type(p) == "table", "portal " .. diff.Id .. " exists in LobbyInfo.Portals") then
-			goto_next = true
-		else
+		if T.check(type(p) == "table", "portal " .. diff.Id .. " exists in LobbyInfo.Portals") then
 			T.eq(p.Id, diff.Id, diff.Id .. ": PortalInfo.Id")
 			local zone = p.Zone
 			if T.check(typeof(zone) == "Instance" and zone:IsA("BasePart"), diff.Id .. ": Zone is a BasePart") then
@@ -1103,7 +867,25 @@ S.lobby = guarded("lobby", function()
 				T.check(zone:IsDescendantOf(folder), diff.Id .. ": Zone lives in the lobby folder")
 				T.check(typeof(p.Center) == "Vector3" and (p.Center - zone.Position).Magnitude < 3, diff.Id .. ": Center is the zone centre")
 				local horiz = math.sqrt((zone.Position.X - Config.Lobby.Origin.X) ^ 2 + (zone.Position.Z - Config.Lobby.Origin.Z) ^ 2)
-				T.check(math.abs(horiz - Config.Lobby.PortalRingRadius) <= 10, diff.Id .. ": portal sits on the ring (radius " .. Config.Lobby.PortalRingRadius .. ")", "horizontal distance " .. fmt(horiz))
+				T.check(math.abs(horiz - Config.Lobby.PortalRingRadius) <= 12, diff.Id .. ": portal sits on the ring (radius " .. Config.Lobby.PortalRingRadius .. ")", "horizontal distance " .. fmt(horiz))
+				T.check(groundBelow(zone.Position, 14), diff.Id .. ": the portal pad has solid ground under it")
+				-- gates are ordered Easy -> Saint around the plaza
+				local angle = math.atan2(zone.Position.Z - Config.Lobby.Origin.Z, zone.Position.X - Config.Lobby.Origin.X)
+				if lastAngle ~= nil then
+					T.check(math.abs(angle - lastAngle) > 0.2, diff.Id .. ": portals do not overlap each other")
+				end
+				lastAngle = angle
+				-- a Neon trim in the difficulty colour near the gate
+				local best = 1e9
+				for _, d in ipairs(folder:GetDescendants()) do
+					if d:IsA("BasePart") and d.Material == Enum.Material.Neon then
+						local dx, dz = d.Position.X - zone.Position.X, d.Position.Z - zone.Position.Z
+						if dx * dx + dz * dz < 18 * 18 then
+							best = math.min(best, colorDistance255(d.Color, diff.Color))
+						end
+					end
+				end
+				T.check(best <= 70, diff.Id .. ": the gate has a Neon trim in the difficulty colour", "closest neon colour distance " .. fmt(best, 0))
 			end
 			T.check(typeof(p.Billboard) == "Instance" and p.Billboard:IsA("BillboardGui"), diff.Id .. ": Billboard is a BillboardGui")
 			for _, labelName in ipairs({ "TitleLabel", "CountLabel", "StatusLabel" }) do
@@ -1111,27 +893,103 @@ S.lobby = guarded("lobby", function()
 				T.check(typeof(l) == "Instance" and l:IsA("TextLabel") and l:IsDescendantOf(p.Billboard), diff.Id .. ": " .. labelName .. " is a TextLabel inside the Billboard")
 			end
 			if p.TitleLabel then
-				T.check(tostring(p.TitleLabel.Text):lower():find(diff.DisplayName:lower(), 1, true) ~= nil or tostring(p.TitleLabel.Text):lower():find(diff.Id:lower(), 1, true) ~= nil, diff.Id .. ": title shows the difficulty name", p.TitleLabel.Text)
+				T.check(tostring(p.TitleLabel.Text):lower():find(diff.DisplayName:lower(), 1, true) ~= nil, diff.Id .. ": title shows the difficulty name", p.TitleLabel.Text)
 			end
-			-- star display
-			local stars = 0
-			for _, d in ipairs(p.Billboard and p.Billboard:GetDescendants() or {}) do
-				if d:IsA("TextLabel") then
-					local _, n = tostring(d.Text):gsub("\226\152\133", "")
-					stars = math.max(stars, n)
+			if p.CountLabel then
+				T.check(tostring(p.CountLabel.Text):find("0") ~= nil and tostring(p.CountLabel.Text):find(tostring(Config.Match.MaxPlayers)) ~= nil, diff.Id .. ": CountLabel starts at '0 / " .. Config.Match.MaxPlayers .. " players'", p.CountLabel.Text)
+			end
+			T.eq(countStars(textsUnder(p.Billboard)), diff.Stars, diff.Id .. ": billboard shows " .. diff.Stars .. " star(s)")
+		end
+	end
+
+	-- spots: personal cloud homes on the outer ring
+	local nSpots, maxIndex = 0, 0
+	for index in pairs(info.Spots or {}) do
+		nSpots = nSpots + 1
+		maxIndex = math.max(maxIndex, index)
+	end
+	T.eq(nSpots, Config.Lobby.SpotCount, "LobbyInfo.Spots has Config.Lobby.SpotCount (" .. Config.Lobby.SpotCount .. ") spots")
+	T.eq(maxIndex, Config.Lobby.SpotCount, "spot indices run 1.." .. Config.Lobby.SpotCount)
+	local centres = {}
+	local spotProblems = T.tally("every SpotInfo has Index/Folder/Center/SpawnCFrame/NameLabel/SubLabel/PodiumCFrame on solid ground")
+	local ringProblems = T.tally("spots stand on the outer ring (radius " .. Config.Lobby.SpotRingRadius .. ")")
+	local freeProblems = T.tally("unowned spots read 'Free spot' / 'Step in to claim'")
+	for i = 1, Config.Lobby.SpotCount do
+		local sp = info.Spots and info.Spots[i]
+		if sp then
+			local ok = sp.Index == i and typeof(sp.Folder) == "Instance" and sp.Folder:IsDescendantOf(folder) and typeof(sp.Center) == "Vector3" and typeof(sp.SpawnCFrame) == "CFrame"
+				and typeof(sp.NameLabel) == "Instance" and sp.NameLabel:IsA("TextLabel") and typeof(sp.SubLabel) == "Instance" and sp.SubLabel:IsA("TextLabel") and typeof(sp.PodiumCFrame) == "CFrame"
+			spotProblems:case(ok, "spot " .. i .. " has a malformed SpotInfo")
+			if ok then
+				spotProblems:case(groundBelow(sp.SpawnCFrame.Position, 14), "spot " .. i .. ": no solid ground under SpawnCFrame")
+				spotProblems:case((sp.PodiumCFrame.Position - sp.Center).Magnitude < 40, "spot " .. i .. ": podium is far from the spot centre")
+				spotProblems:case(sp.NameLabel:IsDescendantOf(sp.Folder) or sp.NameLabel:IsDescendantOf(folder), "spot " .. i .. ": nameplate is outside the lobby")
+				local horiz = math.sqrt((sp.Center.X - Config.Lobby.Origin.X) ^ 2 + (sp.Center.Z - Config.Lobby.Origin.Z) ^ 2)
+				ringProblems:case(math.abs(horiz - Config.Lobby.SpotRingRadius) <= 30, "spot " .. i .. " is " .. fmt(horiz) .. " from the origin")
+				freeProblems:case(sp.NameLabel.Text == "Free spot" and sp.SubLabel.Text == "Step in to claim", "spot " .. i .. " reads '" .. sp.NameLabel.Text .. "' / '" .. sp.SubLabel.Text .. "'")
+				for j = 1, #centres do
+					if (centres[j] - sp.Center).Magnitude < 20 then
+						spotProblems:case(false, "spots " .. j .. " and " .. i .. " overlap")
+					end
+				end
+				centres[#centres + 1] = sp.Center
+				T.check(sp.SpawnCFrame.Position.Y > Config.Lobby.KillY + 40, "spot " .. i .. ": spawn is well above the lobby kill plane")
+			end
+		end
+	end
+	spotProblems:report()
+	ringProblems:report()
+	freeProblems:report()
+
+	-- shop island: four roulette machines + the item counter
+	local shop = info.Shop
+	if T.check(type(shop) == "table", "LobbyInfo.Shop exists") then
+		local shopCentre = Config.Lobby.Origin + Config.Lobby.ShopOffset
+		for _, r in ipairs(Config.Roulettes) do
+			local m = shop.Roulettes and shop.Roulettes[r.Id]
+			if T.check(type(m) == "table", "roulette machine " .. r.Id .. " exists") then
+				T.eq(m.Id, r.Id, r.Id .. ": machine Id")
+				T.check(typeof(m.PromptPart) == "Instance" and m.PromptPart:IsA("BasePart"), r.Id .. ": PromptPart is a BasePart")
+				T.check(typeof(m.Center) == "Vector3" and typeof(m.Model) == "Instance", r.Id .. ": Center and Model are set")
+				if typeof(m.Center) == "Vector3" then
+					local d = math.sqrt((m.Center.X - shopCentre.X) ^ 2 + (m.Center.Z - shopCentre.Z) ^ 2)
+					T.check(d <= 60, r.Id .. ": the machine stands on the shop island", "distance " .. fmt(d))
+					T.check(groundBelow(m.PromptPart.Position, 14), r.Id .. ": ground under the machine's prompt part")
+				end
+				if typeof(m.Model) == "Instance" then
+					local text = plainText(textsUnder(m.Model))
+					T.check(text:lower():find(r.DisplayName:lower():gsub("%s+", "%%s+")) ~= nil or text:lower():find(r.Id:lower(), 1, true) ~= nil, r.Id .. ": the machine shows its name", text)
+					local priceText = tostring(r.Price):reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", "")
+					T.check(text:find(priceText, 1, true) ~= nil or text:find(tostring(r.Price), 1, true) ~= nil, r.Id .. ": the machine shows its price " .. priceText, text)
+					local best = 1e9
+					for _, d in ipairs(m.Model:GetDescendants()) do
+						if d:IsA("BasePart") then
+							best = math.min(best, colorDistance255(d.Color, r.Color))
+						end
+					end
+					T.check(best <= 60, r.Id .. ": the machine is built in the roulette colour", "closest part colour distance " .. fmt(best, 0))
+				end
+				local prompt = m.PromptPart:FindFirstChildOfClass("ProximityPrompt")
+				if T.check(prompt ~= nil, r.Id .. ": PetService put a ProximityPrompt on the PromptPart") then
+					T.eq(prompt.ActionText, "Open", r.Id .. ": prompt ActionText")
+					T.eq(prompt.ObjectText, r.DisplayName, r.Id .. ": prompt ObjectText")
+					T.eq(prompt.HoldDuration, 0, r.Id .. ": prompt HoldDuration")
+					T.eq(prompt.MaxActivationDistance, 12, r.Id .. ": prompt MaxActivationDistance")
+					T.eq(prompt.RequiresLineOfSight, false, r.Id .. ": prompt RequiresLineOfSight")
 				end
 			end
-			T.check(stars == diff.Stars, diff.Id .. ": billboard shows " .. diff.Stars .. " star(s)", "found " .. stars)
+		end
+		local stall = shop.ItemShop
+		if T.check(type(stall) == "table", "the item shop counter exists") then
+			T.check(typeof(stall.PromptPart) == "Instance" and stall.PromptPart:IsA("BasePart"), "ItemShop.PromptPart is a BasePart")
+			T.check(typeof(stall.Center) == "Vector3" and typeof(stall.Model) == "Instance", "ItemShop Center and Model are set")
+			local prompt = stall.PromptPart and stall.PromptPart:FindFirstChildOfClass("ProximityPrompt")
+			T.check(prompt ~= nil and prompt.HoldDuration == 0, "ItemService put a ProximityPrompt on the item counter")
 		end
 	end
+
 	-- signs
-	local texts = {}
-	for _, d in ipairs(folder:GetDescendants()) do
-		if d:IsA("TextLabel") then
-			texts[#texts + 1] = tostring(d.Text)
-		end
-	end
-	local all = table.concat(texts, "\n"):upper()
+	local all = plainText(textsUnder(folder)):upper()
 	T.check(all:find(Config.GameName:upper(), 1, true) ~= nil, "welcome sign shows the game name '" .. Config.GameName .. "'")
 	for _, kw in ipairs({ "SHIFT", "DASH", "SPACE", "PORTAL" }) do
 		T.check(all:find(kw, 1, true) ~= nil, "'How to play' board mentions " .. kw)
@@ -1454,7 +1312,13 @@ S.players = guarded("players", function()
 		return alice.Character ~= nil and hum(alice) ~= nil and hum(alice).Health > 0
 	end, Config.Match and 12 or 12), "a reset character respawns")
 	advance(0.8)
-	T.check(root(alice) ~= nil and planar(root(alice).Position, info.SpawnCFrame.Position) <= 10, "the respawn lands in the lobby")
+	local SpotService = mod("SpotService")
+	local spot = SpotService and SpotService.GetSpot(alice)
+	if T.check(spot ~= nil, "Alice owns a lobby spot (assigned after her profile loaded)") then
+		T.check(root(alice) ~= nil and planar(root(alice).Position, spot.SpawnCFrame.Position) <= 10, "a lobby respawn lands at the owner's own spot", root(alice) and fmt(planar(root(alice).Position, spot.SpawnCFrame.Position)))
+	else
+		T.check(root(alice) ~= nil and planar(root(alice).Position, info.SpawnCFrame.Position) <= 10, "the respawn lands in the lobby")
+	end
 	T.near(hum(alice).MaxHealth, Config.Physics.MaxHealth, 0.01, "respawned character gets the Config stats again")
 	flushErrors("players")
 	flushWarnings("players")
@@ -1484,17 +1348,39 @@ S.portals = guarded("portals", function()
 	end
 	leavePortalArea(alice)
 	advance(0.6)
-	local info = W.lobbyInfo.Portals.Gale
+	-- every one of the five gates forms its own party (no hard-coded ids in PortalService)
+	for _, diff in ipairs(Config.Difficulties) do
+		local mark0 = logSize()
+		enterPortal(alice, diff.Id)
+		advance(1.3)
+		for _, other in ipairs(Config.Difficulties) do
+			local expect = (other.Id == diff.Id) and 1 or 0
+			T.eq(#PortalService.GetParty(other.Id).Players, expect, diff.Id .. ": standing in the " .. diff.Id .. " gate fills only that party (" .. other.Id .. ")")
+		end
+		local entries0 = remotesFor("PartyState", alice.UserId, mark0)
+		local last0 = entries0[#entries0]
+		if T.check(last0 ~= nil and last0.args[1] ~= nil, diff.Id .. ": the member receives PartyState") then
+			local st0 = last0.args[1]
+			T.eq(st0.PortalId, diff.Id, diff.Id .. ": PartyState.PortalId")
+			T.eq(st0.DifficultyName, diff.DisplayName, diff.Id .. ": PartyState.DifficultyName")
+			T.check(st0.Color == diff.Color, diff.Id .. ": PartyState.Color is the difficulty colour")
+		end
+		T.check(tostring(W.lobbyInfo.Portals[diff.Id].CountLabel.Text):find("1") ~= nil, diff.Id .. ": its CountLabel shows 1 player", W.lobbyInfo.Portals[diff.Id].CountLabel.Text)
+		leavePortalArea(alice)
+		advance(0.8)
+		T.eq(#PortalService.GetParty(diff.Id).Players, 0, diff.Id .. ": leaving empties the party")
+	end
+	local info = W.lobbyInfo.Portals.Medium
 	-- stepping onto the pad joins the party
 	local mark = logSize()
-	enterPortal(alice, "Gale")
+	enterPortal(alice, "Medium")
 	advance(0.6)
-	local party = PortalService.GetParty("Gale")
+	local party = PortalService.GetParty("Medium")
 	T.check(#party.Players == 1 and party.Players[1] == alice, "standing in the zone joins the portal party")
 	T.check(type(party.Countdown) == "number" and party.Countdown > 0 and party.Countdown <= Config.Match.PartyCountdown, "the party countdown starts at PartyCountdown", tostring(party.Countdown))
 	T.check(tostring(info.CountLabel.Text):find("1") and tostring(info.CountLabel.Text):find(tostring(Config.Match.MaxPlayers)), "CountLabel shows 1 / " .. Config.Match.MaxPlayers, info.CountLabel.Text)
 	T.check(tostring(info.StatusLabel.Text):lower():find("start") ~= nil, "StatusLabel shows the countdown", info.StatusLabel.Text)
-	local others = PortalService.GetParty("Breeze")
+	local others = PortalService.GetParty("Easy")
 	T.eq(#others.Players, 0, "other portals stay empty")
 	advance(1.2)
 	local entries = remotesFor("PartyState", alice.UserId, mark)
@@ -1503,7 +1389,7 @@ S.portals = guarded("portals", function()
 	if last and last.args[1] then
 		local problems = V.partyState(last.args[1])
 		T.check(#problems == 0, "PartyState payload matches ARCHITECTURE.md", table.concat(problems, ", "))
-		T.eq(last.args[1].PortalId, "Gale", "PartyState.PortalId")
+		T.eq(last.args[1].PortalId, "Medium", "PartyState.PortalId")
 		T.eq(last.args[1].Max, Config.Match.MaxPlayers, "PartyState.Max")
 		T.check(#last.args[1].Players == 1 and last.args[1].Players[1].UserId == alice.UserId, "PartyState lists the member")
 	end
@@ -1511,47 +1397,47 @@ S.portals = guarded("portals", function()
 	mark = logSize()
 	leavePortalArea(alice)
 	advance(0.8)
-	T.eq(#PortalService.GetParty("Gale").Players, 0, "walking out of the zone leaves the party")
+	T.eq(#PortalService.GetParty("Medium").Players, 0, "walking out of the zone leaves the party")
 	local gone = remotesFor("PartyState", alice.UserId, mark)
 	T.check(#gone >= 1 and gone[#gone].args[1] == nil and gone[#gone].args.n >= 1, "PartyState(nil) is sent when leaving")
 	T.check(tostring(info.CountLabel.Text):find("0") ~= nil, "CountLabel back to 0 players", info.CountLabel.Text)
 	-- the Leave button: removed + lockout + moved off the pad
-	enterPortal(alice, "Gale")
+	enterPortal(alice, "Medium")
 	advance(0.6)
-	T.eq(#PortalService.GetParty("Gale").Players, 1, "re-entering joins again")
+	T.eq(#PortalService.GetParty("Medium").Players, 1, "re-entering joins again")
 	Mock.FromClient(remoteFolder().LeaveParty, alice)
 	advance(0.3)
-	T.eq(#PortalService.GetParty("Gale").Players, 0, "LeaveParty removes the player from the party")
-	local d = planar(root(alice).Position, W.lobbyInfo.Portals.Gale.Center)
+	T.eq(#PortalService.GetParty("Medium").Players, 0, "LeaveParty removes the player from the party")
+	local d = planar(root(alice).Position, W.lobbyInfo.Portals.Medium.Center)
 	T.check(d >= 8, "LeaveParty moves the player ~12 studs away from the portal", "distance " .. fmt(d))
-	enterPortal(alice, "Gale")
+	enterPortal(alice, "Medium")
 	advance(1.0)
-	T.eq(#PortalService.GetParty("Gale").Players, 0, "the 3 s re-join lockout is respected")
+	T.eq(#PortalService.GetParty("Medium").Players, 0, "the 3 s re-join lockout is respected")
 	leavePortalArea(alice)
 	advance(3)
-	enterPortal(alice, "Gale")
+	enterPortal(alice, "Medium")
 	advance(0.8)
-	T.eq(#PortalService.GetParty("Gale").Players, 1, "after the lockout the player can join again")
+	T.eq(#PortalService.GetParty("Medium").Players, 1, "after the lockout the player can join again")
 	PortalService.RemovePlayer(alice)
-	T.eq(#PortalService.GetParty("Gale").Players, 0, "PortalService.RemovePlayer")
+	T.eq(#PortalService.GetParty("Medium").Players, 0, "PortalService.RemovePlayer")
 	leavePortalArea(alice)
 	advance(0.6)
 	-- a full party: shortened countdown + 5th player is told it is full
 	local four = freshPlayers(Config.Match.MaxPlayers, "Climber")
 	for _, p in ipairs(four) do
-		enterPortal(p, "Thunderstorm")
+		enterPortal(p, "Saint")
 		advance(0.3)
 	end
 	advance(0.5)
-	local tp = PortalService.GetParty("Thunderstorm")
+	local tp = PortalService.GetParty("Saint")
 	T.eq(#tp.Players, Config.Match.MaxPlayers, "a party holds MaxPlayers")
 	T.check(tp.Countdown ~= nil and tp.Countdown <= Config.Match.FullPartyCountdown + 1, "a full party uses the short countdown", tostring(tp.Countdown))
-	T.check(tostring(W.lobbyInfo.Portals.Thunderstorm.StatusLabel.Text):lower():find("full") ~= nil, "StatusLabel says the party is full", W.lobbyInfo.Portals.Thunderstorm.StatusLabel.Text)
+	T.check(tostring(W.lobbyInfo.Portals.Saint.StatusLabel.Text):lower():find("full") ~= nil, "StatusLabel says the party is full", W.lobbyInfo.Portals.Saint.StatusLabel.Text)
 	local fifth = freshPlayers(1, "Late")[1]
 	mark = logSize()
-	enterPortal(fifth, "Thunderstorm")
+	enterPortal(fifth, "Saint")
 	advance(0.8)
-	T.eq(#PortalService.GetParty("Thunderstorm").Players, Config.Match.MaxPlayers, "a 5th player cannot join a full party")
+	T.eq(#PortalService.GetParty("Saint").Players, Config.Match.MaxPlayers, "a 5th player cannot join a full party")
 	T.check(notified(fifth, "full", "bad", mark), "the 5th player gets a 'Party is full' toast")
 	-- the party launches a match
 	local started = waitFor(function()
@@ -1560,9 +1446,9 @@ S.portals = guarded("portals", function()
 	T.check(started, "the party launches a match when the countdown ends")
 	if started then
 		local m = MS().GetMatchOf(four[1])
-		T.eq(m.DifficultyId, "Thunderstorm", "the match uses the portal's difficulty")
+		T.eq(m.DifficultyId, "Saint", "the match uses the portal's difficulty")
 		T.eq(#m.Players, Config.Match.MaxPlayers, "all four party members are in the match")
-		T.eq(#PortalService.GetParty("Thunderstorm").Players, 0, "the party is cleared after launch")
+		T.eq(#PortalService.GetParty("Saint").Players, 0, "the party is cleared after launch")
 		T.check(m.Slot == 1, "first match uses slot 1", tostring(m.Slot))
 		for _, p in ipairs(four) do
 			T.eq(p:GetAttribute("InMatch"), true, p.Name .. ": InMatch = true after launch")
@@ -1615,14 +1501,14 @@ S.damage_rules = guarded("damage_rules", function()
 	local Config = config()
 	local players = freshPlayers(2, "Dmg")
 	local a, b = players[1], players[2]
-	local m = startMatch("Breeze", players)
-	if not T.check(m ~= nil, "MatchService.StartMatch('Breeze', {a, b}) returns a match") then
+	local m = startMatch("Easy", players)
+	if not T.check(m ~= nil, "MatchService.StartMatch('Easy', {a, b}) returns a match") then
 		removePlayers(players)
 		return
 	end
 	W.matches = W.matches + 1
 	-- fields of the match object (ARCHITECTURE.md)
-	T.check(type(m.Id) == "number" and m.DifficultyId == "Breeze" and type(m.Slot) == "number" and type(m.Players) == "table" and type(m.Checkpoint) == "number" and type(m.State) == "string" and type(m.Course) == "table", "match has Id / DifficultyId / Slot / Players / State / Course / Checkpoint")
+	T.check(type(m.Id) == "number" and m.DifficultyId == "Easy" and type(m.Slot) == "number" and type(m.Players) == "table" and type(m.Checkpoint) == "number" and type(m.State) == "string" and type(m.Course) == "table", "match has Id / DifficultyId / Slot / Players / State / Course / Checkpoint")
 	T.eq(MS().GetMatchOf(a), m, "GetMatchOf returns the match for a member")
 	T.eq(MS().GetMatchOf(Mock.AddPlayer("Outsider", 5555)), nil, "GetMatchOf is nil for a lobby player")
 	advance(0.3)
@@ -1642,10 +1528,10 @@ S.damage_rules = guarded("damage_rules", function()
 	if ms then
 		local problems = V.matchState(ms)
 		T.check(#problems == 0, "MatchState payload matches ARCHITECTURE.md", table.concat(problems, ", "))
-		T.eq(ms.TotalCheckpoints, Config.GetDifficulty("Breeze").Stages, "MatchState.TotalCheckpoints = Stages")
+		T.eq(ms.TotalCheckpoints, Config.GetDifficulty("Easy").Stages, "MatchState.TotalCheckpoints = Stages")
 		T.eq(ms.TotalTokens, m.Course.TotalTokens, "MatchState.TotalTokens = course tokens")
 		T.eq(#ms.Members, 2, "MatchState lists both members")
-		T.check(ms.Seconds > 0 and ms.Seconds <= Config.GetDifficulty("Breeze").TimeLimit, "MatchState.Seconds is the time left", tostring(ms.Seconds))
+		T.check(ms.Seconds > 0 and ms.Seconds <= Config.GetDifficulty("Easy").TimeLimit, "MatchState.Seconds is the time left", tostring(ms.Seconds))
 	end
 	-- broadcast rate ~2 Hz
 	local mark = logSize()
@@ -1660,11 +1546,11 @@ S.damage_rules = guarded("damage_rules", function()
 		mark = logSize()
 		local cloudBefore = a:GetAttribute("CloudTokens")
 		Mock.Teleport(a, token.Position)
-		advance(0.6)
+		advance(1.0)
 		T.check(token.Parent == nil, "a touched token is destroyed")
 		T.eq(a:GetAttribute("MatchTokens"), value, "MatchTokens increases by the token Value")
 		T.eq(a:GetAttribute("CloudTokens"), cloudBefore + value, "CloudTokens (lifetime) increases as well")
-		T.check(notified(a, "%+%d", "token", mark), "a '+n' token toast is sent")
+		T.check(notified(a, "^%+%d+ cloud token", "token", mark), "a '+n cloud token(s)' toast is sent (pickups within 0.6 s share one toast)")
 		T.eq(b:GetAttribute("MatchTokens"), 0, "the other player's MatchTokens is unchanged")
 		advance(0.6)
 		ms = state(a)
@@ -1753,7 +1639,7 @@ S.damage_rules = guarded("damage_rules", function()
 	Mock.Teleport(a, cp1.Part.Position + Vector3.new(0, 3.5, 0))
 	advance(0.8)
 	T.eq(m.Checkpoint, 1, "touching checkpoint 1 sets match.Checkpoint")
-	T.check(notified(a, "Checkpoint 1/" .. Config.GetDifficulty("Breeze").Stages .. " reached", "good", mark), "'Checkpoint 1/N reached!' toast (good)")
+	T.check(notified(a, "Checkpoint 1/" .. Config.GetDifficulty("Easy").Stages .. " reached", "good", mark), "'Checkpoint 1/N reached!' toast (good)")
 	T.near(hum(a).Health, 40 + 100 * Config.Damage.CheckpointHealFraction, 2, "alive members heal CheckpointHealFraction at a checkpoint")
 	T.eq(b:GetAttribute("Downed"), false, "the downed teammate is revived at the checkpoint")
 	T.near(hum(b).Health, 100 * Config.Damage.ReviveHealthFraction, 3, "revived players return with ReviveHealthFraction health")
@@ -1775,13 +1661,13 @@ S.damage_rules = guarded("damage_rules", function()
 	waitNotInvulnerable(a)
 	local hpBefore = hum(b).Health
 	mark = logSize()
-	local voidDamage = Config.Damage.VoidDamage.Breeze
+	local voidDamage = Config.Damage.VoidDamage.Easy
 	Mock.Teleport(b, Vector3.new(m.Course.StartCFrame.Position.X, m.Course.KillY - 30, m.Course.StartCFrame.Position.Z + 40))
 	advance(1.2)
 	T.check(root(b).Position.Y > m.Course.KillY + 5, "falling below KillY teleports the player back", "y=" .. fmt(root(b).Position.Y) .. " killY=" .. fmt(m.Course.KillY))
 	T.check(distance(root(b).Position, cp1.SpawnCFrame.Position) <= 14, "...to the team checkpoint", fmt(distance(root(b).Position, cp1.SpawnCFrame.Position)))
 	local vd = remotesFor("DamageTaken", b.UserId, mark)[1]
-	T.check(vd ~= nil and vd.args[2] == "Void" and vd.args[1] == voidDamage, "the void deals VoidDamage[" .. "Breeze" .. "] as 'Void'", vd and (tostring(vd.args[1]) .. " " .. tostring(vd.args[2])))
+	T.check(vd ~= nil and vd.args[2] == "Void" and vd.args[1] == voidDamage, "the void deals VoidDamage[" .. "Easy" .. "] as 'Void'", vd and (tostring(vd.args[1]) .. " " .. tostring(vd.args[2])))
 	T.near(hum(b).Health, hpBefore - voidDamage, 1.5, "void damage is applied to health")
 	-- cleanup
 	endAllMatches(players)
@@ -1821,13 +1707,13 @@ S.match_victory = guarded("match_victory", function()
 	local a, b = players[1], players[2]
 	-- start through the portal, like a real game
 	for _, p in ipairs(players) do
-		enterPortal(p, "Breeze")
+		enterPortal(p, "Easy")
 		advance(0.3)
 	end
 	local started = waitFor(function()
 		return MS().GetMatchOf(a) ~= nil
 	end, Config.Match.PartyCountdown + 6)
-	if not T.check(started, "a Breeze party launches via the portal") then
+	if not T.check(started, "an Easy party launches via the portal") then
 		removePlayers(players)
 		return
 	end
@@ -1869,7 +1755,7 @@ S.match_victory = guarded("match_victory", function()
 	local want = a:GetAttribute("MatchTokens")
 	T.check(want >= 1, "tokens were collected on the way", tostring(want))
 	-- walk through every checkpoint in order
-	for i = 1, Config.GetDifficulty("Breeze").Stages do
+	for i = 1, Config.GetDifficulty("Easy").Stages do
 		local cp = m.Course.Checkpoints[i]
 		Mock.Teleport(b, cp.Part.Position + Vector3.new(0, 3.5, 0))
 		Mock.Teleport(a, cp.Part.Position + Vector3.new(0, 3.5, 0))
@@ -1908,17 +1794,17 @@ S.match_victory = guarded("match_victory", function()
 		T.check(#problems == 0, "MatchResult payload matches ARCHITECTURE.md", table.concat(problems, ", "))
 		T.eq(r.Won, true, "MatchResult.Won")
 		T.eq(r.Reason, "victory", "MatchResult.Reason = victory")
-		T.eq(r.Bonus, Config.Match.TokenBonusOnWin.Breeze, "MatchResult.Bonus = TokenBonusOnWin")
-		T.eq(r.DifficultyId, "Breeze", "MatchResult.DifficultyId")
-		T.eq(r.DifficultyName, Config.GetDifficulty("Breeze").DisplayName, "MatchResult.DifficultyName")
+		T.eq(r.Bonus, Config.Match.TokenBonusOnWin.Easy, "MatchResult.Bonus = TokenBonusOnWin")
+		T.eq(r.DifficultyId, "Easy", "MatchResult.DifficultyId")
+		T.eq(r.DifficultyName, Config.GetDifficulty("Easy").DisplayName, "MatchResult.DifficultyName")
 		T.eq(r.TotalTokens, m.Course.TotalTokens, "MatchResult.TotalTokens")
 		T.eq(r.MatchTokens, want, "MatchResult.MatchTokens is the player's own count")
 		T.eq(#r.Members, 2, "MatchResult.Members lists both players")
 		T.check(r.Seconds > 0, "MatchResult.Seconds is the play time", tostring(r.Seconds))
 	end
 	T.check(lastRemote("MatchResult", b.UserId, mark) ~= nil, "the second member also receives MatchResult")
-	T.eq(a:GetAttribute("CloudTokens"), lifetimeBefore.a + Config.Match.TokenBonusOnWin.Breeze, "the win bonus is added to the lifetime tokens")
-	T.eq(b:GetAttribute("CloudTokens"), lifetimeBefore.b + Config.Match.TokenBonusOnWin.Breeze, "...for every finished player")
+	T.eq(a:GetAttribute("CloudTokens"), lifetimeBefore.a + Config.Match.TokenBonusOnWin.Easy, "the win bonus is added to the lifetime tokens")
+	T.eq(b:GetAttribute("CloudTokens"), lifetimeBefore.b + Config.Match.TokenBonusOnWin.Easy, "...for every finished player")
 	local endState = state(a)
 	T.check(endState ~= nil and endState.Phase == "Ended", "MatchState Phase = Ended on the results screen", endState and endState.Phase)
 	-- back to the lobby
@@ -1932,7 +1818,7 @@ S.match_victory = guarded("match_victory", function()
 	T.check(#ended == 1 and ended[1][2] == true, "MatchEnded fires once with won = true", #ended .. " events")
 	conn:Disconnect()
 	-- the slot is free again
-	local again = startMatch("Breeze", { a })
+	local again = startMatch("Easy", { a })
 	T.check(again ~= nil and again.Slot == m.Slot, "the slot is reused for the next match", again and tostring(again.Slot))
 	endAllMatches({ a })
 	removePlayers(players)
@@ -1950,7 +1836,7 @@ S.match_defeat = guarded("match_defeat", function()
 	local Config = config()
 	local players = freshPlayers(2, "Lose")
 	local a, b = players[1], players[2]
-	local m = startMatch("Breeze", players)
+	local m = startMatch("Easy", players)
 	if not T.check(m ~= nil, "defeat: match starts") then
 		removePlayers(players)
 		return
@@ -2009,13 +1895,13 @@ S.match_timeout = guarded("match_timeout", function()
 		return
 	end
 	local Config = config()
-	local diff = Config.GetDifficulty("Breeze")
+	local diff = Config.GetDifficulty("Easy")
 	local players = freshPlayers(1, "Slow")
 	local a = players[1]
 	local original = diff.TimeLimit
 	local limit = ARGS.quick and 45 or original
 	diff.TimeLimit = limit
-	local m = startMatch("Breeze", players)
+	local m = startMatch("Easy", players)
 	if not T.check(m ~= nil, "timeout: match starts") then
 		diff.TimeLimit = original
 		removePlayers(players)
@@ -2060,8 +1946,8 @@ S.match_abandon = guarded("match_abandon", function()
 	local Config = config()
 	local players = freshPlayers(2, "Ghost")
 	local a, b = players[1], players[2]
-	local m = startMatch("Gale", players)
-	if not T.check(m ~= nil, "abandon: Gale match starts") then
+	local m = startMatch("Medium", players)
+	if not T.check(m ~= nil, "abandon: Medium match starts") then
 		removePlayers(players)
 		return
 	end
@@ -2085,7 +1971,7 @@ S.match_abandon = guarded("match_abandon", function()
 	local results = remotesFor("MatchResult", nil, mark)
 	T.eq(#results, 0, "an abandoned match ends quietly (no MatchResult)")
 	local fresh = freshPlayers(1, "Next")[1]
-	local nextMatch = startMatch("Breeze", { fresh })
+	local nextMatch = startMatch("Easy", { fresh })
 	T.check(nextMatch ~= nil and nextMatch.Slot == slot, "the slot of an abandoned match is free again", nextMatch and tostring(nextMatch.Slot))
 	conn:Disconnect()
 	endAllMatches({ fresh })
@@ -2104,7 +1990,7 @@ S.match_leave = guarded("match_leave", function()
 	local Config = config()
 	local players = freshPlayers(2, "Quit")
 	local a, b = players[1], players[2]
-	local m = startMatch("Breeze", players)
+	local m = startMatch("Easy", players)
 	if not T.check(m ~= nil, "leave: match starts") then
 		removePlayers(players)
 		return
@@ -2145,7 +2031,7 @@ S.match_death = guarded("match_death", function()
 	local Config = config()
 	local players = freshPlayers(2, "Reset")
 	local a, b = players[1], players[2]
-	local m = startMatch("Breeze", players)
+	local m = startMatch("Easy", players)
 	if not T.check(m ~= nil, "death: match starts") then
 		removePlayers(players)
 		return
@@ -2203,7 +2089,7 @@ S.match_slots = guarded("match_slots", function()
 	local slotsSeen = {}
 	local before = Mock.Stats()
 	for i = 1, n do
-		local m = MS().StartMatch(i % 3 == 0 and "Thunderstorm" or (i % 2 == 0 and "Gale" or "Breeze"), { players[i] })
+		local m = MS().StartMatch(Config.Difficulties[(i - 1) % #Config.Difficulties + 1].Id, { players[i] })
 		if not m then
 			T.fail("match " .. i .. " of " .. n .. " starts")
 		else
@@ -2221,12 +2107,12 @@ S.match_slots = guarded("match_slots", function()
 		T.eq(count, 1, "slot " .. slot .. " is used once")
 	end
 	T.eq(distinct, n, n .. " concurrent matches use " .. n .. " different slots")
-	local extra = MS().StartMatch("Breeze", { players[n + 1] })
+	local extra = MS().StartMatch("Easy", { players[n + 1] })
 	T.eq(extra, nil, "StartMatch returns nil when all " .. n .. " slots are busy")
 	-- portal: busy arenas
 	local mark = logSize()
 	local late = players[n + 1]
-	enterPortal(late, "Breeze")
+	enterPortal(late, "Easy")
 	local told = waitFor(function()
 		return notified(late, "busy", "bad", mark)
 	end, Config.Match.PartyCountdown + 6)
@@ -2238,7 +2124,7 @@ S.match_slots = guarded("match_slots", function()
 	local middleSlot = middle.Slot
 	MS().LeaveMatch(players[3])
 	advance(1)
-	local reuse = MS().StartMatch("Breeze", { players[3] })
+	local reuse = MS().StartMatch("Easy", { players[3] })
 	T.check(reuse ~= nil and reuse.Slot == middleSlot, "the lowest free slot is reused", reuse and tostring(reuse.Slot))
 	-- everything torn down
 	T.check(#courseFolders() == n, n .. " course folders exist while the matches run", #courseFolders() .. "")
@@ -2253,13 +2139,13 @@ S.match_slots = guarded("match_slots", function()
 end)
 
 ----------------------------------------------------------------------------------------------------
--- scenario: HazardService behaviours on a Thunderstorm course
+-- scenario: HazardService behaviours on a Saint course
 ----------------------------------------------------------------------------------------------------
 local function pickHazardSeed(CB)
 	local want = { "SpinBarPlatform", "StormPlatform", "LightningPlatform", "Vanishing", "Moving", "Bounce", "PlateBridge" }
 	local bestSeed, bestScore = 1, -1
 	for seed = 1, 60 do
-		local layout = CB.GenerateLayout("Thunderstorm", seed)
+		local layout = CB.GenerateLayout("Saint", seed)
 		local have = {}
 		for _, st in ipairs(layout.Steps) do
 			have[st.Kind] = true
@@ -2295,7 +2181,7 @@ S.hazards = guarded("hazards", function()
 	local a = players[1]
 	a:SetAttribute("InMatch", true)
 	advance(2.0) -- spawn i-frames
-	local layout = CB.GenerateLayout("Thunderstorm", pickHazardSeed(CB))
+	local layout = CB.GenerateLayout("Saint", pickHazardSeed(CB))
 	local holder = Instance.new("Folder")
 	holder.Name = "SmokeHazards"
 	holder.Parent = workspace
@@ -2823,5 +2709,25 @@ S.final_checks = guarded("final_checks", function()
 	flushWarnings("final")
 	T.info("*simulated " .. fmt(Mock.Clock.now, 0) .. " s of game time")
 end)
+
+----------------------------------------------------------------------------------------------------
+-- helpers exported to smoke_content.lua / smoke_economy.lua (they run in the same Lua state)
+----------------------------------------------------------------------------------------------------
+_G.K = {
+	S = S, W = W, M = M, T = T, V = V, guarded = guarded,
+	fmt = fmt, mod = mod, config = config, advance = advance, waitFor = waitFor, moduleInstance = moduleInstance,
+	lastRemote = lastRemote, remotesFor = remotesFor, joinPlayer = joinPlayer, hum = hum, root = root,
+	flushErrors = flushErrors, flushWarnings = flushWarnings, freshPlayers = freshPlayers, removePlayers = removePlayers,
+	endAllMatches = endAllMatches, remoteFolder = remoteFolder, state = state, startMatch = startMatch, toPlaying = toPlaying,
+	distance = distance, planar = planar, notified = notified, logSize = logSize, waitNotInvulnerable = waitNotInvulnerable,
+	tagged = tagged, courseFolders = courseFolders, enterPortal = enterPortal, leavePortalArea = leavePortalArea,
+	firstToken = firstToken, needBoot = needBoot, paletteAudit = paletteAudit, groundBelow = groundBelow,
+	textsUnder = textsUnder, plainText = plainText, countStars = countStars, colorDistance255 = colorDistance255,
+	shortPath = shortPath, MS = MS, DS = DS, lobbyCheck = lobbyCheck, transparencyOf = transparencyOf, storedTokens = storedTokens,
+	resetCursors = function()
+		errorCursor = #Mock.Errors
+		outputCursor = #Mock.Output
+	end,
+}
 
 return S

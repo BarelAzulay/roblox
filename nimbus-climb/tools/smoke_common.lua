@@ -49,6 +49,47 @@ function T.section_(name)
 	T.section = name
 end
 
+-- Counts many small cases and reports ONE result line (so 300 seeds do not produce 300 lines):
+--   local t = T.tally("Easy: layouts are valid"); t:case(ok, "seed 5: reason"); ...; t:report()
+-- A failure line shows "bad/total" and the first few examples.
+function T.tally(name, maxExamples)
+	local tally = { name = name, n = 0, bad = 0, examples = {}, max = maxExamples or 3 }
+	function tally:case(ok, example)
+		self.n = self.n + 1
+		if not ok then
+			self.bad = self.bad + 1
+			if #self.examples < self.max then
+				self.examples[#self.examples + 1] = tostring(example)
+			end
+		end
+		return ok
+	end
+	function tally:report(extra)
+		if self.bad == 0 then
+			add("ok", self.name, extra)
+		else
+			add("fail", self.name, self.bad .. " of " .. self.n .. " failed" .. (extra and (" (" .. extra .. ")") or "") .. ": " .. table.concat(self.examples, " | "))
+		end
+		return self.bad == 0
+	end
+	return tally
+end
+
+-- true when `list` (array) contains `value`
+function T.contains(list, value)
+	for _, v in ipairs(list) do
+		if v == value then
+			return true
+		end
+	end
+	return false
+end
+
+-- Numbers that are not NaN / inf.
+function T.finite(v)
+	return type(v) == "number" and v == v and v ~= math.huge and v ~= -math.huge
+end
+
 -- Runs fn() under xpcall; a Lua error becomes a failed check with a traceback.
 local function guarded(name, fn)
 	return function(...)

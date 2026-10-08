@@ -2281,6 +2281,7 @@ local TagSignals = {} -- tag -> { added = signal, removed = signal }
 local PendingWaits = {}
 
 Mock.Viewport = nil -- set below (Vector2)
+Mock.GuiEpoch = 0 -- bumped by every GUI property / hierarchy change (invalidates the layout caches)
 
 local function isInstance(v)
 	return rawtype(v) == "table" and getmetatable(v) == InstMT
@@ -2577,6 +2578,9 @@ local function setParentRaw(inst, st, newParent)
 		local pst = newParent[STATE]
 		pst.children[#pst.children + 1] = inst
 	end
+	if st.class.guiish then
+		Mock.GuiEpoch = Mock.GuiEpoch + 1
+	end
 	local nowInGame = newParent ~= nil and isInGame(newParent)
 	if wasInGame and not nowInGame then
 		tagEvents(inst, false)
@@ -2753,6 +2757,9 @@ InstMT.__newindex = function(self, key, value)
 		end
 		if old ~= norm then
 			st.props[key] = norm
+			if class.guiish then
+				Mock.GuiEpoch = Mock.GuiEpoch + 1
+			end
 			if st.onProp then
 				st.onProp(self, st, key, norm)
 			end
@@ -2857,6 +2864,7 @@ local function finalizeClass(class)
 	if def.init then
 		class.inits[#class.inits + 1] = def.init
 	end
+	class.guiish = (class.isA.GuiBase2d or class.isA.UIBase) and true or false
 	class.final = true
 	return class
 end
@@ -3341,6 +3349,9 @@ defclass("Instance", nil, {
 			end
 			if st.name ~= v then
 				st.name = v
+				if st.class.guiish then
+					Mock.GuiEpoch = Mock.GuiEpoch + 1
+				end
 				firePropChanged(self, st, "Name")
 			end
 		end,
@@ -4054,55 +4065,476 @@ defclass("SurfaceAppearance", "Instance", { creatable = true })
 Mock.Viewport = v2(1280, 720)
 
 do
-local function layerSize(inst)
-	local st = inst[STATE]
-	local cls = st.class
-	if cls.isA.BillboardGui then
-		local sz = st.props.Size or u2(0, 100, 0, 100)
-		return v2(sz.X.Offset + sz.X.Scale * 100, sz.Y.Offset + sz.Y.Scale * 100)
-	elseif cls.isA.SurfaceGui then
-		return st.props.CanvasSize or v2(800, 600)
-	end
-	return Mock.Viewport
-end
+-- GUI layout engine -----------------------------------------------------------------------------------
+-- Computes AbsoluteSize / AbsolutePosition the way Roblox does for the things this project uses:
+--   * Position (scale + offset + AnchorPoint), Size (scale + offset, SizeConstraint), AutomaticSize (X / Y / XY,
+--     Size acts as the minimum), UIPadding, UIScale (grows around the AnchorPoint, scales descendants' offsets),
+--     UISizeConstraint, UIAspectRatioConstraint, UIListLayout (alignment, padding, wraps, sort order) and
+--     UIGridLayout (cell size / padding / alignment; StartCorner is always TopLeft).
+--   * Text objects measure their text with a fixed average glyph width (0.5 * TextSize), wrapping on spaces.
+--   * Coordinates are relative to the top-left of the ScreenGui area. A ScreenGui with IgnoreGuiInset = false
+--     starts below the top bar, so its area is Mock.Viewport minus Mock.TopInset in height (AbsolutePosition does
+--     NOT include the inset, exactly like Roblox).
+-- Not modelled: rotation, ScrollingFrame clipping, UIFlexItem, UIPageLayout / UITableLayout, TextScaled sizing.
+-- Results are cached per instance and invalidated by Mock.GuiEpoch (any GUI property, name or parent change,
+-- viewport change).
+Mock.TopInset = 58
 
-local function absSizeOf(inst)
-	local st = inst[STATE]
-	if not st.class.isA.GuiObject then
-		return layerSize(inst)
-	end
-	local parent = st.parent
-	local psize = Mock.Viewport
-	if parent and parent[STATE].class.isA.GuiBase2d then
-		psize = parent[STATE].class.isA.GuiObject and absSizeOf(parent) or layerSize(parent)
-	end
-	local sz = st.props.Size or u2(0, 0, 0, 0)
-	return v2(psize.X * sz.X.Scale + sz.X.Offset, psize.Y * sz.Y.Scale + sz.Y.Offset)
-end
+local layoutCache = setmetatable({}, { __mode = "k" })
+local arrangeCache = setmetatable({}, { __mode = "k" })
 
--- Top-left corner in screen pixels: parent origin + parent size * Position.Scale + Position.Offset - AnchorPoint * size.
--- Like AbsoluteSize this ignores layouts (UIListLayout, UIAspectRatioConstraint ...), UIScale and the top-bar inset,
--- so it is exact only for plain Position/Size/AnchorPoint hierarchies (enough to test overlap of fixed buttons).
-local function absPosOf(inst)
+local function prop(inst, key)
 	local st = inst[STATE]
-	if not st.class.isA.GuiObject then
-		return v2(0, 0)
-	end
-	local origin, psize = v2(0, 0), Mock.Viewport
-	local parent = st.parent
-	if parent and parent[STATE].class.isA.GuiBase2d then
-		if parent[STATE].class.isA.GuiObject then
-			origin = absPosOf(parent)
-			psize = absSizeOf(parent)
-		else
-			psize = layerSize(parent)
+	local v = st.props[key]
+	if v == nil then
+		local spec = st.class.propspec[key]
+		if spec then
+			if spec.lazy then
+				v = specDefault(spec)
+			else
+				v = spec.def
+			end
 		end
 	end
-	local pos = st.props.Position or u2(0, 0, 0, 0)
-	local anchor = st.props.AnchorPoint or v2(0, 0)
-	local size = absSizeOf(inst)
-	return v2(origin.X + psize.X * pos.X.Scale + pos.X.Offset - size.X * anchor.X,
-		origin.Y + psize.Y * pos.Y.Scale + pos.Y.Offset - size.Y * anchor.Y)
+	return v
+end
+
+local function enumName(item)
+	return item and item.Name or ""
+end
+
+local function firstChildIs(inst, className)
+	local children = inst[STATE].children
+	for i = 1, #children do
+		if children[i][STATE].class.isA[className] then
+			return children[i]
+		end
+	end
+	return nil
+end
+
+local function layerBox(inst)
+	local st = inst[STATE]
+	local isA = st.class.isA
+	if isA.BillboardGui then
+		local sz = prop(inst, "Size")
+		return { x = 0, y = 0, w = sz.X.Offset + sz.X.Scale * 100, h = sz.Y.Offset + sz.Y.Scale * 100, s = 1 }
+	elseif isA.SurfaceGui then
+		local cs = prop(inst, "CanvasSize")
+		return { x = 0, y = 0, w = cs.X, h = cs.Y, s = 1 }
+	end
+	local inset = 0
+	if prop(inst, "IgnoreGuiInset") == false then
+		inset = Mock.TopInset or 0
+	end
+	return { x = 0, y = 0, w = Mock.Viewport.X, h = mmax(0, Mock.Viewport.Y - inset), s = 1 }
+end
+
+local function utf8len(text)
+	local _, n = text:gsub("[^\128-\191]", "")
+	return n
+end
+
+-- width, height of a text object's text (limit = wrap width or nil)
+local function textExtent(inst, limit)
+	local text = prop(inst, "Text") or ""
+	if prop(inst, "RichText") then
+		text = text:gsub("<[^>]*>", "")
+	end
+	local size = prop(inst, "TextSize") or 14
+	local charW = size * 0.5
+	local lineH = size * (prop(inst, "LineHeight") or 1)
+	local maxW, lines = 0, 0
+	for raw in (text .. "\n"):gmatch("([^\n]*)\n") do
+		local len = utf8len(raw)
+		if limit and limit > 0 and len * charW > limit then
+			-- wrap on spaces
+			local cur = 0
+			local used = 0
+			local rows = 1
+			for word in raw:gmatch("%S+") do
+				local wl = utf8len(word) * charW
+				if cur > 0 and cur + charW + wl > limit then
+					rows = rows + 1
+					maxW = mmax(maxW, cur)
+					cur = 0
+				end
+				if wl > limit then
+					local extra = ceil(wl / limit) - 1
+					rows = rows + extra
+					maxW = mmax(maxW, limit)
+					cur = wl - extra * limit
+				else
+					cur = (cur > 0) and (cur + charW + wl) or wl
+				end
+				used = used + 1
+			end
+			maxW = mmax(maxW, cur)
+			lines = lines + rows
+		else
+			maxW = mmax(maxW, len * charW)
+			lines = lines + 1
+		end
+	end
+	return maxW, lines * lineH
+end
+Mock.TextExtent = textExtent
+
+local function paddingPx(inst, w, h, s)
+	local pad = firstChildIs(inst, "UIPadding")
+	if not pad then
+		return 0, 0, 0, 0
+	end
+	local l, r, t, b = prop(pad, "PaddingLeft"), prop(pad, "PaddingRight"), prop(pad, "PaddingTop"), prop(pad, "PaddingBottom")
+	return l.Scale * w + l.Offset * s, r.Scale * w + r.Offset * s, t.Scale * h + t.Offset * s, b.Scale * h + b.Offset * s
+end
+
+-- the area available to the children of `inst` (box minus UIPadding)
+local function contentOf(inst, box)
+	local l, r, t, b = paddingPx(inst, box.w, box.h, box.s)
+	return { x = box.x + l, y = box.y + t, w = mmax(0, box.w - l - r), h = mmax(0, box.h - t - b), s = box.s }
+end
+
+local function layoutChildren(inst, layout)
+	local out = {}
+	local children = inst[STATE].children
+	for i = 1, #children do
+		local c = children[i]
+		local cst = c[STATE]
+		if cst.class.isA.GuiObject and cst.props.Visible ~= false then
+			out[#out + 1] = { inst = c, index = i }
+		end
+	end
+	local byName = enumName(prop(layout, "SortOrder")) == "Name"
+	for _, e in ipairs(out) do
+		e.key = byName and e.inst[STATE].name or (prop(e.inst, "LayoutOrder") or 0)
+	end
+	tsort(out, function(a, b)
+		if a.key ~= b.key then
+			return a.key < b.key
+		end
+		return a.index < b.index
+	end)
+	return out
+end
+
+local function findLayout(inst)
+	local children = inst[STATE].children
+	for i = 1, #children do
+		local isA = children[i][STATE].class.isA
+		if isA.UIListLayout or isA.UIGridLayout then
+			return children[i], isA.UIGridLayout and true or false
+		end
+	end
+	return nil
+end
+
+local resolveSize, placeIn
+
+local function alignOffset(kind, room)
+	if kind == "Center" then
+		return room / 2
+	elseif kind == "Right" or kind == "Bottom" then
+		return room
+	end
+	return 0
+end
+
+local function listArrange(inst, layout, pc)
+	local vertical = enumName(prop(layout, "FillDirection")) ~= "Horizontal"
+	local ha, va = enumName(prop(layout, "HorizontalAlignment")), enumName(prop(layout, "VerticalAlignment"))
+	local pad = prop(layout, "Padding")
+	local mainLimit = vertical and pc.h or pc.w
+	local crossLimit = vertical and pc.w or pc.h
+	local padPx = pad.Scale * mainLimit + pad.Offset * pc.s
+	local wraps = prop(layout, "Wraps") == true
+	local items = {}
+	for _, e in ipairs(layoutChildren(inst, layout)) do
+		local w, h = resolveSize(e.inst, pc, nil)
+		items[#items + 1] = { inst = e.inst, w = w, h = h }
+	end
+	local lines = { { items = {}, main = 0, cross = 0 } }
+	for _, it in ipairs(items) do
+		local m = vertical and it.h or it.w
+		local c = vertical and it.w or it.h
+		local line = lines[#lines]
+		local add = (#line.items > 0) and padPx or 0
+		if wraps and #line.items > 0 and line.main + add + m > mainLimit + 0.5 then
+			line = { items = {}, main = 0, cross = 0 }
+			lines[#lines + 1] = line
+			add = 0
+		end
+		line.items[#line.items + 1] = it
+		line.main = line.main + add + m
+		line.cross = mmax(line.cross, c)
+	end
+	local map = {}
+	local mainAlign = vertical and va or ha
+	local crossAlign = vertical and ha or va
+	local crossBase = 0
+	local cw, ch = 0, 0
+	for li, line in ipairs(lines) do
+		local cursor = alignOffset(mainAlign, mainLimit - line.main)
+		local extent = wraps and line.cross or crossLimit
+		for _, it in ipairs(line.items) do
+			local m = vertical and it.h or it.w
+			local c = vertical and it.w or it.h
+			local cpos = crossBase + alignOffset(crossAlign, extent - c)
+			if vertical then
+				map[it.inst] = { x = cpos, y = cursor, w = it.w, h = it.h }
+			else
+				map[it.inst] = { x = cursor, y = cpos, w = it.w, h = it.h }
+			end
+			cursor = cursor + m + padPx
+		end
+		crossBase = crossBase + line.cross + ((li < #lines) and padPx or 0)
+		if vertical then
+			cw = mmax(cw, line.cross)
+			ch = mmax(ch, line.main)
+		else
+			cw = mmax(cw, line.main)
+			ch = mmax(ch, line.cross)
+		end
+	end
+	if wraps then
+		if vertical then
+			cw = crossBase
+		else
+			ch = crossBase
+		end
+	end
+	return { map = map, cw = cw, ch = ch }
+end
+
+local function gridArrange(inst, layout, pc)
+	local cs, cp = prop(layout, "CellSize"), prop(layout, "CellPadding")
+	local cellW = pc.w * cs.X.Scale + cs.X.Offset * pc.s
+	local cellH = pc.h * cs.Y.Scale + cs.Y.Offset * pc.s
+	local padX = pc.w * cp.X.Scale + cp.X.Offset * pc.s
+	local padY = pc.h * cp.Y.Scale + cp.Y.Offset * pc.s
+	local horizontal = enumName(prop(layout, "FillDirection")) ~= "Vertical"
+	local ha, va = enumName(prop(layout, "HorizontalAlignment")), enumName(prop(layout, "VerticalAlignment"))
+	local children = layoutChildren(inst, layout)
+	local perLine
+	if horizontal then
+		perLine = mmax(1, floor((pc.w + padX) / mmax(cellW + padX, 0.001) + 1e-6))
+	else
+		perLine = mmax(1, floor((pc.h + padY) / mmax(cellH + padY, 0.001) + 1e-6))
+	end
+	local maxCells = prop(layout, "FillDirectionMaxCells") or 0
+	if maxCells > 0 then
+		perLine = mmin(perLine, maxCells)
+	end
+	local n = #children
+	local lines = ceil(n / perLine)
+	local mainCell, mainPad, crossCell, crossPad = cellW, padX, cellH, padY
+	if not horizontal then
+		mainCell, mainPad, crossCell, crossPad = cellH, padY, cellW, padX
+	end
+	local crossTotal = lines * crossCell + mmax(0, lines - 1) * crossPad
+	local map = {}
+	local cw, ch = 0, 0
+	for i, e in ipairs(children) do
+		local li = floor((i - 1) / perLine)
+		local col = (i - 1) % perLine
+		local inLine = mmin(perLine, n - li * perLine)
+		local lineMain = inLine * mainCell + (inLine - 1) * mainPad
+		local mainOff, crossOff
+		if horizontal then
+			mainOff = alignOffset(ha, pc.w - lineMain)
+			crossOff = alignOffset(va, pc.h - crossTotal)
+		else
+			mainOff = alignOffset(va, pc.h - lineMain)
+			crossOff = alignOffset(ha, pc.w - crossTotal)
+		end
+		local m = mainOff + col * (mainCell + mainPad)
+		local c = crossOff + li * (crossCell + crossPad)
+		if horizontal then
+			map[e.inst] = { x = m, y = c, w = cellW, h = cellH }
+		else
+			map[e.inst] = { x = c, y = m, w = cellW, h = cellH }
+		end
+	end
+	if horizontal then
+		cw = mmin(n, perLine) * cellW + mmax(0, mmin(n, perLine) - 1) * padX
+		ch = crossTotal
+	else
+		ch = mmin(n, perLine) * cellH + mmax(0, mmin(n, perLine) - 1) * padY
+		cw = crossTotal
+	end
+	if n == 0 then
+		cw, ch = 0, 0
+	end
+	return { map = map, cw = cw, ch = ch }
+end
+
+local function arrangement(inst, pc, cacheable)
+	if cacheable then
+		local c = arrangeCache[inst]
+		if c and c.epoch == Mock.GuiEpoch then
+			return c.res
+		end
+	end
+	local layout, isGrid = findLayout(inst)
+	local res = false
+	if layout then
+		if isGrid then
+			res = gridArrange(inst, layout, pc)
+		else
+			res = listArrange(inst, layout, pc)
+		end
+	end
+	if cacheable then
+		arrangeCache[inst] = { epoch = Mock.GuiEpoch, res = res }
+	end
+	return res
+end
+
+-- size the object's content needs (AutomaticSize)
+local function measureContent(inst, w, h, s)
+	local st = inst[STATE]
+	local l, r, t, b = paddingPx(inst, w, h, s)
+	if st.isText then
+		local limit = nil
+		if prop(inst, "TextWrapped") then
+			limit = mmax(0, w - l - r)
+		end
+		local tw, th = textExtent(inst, limit)
+		return tw + l + r, th + t + b
+	end
+	local own = firstChildIs(inst, "UIScale")
+	local ownScale = own and prop(own, "Scale") or 1
+	local content = { x = 0, y = 0, w = mmax(0, w - l - r), h = mmax(0, h - t - b), s = s * ownScale }
+	local arr = arrangement(inst, content, false)
+	if arr then
+		return arr.cw + l + r, arr.ch + t + b
+	end
+	local mw, mh = 0, 0
+	for _, c in ipairs(inst[STATE].children) do
+		local cst = c[STATE]
+		if cst.class.isA.GuiObject and cst.props.Visible ~= false then
+			local box = placeIn(c, content, nil)
+			mw = mmax(mw, box.x + box.w)
+			mh = mmax(mh, box.y + box.h)
+		end
+	end
+	return mw + r, mh + b
+end
+
+resolveSize = function(inst, pc, slot)
+	local ownUi = firstChildIs(inst, "UIScale")
+	local own = ownUi and prop(ownUi, "Scale") or 1
+	local w, h
+	if slot and slot.w then
+		w, h = slot.w, slot.h
+	else
+		local sz = prop(inst, "Size")
+		local basisW, basisH = pc.w, pc.h
+		local constraint = enumName(prop(inst, "SizeConstraint"))
+		if constraint == "RelativeXX" then
+			basisH = pc.w
+		elseif constraint == "RelativeYY" then
+			basisW = pc.h
+		end
+		w = basisW * sz.X.Scale + sz.X.Offset * pc.s
+		h = basisH * sz.Y.Scale + sz.Y.Offset * pc.s
+		local auto = enumName(prop(inst, "AutomaticSize"))
+		if auto ~= "None" and auto ~= "" then
+			local cw, ch = measureContent(inst, mmax(0, w), mmax(0, h), pc.s)
+			if auto == "X" or auto == "XY" then
+				w = mmax(w, cw)
+			end
+			if auto == "Y" or auto == "XY" then
+				h = mmax(h, ch)
+			end
+		end
+	end
+	local sc = firstChildIs(inst, "UISizeConstraint")
+	if sc then
+		local mn, mx = prop(sc, "MinSize"), prop(sc, "MaxSize")
+		w = mmin(mmax(w, mn.X), mx.X)
+		h = mmin(mmax(h, mn.Y), mx.Y)
+	end
+	local ar = firstChildIs(inst, "UIAspectRatioConstraint")
+	if ar then
+		local ratio = prop(ar, "AspectRatio")
+		if ratio and ratio > 0 then
+			if enumName(prop(ar, "AspectType")) == "ScaleWithParentSize" then
+				if enumName(prop(ar, "DominantAxis")) == "Height" then
+					w = h * ratio
+				else
+					h = w / ratio
+				end
+			elseif h > 0 and w / h > ratio then
+				w = h * ratio
+			elseif w > 0 then
+				h = w / ratio
+			end
+		end
+	end
+	return mmax(0, w) * own, mmax(0, h) * own
+end
+
+placeIn = function(inst, pc, slot)
+	local ownUi = firstChildIs(inst, "UIScale")
+	local own = ownUi and prop(ownUi, "Scale") or 1
+	local w, h = resolveSize(inst, pc, slot)
+	local x, y
+	if slot then
+		x, y = pc.x + slot.x, pc.y + slot.y
+	else
+		local pos, anchor = prop(inst, "Position"), prop(inst, "AnchorPoint")
+		x = pc.x + pc.w * pos.X.Scale + pos.X.Offset * pc.s - anchor.X * w
+		y = pc.y + pc.h * pos.Y.Scale + pos.Y.Offset * pc.s - anchor.Y * h
+	end
+	return { x = x, y = y, w = w, h = h, s = pc.s * own }
+end
+
+local function computeBox(inst)
+	local cached = layoutCache[inst]
+	if cached and cached.epoch == Mock.GuiEpoch then
+		return cached
+	end
+	local st = inst[STATE]
+	local box
+	if not st.class.isA.GuiObject then
+		box = layerBox(inst)
+	else
+		local parent = st.parent
+		local pc
+		if parent and parent[STATE].class.isA.GuiBase2d then
+			pc = contentOf(parent, computeBox(parent))
+		else
+			pc = { x = 0, y = 0, w = Mock.Viewport.X, h = Mock.Viewport.Y, s = 1 }
+		end
+		local arr = parent and parent[STATE].class.isA.GuiBase2d and arrangement(parent, pc, true) or false
+		local slot = arr and arr.map[inst] or nil
+		box = placeIn(inst, pc, slot)
+		if parent and parent[STATE].class.isA.ScrollingFrame then
+			-- children scroll with the canvas
+			local cp = prop(parent, "CanvasPosition")
+			box.x, box.y = box.x - cp.X, box.y - cp.Y
+		end
+	end
+	box.epoch = Mock.GuiEpoch
+	layoutCache[inst] = box
+	return box
+end
+Mock.GuiBox = function(inst)
+	local b = computeBox(inst)
+	return { x = b.x, y = b.y, w = b.w, h = b.h, scale = b.s }
+end
+-- the size of the ScreenGui / BillboardGui / SurfaceGui area an object lives in (nil when detached)
+Mock.GuiLayerSize = function(inst)
+	local cur = inst
+	while cur do
+		if cur[STATE].class.isA.LayerCollector then
+			local b = computeBox(cur)
+			return v2(b.w, b.h)
+		end
+		cur = cur[STATE].parent
+	end
+	return nil
 end
 
 defclass("GuiBase", "Instance", { creatable = false })
@@ -4110,16 +4542,19 @@ defclass("GuiBase2d", "GuiBase", {
 	creatable = false,
 	getters = {
 		AbsoluteSize = function(self)
-			return absSizeOf(self)
+			local b = computeBox(self)
+			return v2(b.w, b.h)
 		end,
 		AbsolutePosition = function(self)
-			return absPosOf(self)
+			local b = computeBox(self)
+			return v2(b.x, b.y)
 		end,
 		AbsoluteRotation = function()
 			return 0
 		end,
 	},
 })
+
 defclass("LayerCollector", "GuiBase2d", {
 	creatable = false,
 	props = { Enabled = T.bool(true), ResetOnSpawn = T.bool(true), ZIndexBehavior = T.enum("ZIndexBehavior", "Sibling") },
@@ -4181,17 +4616,12 @@ defclass("ViewportFrame", "GuiObject", { creatable = true, props = { CurrentCame
 defclass("VideoFrame", "GuiObject", { creatable = true })
 
 local function textBounds(self, st)
-	local text = st.props.Text or ""
-	local size = st.props.TextSize or 14
-	local lines = 1
-	for _ in text:gmatch("\n") do
-		lines = lines + 1
+	local limit = nil
+	if st.props.TextWrapped then
+		limit = Mock.GuiBox(self).w
 	end
-	local longest = 0
-	for line in (text .. "\n"):gmatch("([^\n]*)\n") do
-		longest = mmax(longest, #line)
-	end
-	return v2(longest * size * 0.5, lines * size)
+	local w, h = Mock.TextExtent(self, limit)
+	return v2(w, h)
 end
 local textProps = {
 	Text = T.str(""), TextColor3 = T.rgb(27, 42, 53), TextSize = T.num(14, 1, 100), TextScaled = T.bool(false), TextWrapped = T.bool(false),
@@ -4280,7 +4710,7 @@ defclass("UIListLayout", "UIBase", {
 })
 defclass("UIGridLayout", "UIBase", {
 	creatable = true,
-	props = copyProps(layoutProps, { CellSize = T.u2(0, 100, 0, 100), CellPadding = T.u2(0, 5, 0, 5), StartCorner = T.enum("StartCorner", "TopLeft"), FillDirectionMaxCells = T.num(0) }),
+	props = copyProps(layoutProps, { FillDirection = T.enum("FillDirection", "Horizontal"), CellSize = T.u2(0, 100, 0, 100), CellPadding = T.u2(0, 5, 0, 5), StartCorner = T.enum("StartCorner", "TopLeft"), FillDirectionMaxCells = T.num(0) }),
 	getters = {
 		AbsoluteContentSize = function()
 			return v2(0, 0)
@@ -4689,6 +5119,9 @@ do
 local function partFilterAllows(part, params)
 	if not params then
 		return true
+	end
+	if rawget(params, "RespectCanCollide") == true and part[STATE].props.CanCollide == false then
+		return false
 	end
 	local list = rawget(params, "FilterDescendantsInstances") or {}
 	local ftype = rawget(params, "FilterType")
@@ -5690,7 +6123,7 @@ service("GuiService", {
 	props = { MenuIsOpen = T.bool(false), SelectedObject = T.inst(), AutoSelectGuiEnabled = T.bool(true), TouchControlsEnabled = T.bool(true) },
 	methods = {
 		GetGuiInset = function()
-			return v2(0, 36), v2(0, 0)
+			return v2(0, Mock.TopInset or 36), v2(0, 0)
 		end,
 		IsTenFootInterface = function()
 			return false
@@ -6051,6 +6484,15 @@ function Mock.Click(button)
 	return fired
 end
 
+-- Fires any event signal of an instance (e.g. a ProximityPrompt's Triggered, a Humanoid's Died ...).
+function Mock.FireSignal(inst, name, ...)
+	getSignal(inst, inst[STATE], name):Fire(...)
+end
+-- A player uses a ProximityPrompt (what the engine does when the key is pressed in range).
+function Mock.Trigger(prompt, player)
+	getSignal(prompt, prompt[STATE], "Triggered"):Fire(player)
+end
+
 -- Simulates a remote arriving at the other side
 function Mock.FromClient(remote, player, ...)
 	getSignal(remote, remote[STATE], "OnServerEvent"):Fire(player, ...)
@@ -6127,6 +6569,7 @@ end
 -- Changes the screen size (rotation / resize / foldable) and fires Camera.ViewportSize changes like Roblox does.
 function Mock.SetViewport(width, height)
 	Mock.Viewport = v2(width, height)
+	Mock.GuiEpoch = Mock.GuiEpoch + 1
 	local cam = Mock.workspace and Mock.workspace[STATE].props.CurrentCamera
 	if cam then
 		firePropChanged(cam, cam[STATE], "ViewportSize")

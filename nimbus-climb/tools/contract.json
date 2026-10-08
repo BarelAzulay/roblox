@@ -1,19 +1,30 @@
 {
-  "_comment": "Public API of every module, taken from ARCHITECTURE.md. Read by tools/check.mjs (static) and tools/smoke.py (runtime). Keys are paths below src/ without .lua. 'functions' must be callable, 'signals' must expose Connect + Fire, 'fields' must merely exist (non-nil).",
+  "_comment": "Public API of every module, taken from ARCHITECTURE.md + ARCHITECTURE_V2.md (v2 supersedes v1) and from the extras other modules depend on (Main wires PlayerService.SetHomeProvider etc.). Read by tools/check.mjs (static) and tools/smoke.py (runtime). Keys are paths below src/ without .lua. 'functions' must be callable, 'signals' must expose Connect + Fire, 'fields' must merely exist (non-nil). Add new public members here when a contract grows.",
   "modules": {
     "shared/Config": {
       "functions": ["GetDifficulty"],
-      "fields": ["GameName", "Tagline", "Physics", "Tags", "Attr", "Remotes", "Damage", "Lobby", "Match", "Difficulties", "Tokens"]
+      "fields": ["GameName", "Tagline", "Physics", "Tags", "Attr", "Remotes", "Damage", "Lobby", "Match", "Difficulties", "Tokens", "Archetypes", "StageThemes", "Course", "Rarities", "Pets", "Roulettes", "Items"]
     },
     "shared/Theme": {
       "functions": ["HealthColor", "Style", "Label", "Corner", "Stroke", "Gradient", "Panel"],
-      "fields": ["Fonts", "Colors"]
+      "fields": ["Fonts", "Colors", "World", "Buttons", "Kinds"]
     },
     "shared/Util": {
       "functions": ["Create", "Signal", "Clamp", "Lerp", "Round", "FormatTime", "Commas", "GetCharacter", "GetHumanoid", "GetRoot", "PlayerFromPart", "Tween", "NewRng"]
     },
     "shared/Remotes": {
       "functions": ["Init", "Get"]
+    },
+    "shared/PetCatalog": {
+      "functions": ["Get", "ListByRarity", "GetRarity", "RollPet", "GetOdds", "PossiblePets", "PerkLabel", "SumPerks"],
+      "fields": ["Species", "Pets", "ById"]
+    },
+    "shared/ItemCatalog": {
+      "functions": ["Get"],
+      "fields": ["List", "ById"]
+    },
+    "shared/PetBuilder": {
+      "functions": ["Build", "Animate", "GetHeight"]
     },
     "server/Services/LightingService": {
       "functions": ["Init"]
@@ -22,10 +33,11 @@
       "functions": ["Build"]
     },
     "server/Services/PlayerService": {
-      "functions": ["Init", "SetSpawnProvider", "SendToLobby", "GetLobbySpawnCFrame", "ApplyHumanoidStats"]
+      "functions": ["Init", "SetSpawnProvider", "SetHomeProvider", "SetPerkProvider", "SendToLobby", "GetLobbySpawnCFrame", "ApplyHumanoidStats", "GetMaxHealth", "RefreshMaxHealth"]
     },
     "server/Services/DataService": {
-      "functions": ["Load", "Save", "StartAutosave", "BindToClose", "AddTokens", "GetTokens"]
+      "functions": ["Load", "Save", "StartAutosave", "BindToClose", "AddTokens", "SpendTokens", "GetTokens", "GetProfile", "MarkDirty", "Sync", "RecordMatch"],
+      "signals": ["ProfileLoaded"]
     },
     "server/Services/DamageService": {
       "functions": ["Init", "Damage", "Heal", "HealFraction", "SetHealthFraction", "GrantInvulnerability", "IsInvulnerable", "IsDowned", "Revive"],
@@ -37,8 +49,11 @@
     "server/Services/HazardService": {
       "functions": ["Attach"]
     },
+    "server/Services/CourseLayout": {
+      "functions": ["GenerateLayout", "ValidateLayout", "Stats"]
+    },
     "server/Services/CourseBuilder": {
-      "functions": ["GenerateLayout", "ValidateLayout", "Build"]
+      "functions": ["GenerateLayout", "ValidateLayout", "Build", "Stats"]
     },
     "server/Services/MatchService": {
       "functions": ["Init", "StartMatch", "GetMatchOf", "GetRespawnCFrame", "LeaveMatch"],
@@ -46,6 +61,23 @@
     },
     "server/Services/PortalService": {
       "functions": ["Init", "RemovePlayer", "GetParty"]
+    },
+    "server/Services/PetService": {
+      "functions": ["Init", "BuyRoulette", "Equip", "Unequip", "GetEquipped", "GetPerks", "GetTokenMultiplier"],
+      "signals": ["PerksChanged"]
+    },
+    "server/Services/ItemService": {
+      "functions": ["Init", "Buy", "Use", "SetMatchService"]
+    },
+    "server/Services/SpotService": {
+      "functions": ["Init", "GetSpot", "Teleport"]
+    },
+    "client/State": {
+      "functions": ["Init", "Get", "OwnedCount", "IsEquipped", "EquippedCount", "ItemCount", "Tokens"],
+      "signals": ["Changed"]
+    },
+    "client/UI/CloudUI": {
+      "functions": ["NewScreenGui", "Panel", "Button", "IconButton", "Bar", "Slot", "Tabs", "Grid", "PetViewport", "Pill", "Tooltip", "RarityColor"]
     },
     "client/Controllers/MovementController": {
       "functions": ["Init", "GetDashCooldownFraction"]
@@ -58,7 +90,26 @@
     },
     "client/Controllers/NotifyController": {
       "functions": ["Init"]
+    },
+    "client/Controllers/MenuController": {
+      "functions": ["Init", "Open", "Close"]
+    },
+    "client/Controllers/HotbarController": {
+      "functions": ["Init", "UseSlot"]
+    },
+    "client/Controllers/PetController": {
+      "functions": ["Init", "Stop", "GetPetCount"]
     }
   },
-  "scripts": ["server/Main", "client/Main"]
+  "scripts": ["server/Main", "client/Main"],
+  "v2": {
+    "_comment": "Numbers and names the v2 scenarios assert (kept here so a change in ARCHITECTURE_V2.md is a one-line edit).",
+    "difficulties": ["Easy", "Medium", "Hard", "Extreme", "Saint"],
+    "oldDifficultyIds": ["Breeze", "Gale", "Thunderstorm"],
+    "petCounts": { "Common": 6, "Uncommon": 6, "Rare": 5, "Epic": 4, "Legendary": 3, "Mythic": 2 },
+    "mascotPetId": "cloudy_dragon",
+    "items": ["heal_cloud", "shield_bubble", "phoenix_feather"],
+    "partBudget": { "lobby": 2500, "course": 2500, "pet": 70 },
+    "centreTolerance": 0.14
+  }
 }
