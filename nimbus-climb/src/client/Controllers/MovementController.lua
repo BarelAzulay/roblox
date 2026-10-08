@@ -337,6 +337,22 @@ local function toggleRun()
 	runToggled = not runToggled
 end
 
+-- Mirrors Roblox's default TouchJump footprint: 70px when min(axis) <= 500, else 120px.
+-- jumpRight = distance of the jump button's LEFT edge from the screen's right edge.
+-- jumpTop   = distance of the jump button's TOP edge from the screen's bottom edge.
+local function layoutMobileControls(m)
+	local camera = workspace.CurrentCamera
+	local vp = camera and camera.ViewportSize or Vector2.new(1280, 720)
+	local small = math.min(vp.X, vp.Y) <= 500
+	local jump = small and 70 or 120
+	local jumpRight = jump * 1.5 - 10 -- 95 small / 170 large
+	local jumpTop = small and (jump + 20) or (jump * 1.75) -- 90 small / 210 large
+	-- DASH sits above the jump button; RUN sits to its left. The max() keeps the phone layout
+	-- (-175 / -120) and only moves the buttons on big screens (tablets, unfolded foldables).
+	m.dash.Button.Position = UDim2.new(1, -30, 1, -math.max(175, jumpTop + 16))
+	m.run.Button.Position = UDim2.new(1, -math.max(120, jumpRight + 20), 1, -150)
+end
+
 local function buildMobileControls(playerGui)
 	local gui = Instance.new("ScreenGui")
 	gui.Name = "MobileControls"
@@ -346,7 +362,8 @@ local function buildMobileControls(playerGui)
 	gui.Enabled = false
 	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 
-	-- an arc above-left of the default jump button, within thumb reach
+	-- an arc above-left of the default jump button, within thumb reach; the exact offsets depend
+	-- on the size of Roblox's jump button, so layoutMobileControls places them below
 	local dashButton = makeCircleButton(gui, "DashButton", "DASH", 76, UDim2.new(1, -30, 1, -175), Theme.Colors.Stamina, function()
 		tryDash()
 	end)
@@ -354,8 +371,7 @@ local function buildMobileControls(playerGui)
 		toggleRun()
 	end)
 
-	gui.Parent = playerGui
-	return {
+	local controls = {
 		Gui = gui,
 		dash = dashButton,
 		run = runButton,
@@ -363,6 +379,29 @@ local function buildMobileControls(playerGui)
 		runOn = nil,
 		lowStamina = nil,
 	}
+	layoutMobileControls(controls)
+
+	-- re-lay out when the viewport changes (rotation, window resize, foldables); the gui is built
+	-- once and never destroyed, so the only connection to manage is the one on the current camera
+	local cameraConn = nil
+	local function bindCamera()
+		if cameraConn then
+			cameraConn:Disconnect()
+			cameraConn = nil
+		end
+		local camera = workspace.CurrentCamera
+		if camera then
+			cameraConn = camera:GetPropertyChangedSignal("ViewportSize"):Connect(function()
+				layoutMobileControls(controls)
+			end)
+		end
+		layoutMobileControls(controls)
+	end
+	workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(bindCamera)
+	bindCamera()
+
+	gui.Parent = playerGui
+	return controls
 end
 
 -- Called every frame from the character step; only touches properties that changed.

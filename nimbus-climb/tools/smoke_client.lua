@@ -782,7 +782,7 @@ S.client_final = guarded("client_final", function()
 	T.check(#waits == 0, "no WaitForChild waits forever on the client", table.concat(waits, "; "))
 	for _, d in ipairs(Mock.Diagnostics) do
 		local line = d.kind .. ": " .. d.msg .. " (x" .. d.count .. ", first at " .. d.where .. ")"
-		if d.kind == "infinite-yield" or d.kind == "nan" then
+		if d.kind == "infinite-yield" or d.kind == "nan" or d.kind == "out-of-range" then
 			T.fail("mock: " .. line)
 		elseif d.kind ~= "mock-gap" then
 			T.warn("mock: " .. line)
@@ -842,6 +842,53 @@ S.client_mobile = guarded("client_mobile", function()
 		advance(1.5)
 		T.near(hum().WalkSpeed, Config.Physics.WalkSpeed, 1.5, "tapping RUN again stops running")
 	end
+	-- Layout: RUN and DASH must never sit on top of Roblox's default jump button (TouchJump), which is
+	-- 120 px (left edge 170 px / top edge 210 px from the right / bottom screen edge) on big screens and
+	-- 70 px (95 px / 90 px) on small ones. Rectangles are {x0, y0, x1, y1} in screen pixels.
+	if run and dash then
+		local function rectOf(button)
+			local p, s = button.AbsolutePosition, button.AbsoluteSize
+			return { x0 = p.X, y0 = p.Y, x1 = p.X + s.X, y1 = p.Y + s.Y }
+		end
+		local function overlaps(a, b)
+			return a.x0 < b.x1 and b.x0 < a.x1 and a.y0 < b.y1 and b.y0 < a.y1
+		end
+		local function show(r)
+			return string.format("x %d..%d, y %d..%d", r.x0, r.x1, r.y0, r.y1)
+		end
+		local function jumpRect(w, h, size, fromRight, fromBottom)
+			return { x0 = w - fromRight, y0 = h - fromBottom, x1 = w - fromRight + size, y1 = h - fromBottom + size }
+		end
+		local function checkLayout(label, w, h, jump)
+			local d, r = rectOf(dash), rectOf(run)
+			T.check(not overlaps(d, jump), label .. ": DASH does not cover the jump button", show(d) .. " vs jump " .. show(jump))
+			T.check(not overlaps(r, jump), label .. ": RUN does not cover the jump button", show(r) .. " vs jump " .. show(jump))
+			T.check(not overlaps(d, r), label .. ": DASH and RUN do not overlap", show(d) .. " vs " .. show(r))
+			for name, rect in pairs({ DASH = d, RUN = r }) do
+				T.check(rect.x0 >= 0 and rect.y0 >= 0 and rect.x1 <= w and rect.y1 <= h,
+					label .. ": " .. name .. " is fully on screen", show(rect))
+			end
+		end
+
+		-- big screen (tablet / desktop window): 120 px jump button
+		Mock.SetViewport(1280, 720)
+		advance(0.1)
+		checkLayout("1280x720", 1280, 720, jumpRect(1280, 720, 120, 170, 210))
+
+		-- small screen (phone): 70 px jump button and the classic offsets
+		Mock.SetViewport(800, 400)
+		advance(0.1)
+		checkLayout("800x400", 800, 400, jumpRect(800, 400, 70, 95, 90))
+		local dp, rp = dash.Position, run.Position
+		T.check(dp.X.Scale == 1 and dp.X.Offset == -30 and dp.Y.Scale == 1 and dp.Y.Offset == -175,
+			"800x400: DASH keeps the small layout (-30, -175 from the bottom-right)", tostring(dp))
+		T.check(rp.X.Scale == 1 and rp.X.Offset == -120 and rp.Y.Scale == 1 and rp.Y.Offset == -150,
+			"800x400: RUN keeps the small layout (-120, -150 from the bottom-right)", tostring(rp))
+
+		Mock.SetViewport(1280, 720) -- leave the world as we found it
+		advance(0.1)
+	end
+
 	local fontBad = 0
 	local allowed = {}
 	for _, font in pairs(Theme.Fonts) do

@@ -2295,8 +2295,10 @@ local T = {}
 function T.bool(d)
 	return { ty = "boolean", def = d }
 end
-function T.num(d)
-	return { ty = "number", def = d }
+-- lo / hi (optional): the range the engine accepts. Writing outside it is clamped (like Roblox) and
+-- recorded as an "out-of-range" diagnostic, which the smoke test treats as a failure.
+function T.num(d, lo, hi)
+	return { ty = "number", def = d, lo = lo, hi = hi }
 end
 function T.str(d)
 	return { ty = "string", def = d }
@@ -2726,6 +2728,20 @@ InstMT.__newindex = function(self, key, value)
 		local ok, norm = conforms(spec.ty, value)
 		if not ok then
 			error(sformat("Unable to assign property %s. %s expected, got %s", tostring(key), describe(spec.ty), typeof(value)), 2)
+		end
+		if spec.ty == "number" and (spec.lo or spec.hi) then
+			local clamped = norm
+			if spec.lo and clamped < spec.lo then
+				clamped = spec.lo
+			end
+			if spec.hi and clamped > spec.hi then
+				clamped = spec.hi
+			end
+			if clamped ~= norm then
+				diag("out-of-range", class.name .. "." .. key, class.name .. "." .. key .. " was set to " .. tostring(norm)
+					.. " but Roblox only accepts " .. tostring(spec.lo) .. ".." .. tostring(spec.hi) .. " (clamped to " .. tostring(clamped) .. ")")
+				norm = clamped
+			end
 		end
 		local old = st.props[key]
 		if old == nil then
@@ -4064,6 +4080,31 @@ local function absSizeOf(inst)
 	return v2(psize.X * sz.X.Scale + sz.X.Offset, psize.Y * sz.Y.Scale + sz.Y.Offset)
 end
 
+-- Top-left corner in screen pixels: parent origin + parent size * Position.Scale + Position.Offset - AnchorPoint * size.
+-- Like AbsoluteSize this ignores layouts (UIListLayout, UIAspectRatioConstraint ...), UIScale and the top-bar inset,
+-- so it is exact only for plain Position/Size/AnchorPoint hierarchies (enough to test overlap of fixed buttons).
+local function absPosOf(inst)
+	local st = inst[STATE]
+	if not st.class.isA.GuiObject then
+		return v2(0, 0)
+	end
+	local origin, psize = v2(0, 0), Mock.Viewport
+	local parent = st.parent
+	if parent and parent[STATE].class.isA.GuiBase2d then
+		if parent[STATE].class.isA.GuiObject then
+			origin = absPosOf(parent)
+			psize = absSizeOf(parent)
+		else
+			psize = layerSize(parent)
+		end
+	end
+	local pos = st.props.Position or u2(0, 0, 0, 0)
+	local anchor = st.props.AnchorPoint or v2(0, 0)
+	local size = absSizeOf(inst)
+	return v2(origin.X + psize.X * pos.X.Scale + pos.X.Offset - size.X * anchor.X,
+		origin.Y + psize.Y * pos.Y.Scale + pos.Y.Offset - size.Y * anchor.Y)
+end
+
 defclass("GuiBase", "Instance", { creatable = false })
 defclass("GuiBase2d", "GuiBase", {
 	creatable = false,
@@ -4071,8 +4112,8 @@ defclass("GuiBase2d", "GuiBase", {
 		AbsoluteSize = function(self)
 			return absSizeOf(self)
 		end,
-		AbsolutePosition = function()
-			return v2(0, 0)
+		AbsolutePosition = function(self)
+			return absPosOf(self)
 		end,
 		AbsoluteRotation = function()
 			return 0
@@ -4153,7 +4194,7 @@ local function textBounds(self, st)
 	return v2(longest * size * 0.5, lines * size)
 end
 local textProps = {
-	Text = T.str(""), TextColor3 = T.rgb(27, 42, 53), TextSize = T.num(14), TextScaled = T.bool(false), TextWrapped = T.bool(false),
+	Text = T.str(""), TextColor3 = T.rgb(27, 42, 53), TextSize = T.num(14, 1, 100), TextScaled = T.bool(false), TextWrapped = T.bool(false),
 	TextXAlignment = T.enum("TextXAlignment", "Center"), TextYAlignment = T.enum("TextYAlignment", "Center"), Font = T.enum("Font", "SourceSans"),
 	FontFace = T.font(), TextTransparency = T.num(0), TextStrokeColor3 = T.rgb(0, 0, 0), TextStrokeTransparency = T.num(1), RichText = T.bool(false),
 	LineHeight = T.num(1), MaxVisibleGraphemes = T.num(-1), TextTruncate = T.enum("TextTruncate", "None"), LocalizationMatchIdentifier = T.str(""),
@@ -6081,6 +6122,15 @@ function Mock.PendingWaitList(olderThan)
 	end
 	tsort(out)
 	return out
+end
+
+-- Changes the screen size (rotation / resize / foldable) and fires Camera.ViewportSize changes like Roblox does.
+function Mock.SetViewport(width, height)
+	Mock.Viewport = v2(width, height)
+	local cam = Mock.workspace and Mock.workspace[STATE].props.CurrentCamera
+	if cam then
+		firePropChanged(cam, cam[STATE], "ViewportSize")
+	end
 end
 
 function Mock.FindDescendants(root, pred)

@@ -22,9 +22,10 @@ text goes through one small `Theme` module, so the whole game shares the same ro
 - **Co-op rules** - shared checkpoints, downed teammates that can be revived, pressure-plate bridges that need
   somebody to stand on the plate, and a team result at the end.
 - **Hazards** - spinning bars, storm clouds, lightning zones with a red warning disc, vanishing clouds,
-  moving clouds, bounce pads.
+  moving clouds, bounce pads (they throw you forward at a fixed speed, so the next cloud is always reachable).
 - **Cloud tokens** - golden tokens floating over risky steps. They are saved between visits (DataStore) and
-  shown on the leaderboard.
+  appear in the HUD counter (top-right). The server still keeps a `leaderstats` folder with a `Tokens` value per
+  player, but Roblox's default leaderboard / player list is hidden so it does not cover the counter.
 - **Health, stamina and damage** - a custom health bar, damage numbers, screen flash and camera shake. Health
   never reaches zero in a match: a lethal hit puts you in the *downed* state until a teammate reaches the next
   checkpoint.
@@ -35,11 +36,13 @@ text goes through one small `Theme` module, so the whole game shares the same ro
 |---|---|---|---|
 | Move | `W` `A` `S` `D` | thumbstick | left stick |
 | Jump | `Space` | jump button | `A` |
-| Run (uses stamina) | hold `Left Shift` | **RUN** button (toggle) | `L3` |
-| Dash (also in the air) | `Q` | **DASH** button | `B` |
-| Leave party / match | on-screen **Leave** buttons | same | same |
+| Run (uses stamina) | hold `Left Shift` (or `Right Shift`) | **RUN** button (tap to toggle) | `L3` (press to toggle) |
+| Dash (uses stamina, 1.6 s cooldown, also in the air) | `Q` | **DASH** button | `B` |
+| Leave party / match | on-screen **Leave** / **Leave match** buttons (the match button asks you to press it twice) | same | same |
 
 ## One-click start
+
+*(If you only want to play, skip this section and open `play/NimbusClimb.rbxlx`, see the next section.)*
 
 Extract the downloaded ZIP first (do not run anything from inside the ZIP). Then start the Rojo server with the launcher for your computer. The first run downloads Rojo 7.7.1 (about 5 MB) and asks nothing more. Keep the window open while you work, then connect from Roblox Studio (Plugins - Rojo - Connect).
 
@@ -53,9 +56,16 @@ Extract the downloaded ZIP first (do not run anything from inside the ZIP). Then
 
 If macOS asks to let Terminal access your Downloads folder, click **Allow**. If you click Don't Allow, the launcher may wrongly say it cannot find `default.project.json`.
 
-## Open it in Roblox Studio (Rojo)
+## Open it in Roblox Studio
 
-The repository is a [Rojo](https://rojo.space) project (`default.project.json`):
+There are two ways in. Pick the one that matches what you want to do.
+
+**Just play it (no tools at all):** open `play/NimbusClimb.rbxlx` directly (double-click it, or File -> Open from
+File in Studio) and press **Play**. It is a ready-made copy of everything in `src/`, so you do not need Rojo, Node
+or Python for this. Remember it is a snapshot: if you edit `src/`, rebuild it (see below) or use live sync.
+
+**Edit the code (live sync with Rojo):** the repository is a [Rojo](https://rojo.space) project
+(`default.project.json`):
 
 | Folder | Becomes |
 |---|---|
@@ -66,20 +76,27 @@ The repository is a [Rojo](https://rojo.space) project (`default.project.json`):
 1. **Install Rojo** - the easiest way is the VS Code extension "Rojo", or install the CLI with
    [Rokit](https://github.com/rojo-rbx/rokit) (`rokit add rojo-rbx/rojo`) or from the
    [releases page](https://github.com/rojo-rbx/rojo/releases). Also install the **Rojo plugin** in Studio
-   (Plugins tab -> Manage Plugins, or `rojo plugin install`).
-2. **Live sync:** in this folder run
+   (Plugins tab -> Manage Plugins, or `rojo plugin install`). The launchers above use Rojo 7.7.1, so the
+   matching 7.7.1 plugin is the safest choice.
+2. **Live sync:** in the `nimbus-climb` folder (the one that contains `default.project.json`) run
 
    ```bash
    rojo serve
    ```
 
-   open a new **Baseplate** place in Studio, click **Connect** in the Rojo plugin, then press **Play**.
-3. **Or build a place file** and open it directly:
+   open a new **Baseplate** place in Studio, click **Connect** in the Rojo plugin (Plugins -> Rojo -> Connect),
+   then press **Play**. The `Start-Rojo-Windows.bat` / `Start-Rojo-Mac.command` launchers start the same server
+   and download the Rojo command line tool for you (you still need the Studio plugin).
+3. **Rebuild the ready-made place file** (`play/NimbusClimb.rbxlx`) after you change anything in `src/`. From the
+   `nimbus-climb` folder run:
 
    ```bash
-   rojo build -o NimbusClimb.rbxlx
+   rojo build default.project.json -o play/NimbusClimb.rbxlx
    ```
 
+   The place file is a generated copy of `src/`; never edit it by hand, always rebuild it. It holds only the
+   three script containers from the table above (no baseplate, no lighting, no map): everything else is created
+   by the scripts when the game starts.
 4. Recommended place settings: *Game Settings -> Security -> Enable Studio Access to API Services* (so saving
    tokens works in Studio) and leave *StreamingEnabled* off. The server script already sets the sky, lighting,
    gravity and the fall-destroy height, so an empty baseplate is all you need: the game places players itself.
@@ -119,6 +136,12 @@ lobby plaza --walk onto a portal pad--> party (1-4 players, countdown 15 s, 4 s 
 `ARCHITECTURE.md` is the binding contract between all modules (names, argument order, payload shapes).
 
 ```
+default.project.json   Rojo project (maps src/ into the game, see the table above)
+play/NimbusClimb.rbxlx ready-made place file, built from src/ with rojo build
+Start-Rojo-*.{bat,command}  one-click Rojo launchers for Windows / Mac
+tools/                 syntax check, static analysis and the Roblox-mock smoke test (see "Checking your changes")
+ARCHITECTURE.md        module contracts
+
 src/shared    Config  Theme  Util  Remotes                (pure data / helpers, used by both sides)
 src/server    Main.server.lua                              boots everything in order, each step under pcall
   Services/   LightingService   sky, atmosphere, gravity
@@ -141,7 +164,8 @@ src/client    Main.client.lua                              starts the controller
 Rules of the road: the **server is authoritative** (health, damage, tokens, checkpoints, match flow); clients
 only do input, movement feel and UI. Behaviour is attached with `CollectionService` **tags** (`Config.Tags`)
 plus **attributes** for parameters. Server -> client state travels over a handful of RemoteEvents
-(`Config.Remotes`: `Notify`, `DamageTaken`, `PartyState`, `MatchState`, `MatchResult`, `DashFx`). All Lua is
+(`Config.Remotes`: `Notify`, `DamageTaken`, `PartyState`, `MatchState`, `MatchResult`, `DashFx`); the client talks
+back with three small ones (`Dash`, `LeaveParty`, `LeaveMatch`). All Lua is
 plain Lua 5.1-compatible syntax (no Luau-only syntax) so the tooling can parse it with stock parsers.
 
 ## Tuning: `src/shared/Config.lua`
@@ -163,7 +187,7 @@ lobby builds one portal per entry.
 ## Checking your changes
 
 ```bash
-pip install lupa            # once: embedded Lua for the syntax check and the smoke test
+pip install lupa            # once: embedded Lua for the syntax check and the smoke test (also needs Python 3 and Node 18+)
 tools/run_checks.sh         # everything (about 20 s); add --quick for a shorter run
 tools/run_checks.sh --static   # only the fast checks
 ```
@@ -204,7 +228,7 @@ tools/run_checks.sh --static   # only the fast checks
 ## Ideas for next steps
 
 - Sound: footsteps on clouds, wind, thunder, a gentle lobby theme (needs asset ids, which were avoided so far).
-- Cosmetics shop in the lobby that spends cloud tokens (trails, hats, dash colours) and a token leaderboard.
+- Cosmetics shop in the lobby that spends cloud tokens (trails, hats, dash colours) and a custom token leaderboard (the default Roblox one is hidden).
 - Daily seed: one shared course per day with a best-time board, and ghost runs of friends.
 - More hazards: wind gusts that push sideways, rotating platforms, ice clouds, rising storm "lava" that forces
   the team forward.

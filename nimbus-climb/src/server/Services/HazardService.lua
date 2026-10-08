@@ -999,8 +999,14 @@ local function onBounceTouched(ctx, pad, hit)
 		return
 	end
 	pad.lastHit[player] = now
-	local velocity = root.AssemblyLinearVelocity
-	root.AssemblyLinearVelocity = Vector3.new(velocity.X, pad.power, velocity.Z)
+	-- keep the player's heading; when moving, rescale it to the pad's LaunchSpeed so a bounce always
+	-- carries the distance the course generator validated. A standing player bounces straight up.
+	local v = root.AssemblyLinearVelocity
+	local h = Vector3.new(v.X, 0, v.Z)
+	if pad.launchSpeed > 0 and h.Magnitude > 2 then
+		h = h.Unit * pad.launchSpeed
+	end
+	root.AssemblyLinearVelocity = Vector3.new(h.X, pad.power, h.Z)
 	popPad(ctx, pad)
 end
 
@@ -1008,6 +1014,7 @@ local function attachBouncePad(ctx, part)
 	local pad = {
 		part = part,
 		power = attrNumber(part, "Power", 90),
+		launchSpeed = attrNumber(part, "LaunchSpeed", 0),
 		baseSize = part.Size,
 		lastHit = {},
 		tween = nil,

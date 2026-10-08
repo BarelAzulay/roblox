@@ -353,14 +353,22 @@ local function destroyCourse(match)
 		pcall(function()
 			course.Folder:Destroy()
 		end)
-	end
-	if match.Seed then
-		-- belt and braces: a Build() that threw after parenting could leave an orphan folder
-		local orphan = Workspace:FindFirstChild("Course_" .. tostring(match.Seed))
-		if orphan then
-			pcall(function()
-				orphan:Destroy()
-			end)
+	elseif match.Seed then
+		-- belt and braces: a Build() that threw after parenting could leave an orphan folder.
+		-- Sweep it by name, but never touch a folder that belongs to another live match.
+		local name = "Course_" .. tostring(match.Seed)
+		local claimed = {}
+		for _, m in pairs(matches) do
+			if m ~= match and m.Course and m.Course.Folder then
+				claimed[m.Course.Folder] = true
+			end
+		end
+		for _, child in ipairs(Workspace:GetChildren()) do
+			if child.Name == name and not claimed[child] then
+				pcall(function()
+					child:Destroy()
+				end)
+			end
 		end
 	end
 end
@@ -964,6 +972,16 @@ local function allocateSlot()
 	return nil
 end
 
+-- True when another live match already uses this layout seed (course folders are named after it).
+local function seedInUse(match, seed)
+	for _, m in pairs(matches) do
+		if m ~= match and m.Seed == seed then
+			return true
+		end
+	end
+	return false
+end
+
 -- Generate (and validate) a layout, build the course, attach hazards + token pickup, and hook the
 -- checkpoint / finish touch events. Errors propagate to the caller (StartMatch cleans up).
 local function setupCourse(match)
@@ -975,7 +993,12 @@ local function setupCourse(match)
 
 	local layout = nil
 	for attempt = 1, LAYOUT_ATTEMPTS do
-		local seed = os.time() + match.Slot * 101 + match.Id * 7 + attempt
+		-- match ids are unique per server, so ids far apart in seed space keep concurrent matches
+		-- from sharing a seed (and thus a Course_<seed> folder name); bump past any live collision
+		local seed = os.time() + match.Id * 100003 + attempt
+		while seedInUse(match, seed) do
+			seed = seed + 1
+		end
 		local okLayout, result = pcall(CB.GenerateLayout, match.DifficultyId, seed)
 		if okLayout and type(result) == "table" then
 			layout = result

@@ -2517,6 +2517,28 @@ S.hazards = guarded("hazards", function()
 		Mock.Touch(pad, root(a))
 		advance(0.05)
 		T.near(root(a).AssemblyLinearVelocity.Y, 0, 0.5, "BouncePad has a 0.3 s debounce")
+
+		-- LaunchSpeed: a moving player keeps their heading but leaves at the pad's horizontal speed;
+		-- a (nearly) standing player bounces straight up
+		local speed = pad:GetAttribute("LaunchSpeed")
+		if T.check(type(speed) == "number" and speed > 0, "BouncePads carry a LaunchSpeed attribute", tostring(speed)) then
+			advance(0.5)
+			root(a).AssemblyLinearVelocity = Vector3.new(3, 0, 4) -- 5 studs/s along (0.6, 0, 0.8)
+			Mock.Touch(pad, root(a))
+			advance(0.05)
+			local v = root(a).AssemblyLinearVelocity
+			T.near(v.Y, power, 1, "a moving player still gets the full Power")
+			T.near(math.sqrt(v.X * v.X + v.Z * v.Z), speed, 0.5, "a moving player leaves a BouncePad at LaunchSpeed")
+			T.near(v.X, speed * 0.6, 0.5, "...keeping the heading (X)")
+			T.near(v.Z, speed * 0.8, 0.5, "...keeping the heading (Z)")
+			advance(0.5)
+			root(a).AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+			Mock.Touch(pad, root(a))
+			advance(0.05)
+			v = root(a).AssemblyLinearVelocity
+			T.near(v.Y, power, 1, "a standing player gets the full Power")
+			T.near(math.sqrt(v.X * v.X + v.Z * v.Z), 0, 0.5, "a standing player bounces straight up")
+		end
 		away()
 	end
 
@@ -2781,7 +2803,7 @@ S.final_checks = guarded("final_checks", function()
 		local line = d.kind .. ": " .. d.msg .. " (x" .. d.count .. ", first at " .. d.where .. ")"
 		if d.kind == "unknown-member" then
 			T.warn("mock: " .. line, "reading a member that does not exist errors in Roblox; if it is a real property, add it to robloxmock.lua")
-		elseif d.kind == "infinite-yield" or d.kind == "nan" then
+		elseif d.kind == "infinite-yield" or d.kind == "nan" or d.kind == "out-of-range" then
 			T.fail("mock: " .. line)
 		elseif d.kind == "deprecated" then
 			T.warn("mock: " .. line)

@@ -81,6 +81,9 @@ local LIGHTNING_WARNING = { 1.6, 1.3, 1.1 }
 local VANISH_DELAY = { 1.4, 1.0, 0.8 }
 local VANISH_RETURN = { 3.0, 3.5, 4.0 }
 local BOUNCE_POWER = { 70, 74, 78 }
+-- Fixed horizontal speed (studs/s) a moving player leaves a pad with, so walkers and runners
+-- cover the same distance. HazardService applies it along the player's heading.
+local BOUNCE_SPEED = { 27, 24, 22 }
 local MOVE_WIDTH = { { 5, 7 }, { 6, 9 }, { 7, 10 } } -- studs of travel
 local MOVE_PERIOD = { { 3.5, 4.2 }, { 2.8, 3.6 }, { 2.6, 3.2 } } -- seconds, one way
 
@@ -501,6 +504,7 @@ function CourseBuilder.GenerateLayout(difficultyId, seed)
 		elseif kind == "Bounce" then
 			return {
 				Power = BOUNCE_POWER[tier],
+				LaunchSpeed = BOUNCE_SPEED[tier],
 				PadSize = Util.Clamp(minDim * 0.42, 3, 4.6),
 			}
 		end
@@ -1107,6 +1111,33 @@ function CourseBuilder.ValidateLayout(layout)
 				or type(h.PadSize) ~= "number" or h.PadSize > minDim * 0.5 + EPS then
 				bad("Bounce step %d has bad Power/PadSize", i)
 			end
+			if h then
+				local speed = h.LaunchSpeed
+				if type(speed) ~= "number" or speed < 18 or speed > 30 then
+					bad("Bounce step %d has bad LaunchSpeed %s (need a number in [18, 30])", i, tostring(speed))
+				elseif type(h.Power) == "number" then
+					-- The pad launches from the step centre at LaunchSpeed, so the next static step's
+					-- nearest point must be inside the airtime reach (no overshoot check on purpose).
+					local nxt = steps[i + 1]
+					if nxt and nxt.Kind ~= "Moving" and nxt.Pos and nxt.Size then
+						local nxtRise = nxt.Pos.Y - s.Pos.Y
+						local disc = h.Power * h.Power - 2 * P.Gravity * (nxtRise - 0.7)
+						if disc < 0 then
+							bad("Bounce step %d cannot reach the top of step %d (rise %.2f)", i, i + 1, nxtRise)
+						else
+							local t = (h.Power + math.sqrt(disc)) / P.Gravity
+							local nb = stepBox(nxt)
+							local dx = math.max(nb.x0 - s.Pos.X, 0, s.Pos.X - nb.x1)
+							local dz = math.max(nb.z0 - s.Pos.Z, 0, s.Pos.Z - nb.z1)
+							local dist = math.sqrt(dx * dx + dz * dz)
+							if dist > speed * t + EPS then
+								bad("Bounce step %d launch reaches %.2f but step %d starts %.2f from the pad",
+									i, speed * t, i + 1, dist)
+							end
+						end
+					end
+				end
+			end
 		elseif s.Kind == "PlateBridge" then
 			if not h or not h.Span or not h.Sides or #h.Sides ~= 2 or type(h.BridgeNumber) ~= "number" then
 				bad("PlateBridge step %d lacks Span/Sides", i)
@@ -1539,6 +1570,7 @@ local function buildBounce(ctx, step)
 		color, Enum.Material.Neon)
 	CollectionService:AddTag(p, Tags.BouncePad)
 	p:SetAttribute("Power", h.Power)
+	p:SetAttribute("LaunchSpeed", h.LaunchSpeed)
 	local gui = surfaceGui(p, Enum.NormalId.Top, 60)
 	addText(gui, "▲", "Accent", Theme.Colors.White, 0.05, 0.9)
 	sparkles(p, color, 5, 6, 1.2, 0.8)

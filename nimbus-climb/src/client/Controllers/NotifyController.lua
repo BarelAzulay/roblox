@@ -3,7 +3,8 @@
 --   NotifyController.Init()
 --
 -- Remotes handled
---   Notify(text, kind, duration)  -> toast stack, top-centre (max MAX_TOASTS). kind: info|good|bad|token.
+--   Notify(text, kind, duration)  -> toast stack, top-centre below the HUD match panel (positioned and
+--                                    scaled like HudController does, max MAX_TOASTS). kind: info|good|bad|token.
 --                                    Identical toasts that are still showing are merged into "text x2".
 --   MatchResult(result)           -> big centred results card: VICTORY!/DEFEAT, difficulty, time, tokens,
 --                                    win bonus, a member table and a "Returning to the lobby in Ns…"
@@ -18,6 +19,8 @@
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local GuiService = game:GetService("GuiService")
+local UserInputService = game:GetService("UserInputService")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Config = require(Shared.Config)
@@ -36,13 +39,31 @@ local LocalPlayer = Players.LocalPlayer
 local MAX_TOASTS = 4
 local TOAST_HEIGHT = 46
 local TOAST_GAP = 8
-local TOAST_TOP = 160 -- px from the screen top: leaves room for the match panel
 local TOAST_MAX_TEXT_W = 440
 local TOAST_BG = 0.14
 local TOAST_STROKE = 0.15
 local TOAST_TEXT_STROKE = 0.55
 local DEFAULT_DURATION = 3
 local MAX_TOAST_TEXT = 120 -- bytes
+
+-- Where the toast stack starts. HudController scales its whole layout by
+-- s = clamp(min(vpY / DESIGN_H, vpX / DESIGN_W), MIN_SCALE, MAX_SCALE) and puts the match panel
+-- (HUD_MATCH_H design px) just under the GUI inset, so the stack is placed (and scaled) the same way
+-- instead of using a fixed pixel offset. KEEP THESE IN SYNC with the constants of the same meaning in
+-- HudController.lua (DESIGN_W/H, MIN/MAX_SCALE, EDGE, TOUCH_SAFE, TOKEN_W, TOKEN_H_MATCH, MATCH_W/H).
+local HUD_DESIGN_W = 1500
+local HUD_DESIGN_H = 1080
+local HUD_MIN_SCALE = 0.75
+local HUD_MAX_SCALE = 2.5
+local HUD_EDGE = 14 -- HudController EDGE: margin to the screen edge
+local HUD_TOUCH_SAFE = 22 -- extra side margin on touch devices
+local HUD_TOP_PAD = 6 -- design px between the GUI inset and the match panel
+local HUD_MATCH_W = 520
+local HUD_MATCH_MIN_W = 440
+local HUD_MATCH_H = 126
+local HUD_TOKEN_W = 214
+local HUD_TOKEN_H_MATCH = 86 -- token counter height while in a match
+local HUD_GAP = 10 -- design px between stacked HUD panels / below the match panel
 
 -- results card
 local CARD_W = 560
@@ -82,6 +103,7 @@ local SUBTITLES = {
 local initialized = false
 
 local toastHolder = nil -- Frame that toasts live in
+local holderScale = nil -- UIScale on toastHolder (follows the HUD scale)
 local toasts = {} -- alive toasts, oldest first
 local pendingToasts = {} -- Notify calls that arrived before the GUI existed
 
@@ -343,6 +365,70 @@ local function addToast(text, kindName, duration)
 	scheduleExpiry(toast, duration)
 end
 
+-- Place and scale the toast stack for a viewport of size vp, mirroring HudController.relayout:
+-- the stack starts a gap below the match panel (and below the token counter when HudController tucks
+-- it under the match panel on narrow screens) and uses the same UIScale as the HUD.
+local function applyHolderLayout(vp)
+	if not toastHolder or not holderScale then
+		return
+	end
+	local s = Util.Clamp(math.min(vp.Y / HUD_DESIGN_H, vp.X / HUD_DESIGN_W), HUD_MIN_SCALE, HUD_MAX_SCALE)
+
+	local insetY = 0
+	pcall(function()
+		insetY = GuiService:GetGuiInset().Y
+	end)
+
+	-- same "narrow" test as HudController (token counter does not fit beside the match panel)
+	local side = 0
+	if UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled then
+		side = HUD_TOUCH_SAFE
+	end
+	local effW = vp.X / s -- viewport width in design pixels
+	local matchW = math.floor(Util.Clamp(effW - 2 * (HUD_EDGE + side), HUD_MATCH_MIN_W, HUD_MATCH_W))
+	local belowDesign = HUD_TOP_PAD + HUD_MATCH_H + HUD_GAP
+	if effW < matchW + 2 * (HUD_TOKEN_W + HUD_EDGE) then
+		belowDesign = belowDesign + HUD_TOKEN_H_MATCH + HUD_GAP
+	end
+
+	holderScale.Scale = s
+	-- a UIScale also scales its parent's size: pre-divide the width so the stack still spans the screen
+	-- (toasts are centred on it); the height is in design px and scales with the toasts
+	toastHolder.Size = UDim2.new(1 / s, 0, 0, toastY(MAX_TOASTS + 1))
+	-- the holder's own Position is not affected by its UIScale: this is real screen pixels
+	toastHolder.Position = UDim2.fromOffset(0, math.floor(insetY + belowDesign * s + 0.5))
+end
+
+local function layoutHolder()
+	local camera = workspace.CurrentCamera
+	local vp = camera and camera.ViewportSize or Vector2.new(1280, 720)
+	if vp.X < 8 or vp.Y < 8 then
+		return -- the viewport can be 1x1 at startup: the next change / delayed re-check fixes it
+	end
+	applyHolderLayout(vp)
+end
+
+-- Keep the stack in step with the HUD whenever the viewport changes (same pattern as
+-- HudController.hookCamera).
+local function hookToastCamera()
+	local cameraConn = nil
+	local function bind()
+		if cameraConn then
+			cameraConn:Disconnect()
+			cameraConn = nil
+		end
+		local camera = workspace.CurrentCamera
+		if camera then
+			cameraConn = camera:GetPropertyChangedSignal("ViewportSize"):Connect(layoutHolder)
+		end
+		layoutHolder()
+	end
+	workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(bind)
+	bind()
+	task.delay(0.5, layoutHolder)
+	task.delay(2, layoutHolder)
+end
+
 local function buildToastGui()
 	local playerGui = LocalPlayer:WaitForChild("PlayerGui", 30)
 	if not playerGui then
@@ -354,12 +440,19 @@ local function buildToastGui()
 	holder.Name = "Stack"
 	holder.BackgroundTransparency = 1
 	holder.BorderSizePixel = 0
-	holder.Position = UDim2.fromOffset(0, TOAST_TOP)
-	holder.Size = UDim2.new(1, 0, 0, toastY(MAX_TOASTS + 1))
 	holder.Parent = gui
+
+	local scale = Instance.new("UIScale")
+	scale.Name = "HolderScale"
+	scale.Parent = holder
 
 	gui.Parent = playerGui
 	toastHolder = holder
+	holderScale = scale
+
+	-- sane placement until the real viewport is known, then follow the camera
+	applyHolderLayout(Vector2.new(1280, 720))
+	hookToastCamera()
 
 	local queued = pendingToasts
 	pendingToasts = {}

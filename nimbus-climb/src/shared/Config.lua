@@ -43,7 +43,7 @@ Config.Tags = {
 	LightningZone = "NC_LightningZone", -- attrs Damage, Interval, Warning
 	VanishCloud = "NC_VanishCloud", -- attrs VanishDelay, ReturnDelay
 	MovingCloud = "NC_MovingCloud", -- attrs EndOffset (Vector3), Period
-	BouncePad = "NC_BouncePad", -- attr Power
+	BouncePad = "NC_BouncePad", -- attrs Power, LaunchSpeed (horizontal studs/s when the player is moving)
 	PressurePlate = "NC_PressurePlate", -- attr BridgeId (string)
 	PlateBridge = "NC_PlateBridge", -- attr BridgeId (string)
 }

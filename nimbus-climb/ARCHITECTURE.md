@@ -219,7 +219,7 @@ Behaviours (parameters read from attributes, with sane defaults when missing):
 | `LightningZone` | every `Interval` (default 4s, ±jitter) show a red glowing warning disc for `Warning` s (default 1.2), then a bolt (Neon beam part) strikes; players in the radius take `Damage` (default 28, `"Lightning"`) + flash + thunder-free (no sounds) |
 | `VanishCloud` | when a player stands on it (Touched), after `VanishDelay` (default 0.9s) it fades (Transparency tween), `CanCollide=false`, returns after `ReturnDelay` (default 3.5s) |
 | `MovingCloud` | tween the part between its start CFrame and start + `EndOffset` over `Period` s, Sine in/out, looped back/forth forever; players standing on it move with it (Roblox does this natively for Anchored parts moved by CFrame tweens? NO — use `AssemblyLinearVelocity`-free approach: make the part non-anchored is wrong. Use a Heartbeat that sets CFrame on the anchored part; characters on moving anchored parts DO NOT inherit motion, so also nudge standing players: each Heartbeat, for players whose root is within the part's top area, add the part's per-frame delta to the root CFrame) |
-| `BouncePad` | on Touched by a player, `HumanoidRootPart.AssemblyLinearVelocity = Vector3.new(vel.X, Power or 90, vel.Z)` (server sets; debounce 0.3s) plus squash tween |
+| `BouncePad` | on Touched by a player, `HumanoidRootPart.AssemblyLinearVelocity = Vector3.new(h.X, Power or 90, h.Z)` where `h` is the player's horizontal velocity, rescaled to the pad's `LaunchSpeed` attribute (same heading) when the player is moving (> 2 studs/s); a standing player bounces straight up. `LaunchSpeed` defaults to 0 = keep the player's own speed (server sets; debounce 0.3s) plus squash tween |
 | `PressurePlate` + `PlateBridge` | matching `BridgeId`. Bridge parts are visible+collidable **only while at least one player stands on any plate with that id** (poll 5 Hz via `GetPartBoundsInBox`); retract with a quick fade 1.0s after the last player leaves. Co-op mechanic: someone must hold the plate while teammates cross |
 
 Everything created at runtime (warning discs, bolts) parented inside `container`. All loops check a
@@ -418,8 +418,10 @@ MovementController.Init()
 HudController.Init()
 ```
 A single ScreenGui "NimbusHud" (`ResetOnSpawn = false`, `IgnoreGuiInset = true`). Disable the default
-health bar: `StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Health, false)` in a retry-pcall loop (also
-the default backpack/emotes stay untouched). Elements (all fonts through Theme):
+health bar and the default player list (the `leaderstats` panel would overlap the token counter):
+`StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Health, false)` and `(Enum.CoreGuiType.PlayerList, false)`, each in its
+own pcall inside a retry loop, and re-applied whenever `StarterGui.CoreGuiChangedSignal` re-enables either one (the
+default backpack/emotes stay untouched). Elements (all fonts through Theme):
 * **Health bar** bottom-left: rounded panel, animated fill (tween on `Humanoid.HealthChanged`),
   colour via `Theme.HealthColor`, heart icon (a "♥" TextLabel, no images), text "78 / 100"
   (`Theme "Display"`), a lagging "damage trail" bar, low-health pulse (<30%). When `Downed` attr is

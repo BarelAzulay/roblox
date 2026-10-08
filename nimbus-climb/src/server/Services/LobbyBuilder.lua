@@ -731,18 +731,36 @@ local function buildPlaza(root, portalAngles, bridgeAngles, portalDiffs)
 	rimPuffs(f, rng, Vector3.new(ox, TOP, oz), SURF_R + 0.5, 27, 8, 12, 0.2, 1.4, COL.Cloud, bridgeAngles, 9)
 
 	-- Soft pastel swirl patches on the ground so the plaza is not one flat white sheet.
+	-- Patches share one height, so candidates that would overlap an earlier patch are rejected
+	-- (coplanar faces of different colours would z-fight). Bounded retries keep it deterministic.
 	local patchColors = { COL.Lilac, COL.Peach, COL.Pink, COL.Sky }
-	for _ = 1, 12 do
+	local placed = {}
+	local attempts = 0
+	while #placed < 12 and attempts < 80 do
+		attempts = attempts + 1
 		local ang = rng:Float(0, 360)
 		local rr = rng:Float(18, 68)
 		local d = rng:Float(6, 13)
 		local nearPad = rr > 48 and nearAny(ang, portalAngles, 16)
 		if not nearPad then
-			disc(f, polar(ang, rr, TOP + 0.03), d, 0.06, {
-				Name = "GroundPatch",
-				Color = rng:Pick(patchColors),
-				CanCollide = false,
-			})
+			local pos = polar(ang, rr, TOP + 0.03)
+			local clear = true
+			for _, p in ipairs(placed) do
+				local dx, dz = pos.X - p.x, pos.Z - p.z
+				local minDist = (d + p.d) / 2 + 0.5 -- small margin so edges do not just touch
+				if dx * dx + dz * dz < minDist * minDist then
+					clear = false
+					break
+				end
+			end
+			if clear then
+				placed[#placed + 1] = { x = pos.X, z = pos.Z, d = d }
+				disc(f, pos, d, 0.06, {
+					Name = "GroundPatch",
+					Color = rng:Pick(patchColors),
+					CanCollide = false,
+				})
+			end
 		end
 	end
 
@@ -1079,17 +1097,32 @@ local function buildPortal(root, rng, diff, angleDeg)
 	----------------------------------------------------------------
 	-- Billboard: title, stars, player count, status
 	----------------------------------------------------------------
-	local anchor = anchorPart(f, "BillboardAnchor", gateCenter + Vector3.new(0, 15.5, 0), Vector3.new(1, 1, 1))
+	-- The card is sized in studs (scale units of a BillboardGui), so it shrinks with distance like
+	-- the gate itself instead of staying a fixed pixel size. Its bottom edge sits above the
+	-- difficulty gems (top ~ringR + 4.2) and the frame puffs (top ~ringR + 3.5); the height lives
+	-- in the anchor, so StudsOffset stays zero.
+	local cardW, cardH = 22, 12
+	local cardGap = 1.3
+	local anchor = anchorPart(
+		f,
+		"BillboardAnchor",
+		gateCenter + Vector3.new(0, ringR + 3.4 + 1.2 + cardGap + cardH / 2, 0),
+		Vector3.new(1, 1, 1)
+	)
 	local gui = Instance.new("BillboardGui")
 	gui.Name = "PortalBillboard"
-	gui.Size = UDim2.new(0, 360, 0, 200)
+	gui.Size = UDim2.new(cardW, 0, cardH, 0)
 	gui.StudsOffset = Vector3.new(0, 0, 0)
 	gui.AlwaysOnTop = false
 	gui.LightInfluence = 0
-	gui.MaxDistance = 260
+	gui.MaxDistance = 150 -- plaza ring (62) + plaza radius (70) reaches about 132 studs
 	gui.Adornee = anchor
 
 	local card = Theme.Panel({ Name = "Card", Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 0.28 })
+	local cardCorner = card:FindFirstChildOfClass("UICorner")
+	if cardCorner then
+		cardCorner.CornerRadius = UDim.new(0.08, 0)
+	end
 	local cardStroke = card:FindFirstChildOfClass("UIStroke")
 	if cardStroke then
 		cardStroke.Color = color
@@ -1098,34 +1131,33 @@ local function buildPortal(root, rng, diff, angleDeg)
 	end
 	card.Parent = gui
 
-	local titleLabel = Theme.Label(diff.DisplayName, "Title", {
-		Size = 44,
-		Color = color,
-		Props = { Name = "TitleLabel", Size = UDim2.new(1, 0, 0.3, 0), Position = UDim2.new(0, 0, 0.04, 0) },
-	})
-	titleLabel.Parent = card
+	-- Scaled text fills its row; the constraint stops it growing absurdly large on big canvases.
+	local function cardText(text, role, textColor, name, yScale, hScale, maxTextSize)
+		local label = Theme.Label(text, role, {
+			Scaled = true,
+			Color = textColor,
+			Props = {
+				Name = name,
+				Size = UDim2.new(1, 0, hScale, 0),
+				Position = UDim2.new(0, 0, yScale, 0),
+				TextWrapped = true,
+			},
+		})
+		local cap = Instance.new("UITextSizeConstraint")
+		cap.MaxTextSize = maxTextSize
+		cap.Parent = label
+		label.Parent = card
+		return label
+	end
+
+	local titleLabel = cardText(diff.DisplayName, "Title", color, "TitleLabel", 0.04, 0.3, 60)
 
 	local starText = string.rep("\226\152\133", stars) .. string.rep("\226\152\134", math.max(0, 3 - stars)) -- filled stars, then hollow stars for the rest
-	local starLabel = Theme.Label(starText, "Label", {
-		Size = 26,
-		Color = C.Token,
-		Props = { Name = "StarLabel", Size = UDim2.new(1, 0, 0.14, 0), Position = UDim2.new(0, 0, 0.34, 0) },
-	})
-	starLabel.Parent = card
+	local starLabel = cardText(starText, "Label", C.Token, "StarLabel", 0.34, 0.14, 36)
 
-	local countLabel = Theme.Label("0 / " .. tostring(Config.Match.MaxPlayers) .. " players", "Display", {
-		Size = 34,
-		Color = C.White,
-		Props = { Name = "CountLabel", Size = UDim2.new(1, 0, 0.26, 0), Position = UDim2.new(0, 0, 0.5, 0) },
-	})
-	countLabel.Parent = card
+	local countLabel = cardText("0 / " .. tostring(Config.Match.MaxPlayers) .. " players", "Display", C.White, "CountLabel", 0.5, 0.26, 40)
 
-	local statusLabel = Theme.Label("Waiting for players\226\128\166", "Body", { -- trailing ellipsis
-		Size = 22,
-		Color = C.TokenGlow,
-		Props = { Name = "StatusLabel", Size = UDim2.new(1, 0, 0.18, 0), Position = UDim2.new(0, 0, 0.77, 0) },
-	})
-	statusLabel.Parent = card
+	local statusLabel = cardText("Waiting for players\226\128\166", "Body", C.TokenGlow, "StatusLabel", 0.77, 0.18, 30) -- trailing ellipsis
 
 	gui.Parent = anchor
 

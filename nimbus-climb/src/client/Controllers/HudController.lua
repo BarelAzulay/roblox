@@ -46,7 +46,9 @@ local TOUCH_SAFE = 22 -- extra side margin on touch devices (notches, rounded co
 local VITALS_W, VITALS_H = 340, 88
 local TOKEN_W, TOKEN_H, TOKEN_H_MATCH = 214, 62, 86
 local MATCH_W, MATCH_H = 520, 126
-local PARTY_W = 280
+local PARTY_W = 330 -- wide enough for "Party - Thunderstorm" in the Heading font
+local COUNT_BASE = 2 -- UIScale that lifts the 100px (engine max) countdown text to a 200px look
+local COUNT_SUB_STROKE = 0.2 -- outline transparency of the countdown sub-line (restored on every punch)
 local LOW_HEALTH = 0.3 -- below this the health bar pulses
 local TITLE_CARD_SECONDS = 4
 local LEAVE_CONFIRM_SECONDS = 3
@@ -344,18 +346,28 @@ end
 ----------------------------------------------------------------------
 -- Default CoreGui health bar
 ----------------------------------------------------------------------
+local HIDDEN_CORE = { Enum.CoreGuiType.Health, Enum.CoreGuiType.PlayerList }
+
+-- Hides the default health bar and the default player list (the leaderstats "Tokens" panel would sit on
+-- top of our top-right token counter). Separate pcalls so a failure on one does not skip the other.
+local function hideDefaultCoreGui()
+	local allOk = true
+	for _, coreType in ipairs(HIDDEN_CORE) do
+		local ok = pcall(function()
+			StarterGui:SetCoreGuiEnabled(coreType, false)
+		end)
+		allOk = allOk and ok
+	end
+	return allOk
+end
+
 local function disableDefaultHealth()
 	task.spawn(function()
 		for _ = 1, 60 do
-			local ok = pcall(function()
-				StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Health, false)
-			end)
-			if ok then
+			if hideDefaultCoreGui() then
 				-- apply once more a little later in case the core scripts re-enabled it while loading
 				task.wait(3)
-				pcall(function()
-					StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Health, false)
-				end)
+				hideDefaultCoreGui()
 				return
 			end
 			task.wait(0.5)
@@ -363,9 +375,9 @@ local function disableDefaultHealth()
 	end)
 	pcall(function()
 		track(StarterGui.CoreGuiChangedSignal:Connect(function(coreType, enabled)
-			if coreType == Enum.CoreGuiType.Health and enabled then
+			if enabled and (coreType == Enum.CoreGuiType.Health or coreType == Enum.CoreGuiType.PlayerList) then
 				pcall(function()
-					StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Health, false)
+					StarterGui:SetCoreGuiEnabled(coreType, false)
 				end)
 			end
 		end))
@@ -685,8 +697,13 @@ local function buildParty(parent)
 	UI.PartyTitle = newText(head, "Party", "Heading", 19, WHITE, {
 		Name = "Title",
 		Size = UDim2.new(1, -64, 1, 0),
+		TextScaled = true, -- shrink (19 -> 13) rather than clip long names; AtEnd truncation is the last resort
 		TextTruncate = Enum.TextTruncate.AtEnd,
 	})
+	local titleLimit = Instance.new("UITextSizeConstraint")
+	titleLimit.MaxTextSize = 19
+	titleLimit.MinTextSize = 13
+	titleLimit.Parent = UI.PartyTitle
 	UI.PartyCount = newText(head, "0 / 4", "Display", 21, Colors.TokenGlow, {
 		Name = "Count",
 		AnchorPoint = Vector2.new(1, 0),
@@ -782,21 +799,24 @@ local function buildCountdown(parent)
 		Visible = false,
 	})
 	UI.Countdown = frame
-	UI.CountNumber = newText(frame, "3", "Accent", 200, WHITE, {
+	-- TextSize is capped at 100 by the engine, so the number is built at 100px with a COUNT_BASE UIScale
+	-- (2x) to get the 200px look; the label box and stroke thickness are pre-divided to compensate.
+	UI.CountNumber = newText(frame, "3", "Accent", 100, WHITE, {
 		Name = "Number",
 		AnchorPoint = Vector2.new(0.5, 0),
 		Position = UDim2.new(0.5, 0, 0, 0),
-		Size = UDim2.new(1, 0, 0, 230),
+		Size = UDim2.new(1 / COUNT_BASE, 0, 0, 230 / COUNT_BASE),
 		TextXAlignment = Enum.TextXAlignment.Center,
 	})
-	UI.CountStroke = textStroke(UI.CountNumber, 9, 0)
+	UI.CountStroke = textStroke(UI.CountNumber, 9 / COUNT_BASE, 0)
 	UI.CountScale = newScale(UI.CountNumber)
+	UI.CountScale.Scale = COUNT_BASE
 	UI.CountSub = newText(frame, "", "Script", 34, WHITE, {
 		Name = "Sub",
 		Position = UDim2.new(0, 0, 0, 236),
 		Size = UDim2.new(1, 0, 0, 44),
 		TextXAlignment = Enum.TextXAlignment.Center,
-		Stroke = 0.2,
+		Stroke = COUNT_SUB_STROKE,
 	})
 end
 
@@ -1236,8 +1256,9 @@ local function punchCountdown(text, color, sub, hold)
 	UI.CountStroke.Transparency = 0.4
 	UI.CountSub.Text = sub
 	UI.CountSub.TextTransparency = 0
-	UI.CountScale.Scale = 1.8
-	tween(UI.CountScale, 0.45, { Scale = 1 }, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+	UI.CountSub.TextStrokeTransparency = COUNT_SUB_STROKE -- the fade below tweens the outline to 1; restore it
+	UI.CountScale.Scale = COUNT_BASE * 1.8
+	tween(UI.CountScale, 0.45, { Scale = COUNT_BASE }, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
 	tween(UI.CountNumber, 0.2, { TextTransparency = 0 })
 	tween(UI.CountStroke, 0.2, { Transparency = 0 })
 	task.delay(hold, function()
@@ -1246,8 +1267,8 @@ local function punchCountdown(text, color, sub, hold)
 		end
 		tween(UI.CountNumber, 0.35, { TextTransparency = 1 })
 		tween(UI.CountStroke, 0.35, { Transparency = 1 })
-		tween(UI.CountSub, 0.35, { TextTransparency = 1 })
-		tween(UI.CountScale, 0.35, { Scale = 1.35 })
+		tween(UI.CountSub, 0.35, { TextTransparency = 1, TextStrokeTransparency = 1 })
+		tween(UI.CountScale, 0.35, { Scale = COUNT_BASE * 1.35 })
 		task.delay(0.4, function()
 			if CD.Serial == serial then
 				UI.Countdown.Visible = false
@@ -1641,7 +1662,7 @@ local function playTitleCard()
 
 	-- text sizes follow the available width so the title also fits narrow (portrait) screens
 	local effW = UI.EffW or DESIGN_W
-	local titleSize = math.floor(clamp(effW * 0.11, 44, 104))
+	local titleSize = math.floor(clamp(effW * 0.11, 44, 100))
 	local tagSize = math.floor(clamp(effW * 0.032, 20, 36))
 	local titleH = math.floor(titleSize * 1.16)
 	local card = newFrame(UI.Root, {
