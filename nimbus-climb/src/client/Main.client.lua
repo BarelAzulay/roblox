@@ -27,6 +27,9 @@ local CONTROLLER_NAMES = {
 
 local TAG = "[NimbusClimb] "
 
+-- Newer controllers that a build may not contain yet: skip them quietly when absent.
+local OPTIONAL = { SkyDragonController = true, IndexController = true, NpcController = true, TutorialController = true }
+
 local client = script.Parent
 
 -- 1. State
@@ -55,7 +58,9 @@ for _, name in ipairs(CONTROLLER_NAMES) do
 	task.spawn(function()
 		local moduleScript = controllers:FindFirstChild(name)
 		if not moduleScript then
-			warn(TAG .. "missing client controller: " .. name)
+			if not OPTIONAL[name] then
+				warn(TAG .. "missing client controller: " .. name)
+			end
 			return
 		end
 		local okRequire, controller = pcall(require, moduleScript)

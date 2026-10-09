@@ -192,12 +192,15 @@ S.catalog = guarded("catalog", function()
 	local prevMean, scales = 0, true
 	local line = {}
 	for _, r in ipairs(Config.Rarities) do
-		local mean = meanPerk[r.Id] or 0
-		line[#line + 1] = string.format("%s %.3f", r.Id, mean)
-		if mean < prevMean then
-			scales = false
+		-- a rarity with no pets yet (v3's Secret rarity before its pets are added) has no average to compare
+		if counts[r.Id] then
+			local mean = meanPerk[r.Id] or 0
+			line[#line + 1] = string.format("%s %.3f", r.Id, mean)
+			if mean < prevMean then
+				scales = false
+			end
+			prevMean = mean
 		end
-		prevMean = mean
 	end
 	T.check(scales, "average perk strength never drops with rarity", table.concat(line, "  "))
 	T.check((maxPerk.Common or 1) <= 0.06, "Common pets give small perks (<= 6% total)", tostring(maxPerk.Common))
@@ -461,7 +464,8 @@ S.config_shape = guarded("config_shape", function()
 	for i, r in ipairs(Config.Rarities) do
 		T.check(r.Order == i and typeof(r.Color) == "Color3" and type(r.Id) == "string", "rarity " .. i .. " (" .. tostring(r.Id) .. ") has Order " .. i .. " and a Color")
 	end
-	T.eq(#Config.Rarities, 6, "six rarities")
+	T.eq(#Config.Rarities, 7, "seven rarities (v3 adds Secret)")
+	T.eq(Config.Rarities[7].Id, "Secret", "the seventh rarity is Secret")
 	T.check(Config.Pets.MaxEquipped >= 1 and Config.Pets.MaxPerStack >= 1, "Config.Pets.MaxEquipped / MaxPerStack")
 	for _, key in ipairs({ "MaxHealth", "TokenBonus", "StaminaRegen", "CheckpointHeal" }) do
 		T.check(type(Config.Pets.PerkCaps[key]) == "number" and Config.Pets.PerkCaps[key] > 0, "PerkCaps." .. key)

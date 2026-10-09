@@ -19,7 +19,10 @@ local BOB_SPEED = 2.2 -- radians per second of the up/down sine
 local CULL_DISTANCE = 140 -- only coins this close to the camera are posed (other matches are far away)
 local CULL_DISTANCE_SQ = CULL_DISTANCE * CULL_DISTANCE
 
-local coins = {} -- coin part -> { base = Vector3, phase = number, spin = number, bob = number }
+local HALO_RETRY = 0.5 -- seconds between looks for a halo that has not replicated yet
+
+-- coin part -> { base, phase, spin, bob, halo = BasePart|nil, haloOffset = Vector3, nextHaloLook = number }
+local coins = {}
 local started = false
 
 local function add(part)
@@ -32,7 +35,22 @@ local function add(part)
 	end
 	-- the server built the coin at its base position with a random yaw: reuse that yaw as the phase
 	local _, yaw = part.CFrame:ToEulerAnglesYXZ()
-	coins[part] = { base = part.Position, phase = yaw, spin = look.spin, bob = look.bob }
+	coins[part] = { base = part.Position, phase = yaw, spin = look.spin, bob = look.bob, nextHaloLook = 0 }
+end
+
+-- The glowing "Halo" ball is an anchored child of the coin (TokenService builds it unwelded so it never has to
+-- spin). It must still bob with the coin, so remember where it sits relative to the coin's base position.
+-- Children can replicate after the tag does, so look again a few times a second until it shows up.
+local function findHalo(part, coin, now)
+	if now < coin.nextHaloLook then
+		return
+	end
+	coin.nextHaloLook = now + HALO_RETRY
+	local halo = part:FindFirstChild("Halo")
+	if halo and halo:IsA("BasePart") then
+		coin.halo = halo
+		coin.haloOffset = halo.Position - coin.base
+	end
 end
 
 local function step()
@@ -48,8 +66,18 @@ local function step()
 		else
 			local d = coin.base - eye
 			if d:Dot(d) <= CULL_DISTANCE_SQ then
-				local y = coin.base.Y + math.sin(now * BOB_SPEED + coin.phase) * coin.bob
-				part.CFrame = CFrame.new(coin.base.X, y, coin.base.Z) * CFrame.Angles(0, now * coin.spin + coin.phase, 0)
+				local lift = math.sin(now * BOB_SPEED + coin.phase) * coin.bob
+				part.CFrame = CFrame.new(coin.base.X, coin.base.Y + lift, coin.base.Z) * CFrame.Angles(0, now * coin.spin + coin.phase, 0)
+				local halo = coin.halo
+				if halo == nil or halo.Parent ~= part then
+					coin.halo = nil
+					findHalo(part, coin, now)
+					halo = coin.halo
+				end
+				if halo then
+					local o = coin.haloOffset
+					halo.CFrame = CFrame.new(coin.base.X + o.X, coin.base.Y + o.Y + lift, coin.base.Z + o.Z)
+				end
 			end
 		end
 	end
