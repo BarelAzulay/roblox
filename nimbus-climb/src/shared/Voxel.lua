@@ -901,8 +901,9 @@ end
 ----------------------------------------------------------------------
 -- Greedy merge
 ----------------------------------------------------------------------
--- growth orders tried per box (the best one wins); three cyclic orders match all six in practice
-local ORDERS = { { 2, 1, 3 }, { 1, 3, 2 }, { 3, 2, 1 } }
+-- growth orders tried per box (the best one wins); two orders get within ~1% of all six at a third of the cost
+local ORDERS = { { 2, 1, 3 }, { 1, 3, 2 } }
+local BRIDGE_CELLS = 160 -- zero-gain cells a growing box may look through after its last gain
 
 -- Opacity / overlap rules from the palette (no palette: everything opaque and overlappable).
 local function makeRules(palette)
@@ -970,8 +971,13 @@ local function mergeCells(cells, info, prep)
 	local bestLo, bestHi = { 0, 0, 0 }, { 0, 0, 0 }
 	local key, canHidden, canOverlap
 
-	-- New required voxels in the slab axis = c of the current box, or nil when the slab is not acceptable.
-	local function slab(axis, c)
+	-- Grows the current box (lo / hi) along one axis in both directions, one slab at a time, while every voxel
+	-- of the new slab is acceptable (same key and not yet covered, or covered and overlappable, or hidden and
+	-- the key is opaque). Trailing slabs that added nothing are trimmed again. Bridging through hidden or covered
+	-- voxels is allowed for a limited number of looked-at cells after the last useful slab (long thin bridges
+	-- are cheap and often pay off; huge empty faces rarely do). Returns the number of newly covered voxels.
+	-- (The slab scan is written out inline: this is the hot loop of every voxel model.)
+	local function growAxis(axis)
 		local a, b
 		if axis == 1 then
 			a, b = 2, 3
@@ -980,63 +986,68 @@ local function mergeCells(cells, info, prep)
 		else
 			a, b = 1, 2
 		end
-		local sa, sb = STR[a], STR[b]
-		local base = (c + OFF) * STR[axis]
-		local gain = 0
+		local sa, sb, sc = STR[a], STR[b], STR[axis]
 		local a0, a1, b0, b1 = lo[a], hi[a], lo[b], hi[b]
-		for i = a0, a1 do
-			local row = base + (i + OFF) * sa
-			for j = b0, b1 do
-				local p = row + (j + OFF) * sb
-				if hidden[p] then
-					if not canHidden then
-						return nil
-					end
-				else
-					local v = cells[p]
-					if v ~= key then
-						return nil
-					end
-					if covered[p] then
-						if not canOverlap then
-							return nil
+		local cost = (a1 - a0 + 1) * (b1 - b0 + 1)
+		local k, hid, cov, cel = key, hidden, covered, cells
+		local okHidden, okOverlap = canHidden, canOverlap
+		local gained = 0
+		local ends = { lo[axis], hi[axis] }
+		local last = { ends[1], ends[2] }
+		for dir = 1, 2 do
+			local step = (dir == 1) and -1 or 1
+			local c = ends[dir]
+			local idle = 0
+			while true do
+				local nc = c + step
+				local base = (nc + OFF) * sc
+				local gain = 0
+				local ok = true
+				for i = a0, a1 do
+					local row = base + (i + OFF) * sa
+					for j = b0, b1 do
+						local p = row + (j + OFF) * sb
+						local v = cel[p]
+						if v == k then
+							if hid[p] then
+								if not okHidden then
+									ok = false
+									break
+								end
+							elseif cov[p] then
+								if not okOverlap then
+									ok = false
+									break
+								end
+							else
+								gain = gain + 1
+							end
+						elseif not (okHidden and v ~= nil and hid[p]) then
+							ok = false
+							break
 						end
-					else
-						gain = gain + 1
+					end
+					if not ok then
+						break
+					end
+				end
+				if not ok then
+					break
+				end
+				c = nc
+				if gain > 0 then
+					last[dir] = c
+					gained = gained + gain
+					idle = 0
+				else
+					idle = idle + cost
+					if idle > BRIDGE_CELLS then
+						break
 					end
 				end
 			end
 		end
-		return gain
-	end
-
-	-- Grows along one axis in both directions, then trims trailing slabs that added nothing.
-	local function growAxis(axis)
-		local gained = 0
-		local lastNeg, lastPos = lo[axis], hi[axis]
-		while true do
-			local g = slab(axis, lo[axis] - 1)
-			if not g then
-				break
-			end
-			lo[axis] = lo[axis] - 1
-			if g > 0 then
-				lastNeg = lo[axis]
-				gained = gained + g
-			end
-		end
-		while true do
-			local g = slab(axis, hi[axis] + 1)
-			if not g then
-				break
-			end
-			hi[axis] = hi[axis] + 1
-			if g > 0 then
-				lastPos = hi[axis]
-				gained = gained + g
-			end
-		end
-		lo[axis], hi[axis] = lastNeg, lastPos
+		lo[axis], hi[axis] = last[1], last[2]
 		return gained
 	end
 
@@ -1177,12 +1188,12 @@ function Voxel.Merge(grid, opts)
 			end
 			return a.Key < b.Key
 		end)
-		local need = (#boxes - maxParts) * 1.15
+		local need = (#boxes - maxParts) * 1.25
 		local saved = 0
 		local map = {}
 		for _, c in ipairs(cands) do
 			map[c.Key] = c.Base
-			saved = saved + c.Boxes * 0.6
+			saved = saved + c.Boxes * 0.5
 			if saved >= need then
 				break
 			end

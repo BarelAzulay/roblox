@@ -64,8 +64,8 @@ local FLAP_AMP = math.rad(35)
 
 -- part budgets per group (with 6 lid parts, the root and the Secret aura: High <= ~330, Low <= ~115)
 local BUDGET = {
-	High = { Total = 340, Body = 214, Wing = 32, Tail = 20, Halo = 10 },
-	Low = { Total = 118, Body = 70, Wing = 11, Tail = 7, Halo = 4 },
+	High = { Total = 344, Cap = 350, Body = 216, Wing = 32, Tail = 20, Halo = 10 },
+	Low = { Total = 116, Cap = 120, Body = 70, Wing = 11, Tail = 7, Halo = 4 },
 }
 
 local TAU = math.pi * 2
@@ -470,7 +470,8 @@ local function newContext(look, detail)
 	local ctx = {
 		Look = look,
 		Detail = detail,
-		High = detail ~= "Low",
+		High = detail ~= "Low", -- resolution: eye masks, blush
+		Fine = detail ~= "Low", -- optional small details (patterns, toes, hollows); off in the lean rebuild
 		Body = Voxel.NewGrid(30),
 		Wing = Voxel.NewGrid(30), -- the LEFT wing, in hinge-local voxels (it reaches towards -X)
 		Tail = nil, -- optional grid in tail-hinge-local voxels (the tail reaches towards +Z)
@@ -520,6 +521,20 @@ local EYE_MASKS = {
 		"S P",
 		"P P",
 		"P G",
+	},
+	-- the mascot's huge sparkly eyes: big highlight top left, a small one bottom right, a lighter lower iris
+	Big = {
+		". P P P .",
+		"P S S P P",
+		"P S S P P",
+		"P P P P I",
+		"I P P S I",
+		". G G G .",
+	},
+	BigLow = {
+		"S S P",
+		"S P P",
+		"P G P",
 	},
 	Small = {
 		"S P P",
@@ -627,6 +642,32 @@ local function face(ctx, key, cells)
 	end
 end
 
+-- An open smiling mouth carved 1 voxel into the snout: dark inside with a pink tongue at the bottom.
+-- (x = 0 centred; yTop = top row, design units)
+local MOUTH_MASKS = {
+	High = { "M M M M M", "M T T T M", ". M T M ." },
+	Low = { "M M M", ". T ." },
+}
+local function openMouth(ctx, yTop)
+	local g = ctx.Body
+	local mask = parseMask(MOUTH_MASKS[ctx.High and "High" or "Low"])
+	local w = #mask[1]
+	local Y = vx(yTop)
+	for r, cols in ipairs(mask) do
+		for c, ch in ipairs(cols) do
+			if ch ~= "." then
+				local x = floor(w / 2) - (c - 1)
+				local y = Y - (r - 1)
+				local z = frontZ(g, x, y)
+				if z then
+					set(g, x, y, z, nil)
+					set(g, x, y, z + 1, (ch == "T") and "Tongue" or "Mouth")
+				end
+			end
+		end
+	end
+end
+
 ----------------------------------------------------------------------
 -- Shared anatomy
 ----------------------------------------------------------------------
@@ -647,7 +688,7 @@ local function triEar(ctx, s, base, tip, r, innerKey, tipKey)
 		paint(g, tipKey, { Kind = "Ellipsoid", Center = { tx, ty - 0.8, tz }, Radius = { r * 0.9, 2.4, r * 0.9 } }, "Fur")
 	end
 	paint(g, innerKey or "Inner", { Kind = "Cone", A = { bx * 1.02, by + 0.6, bz - 1.1 }, B = { tx * 0.97, ty - 1.6, tz - 0.8 }, Radius = r * 0.62, RadiusB = 0.2 }, "Fur")
-	if ctx.High then
+	if ctx.Fine then
 		carve(ctx.Body, { Kind = "Cone", A = { bx * 1.02, by + 0.8, bz - 2.8 }, B = { tx * 0.97, ty - 1.8, tz - 2.1 }, Radius = r * 0.48, RadiusB = 0.1 }, { Fur = true, Inner = true })
 	end
 end
@@ -666,7 +707,7 @@ local function sitBody(ctx, o)
 	local pawKey = o.PawKey or legKey
 	local c = o.BodyC or { 0, -4.8, 1.5 }
 	local r = o.BodyR or { 5.4, 5.8, 5.6 }
-	ell(g, "Fur", c, r)
+	ell(g, o.BodyKey or "Fur", c, r)
 	local foot = o.FootY or -11.2
 	local fx = o.FrontX or 2.8
 	local fz = o.FrontZ or -2.6
@@ -678,7 +719,7 @@ local function sitBody(ctx, o)
 		-- hind leg: chunky thigh + long foot
 		ell(g, legKey, { s * hx, foot + 3.4, 2.4 }, { 2.4, 3, 3.1 })
 		ell(g, pawKey, { s * (hx + 0.1), foot + 0.7, 0.4 }, { 1.7, 1.15, 2.4 })
-		if ctx.High and o.Toes ~= false then
+		if ctx.Fine and o.Toes ~= false then
 			-- toe gaps on the front paws
 			local X, Y = vx(s * fx), vx(foot + 0.4)
 			local z = frontZ(g, X, Y)
@@ -706,7 +747,7 @@ end
 -- Species
 ----------------------------------------------------------------------
 SPECIES.Cat = function(ctx)
-	local g, H = ctx.Body, ctx.High
+	local g, H = ctx.Body, ctx.Fine
 	head(ctx, "Fur", { 0, 6.5, -0.5 }, { 8.6, 7, 7.2 })
 	pair(function(s)
 		ell(g, "Fur", { s * 5.4, 3.5, -2.8 }, { 3.8, 3, 3.6 }) -- cheeks
@@ -751,51 +792,49 @@ SPECIES.Cat = function(ctx)
 end
 
 SPECIES.Dog = function(ctx)
-	local g, H = ctx.Body, ctx.High
-	head(ctx, "Fur", { 0, 6.5, -0.5 }, { 8.2, 7.2, 7.2 })
+	local g, H = ctx.Body, ctx.Fine
+	head(ctx, "Fur", { 0, 6.6, -0.4 }, { 8, 7.2, 7.2 })
 	pair(function(s)
-		ell(g, "Fur", { s * 5, 3.6, -2.6 }, { 3.6, 2.8, 3.4 })
+		ell(g, "Fur", { s * 4.8, 3.8, -2.6 }, { 3.6, 2.8, 3.4 })
 	end)
-	-- snout: a short rounded muzzle with a big glossy nose
-	ell(g, "Muzzle", { 0, 2.8, -6.6 }, { 3.6, 2.6, 2.8 })
-	paint(g, "Muzzle", { Kind = "Ellipsoid", Center = { 0, 7, -7 }, Radius = { 1.2, 3.4, 2 } }, "Fur") -- blaze
-	ell(g, "Nose", { 0, 4.1, -9 }, { 1.6, 1.1, 0.9 })
+	-- snout: a rounded muzzle with a big glossy dark nose, a light blaze up the forehead
+	ell(g, "Muzzle", { 0, 3, -6.4 }, { 3.4, 2.6, 3 })
+	paint(g, "Muzzle", { Kind = "Ellipsoid", Center = { 0, 8, -6.8 }, Radius = { 1.1, 3.6, 2 } }, "Fur")
+	ell(g, "Nose", { 0, 4.3, -9.1 }, { 1.7, 1.1, 0.9 })
 	if H then
-		shine(ctx, -1, 4.6)
-		face(ctx, "Mouth", { { 0, 2.6 }, { 0, 1.8 }, { 1, 1.4 }, { -1, 1.4 }, { 2, 1.8 } })
-		-- a little tongue hanging out on one side
-		local X, Y = vx(-1), vx(0.8)
-		local z = frontZ(g, X, Y)
-		if z then
-			set(g, X, Y, z - 1, "Tongue")
-			set(g, X, Y - 1, z - 1, "Tongue")
-		end
+		shine(ctx, -1, 4.8)
+		face(ctx, "Mouth", { { 0, 2.8 }, { 0, 2 }, { 1, 1.6 }, { -1, 1.6 }, { 2, 2 }, { -2, 2 } })
+		-- the tip of a pink tongue
+		bump(ctx, 0, 1.2, "Tongue")
+		bump(ctx, 1, 1.2, "Tongue")
 	end
-	-- floppy ears hanging down the sides of the head
+	-- soft floppy ears hanging close to the head, a shade darker
 	pair(function(s)
-		local key = "Stripe"
-		ell(g, key, { s * 8, 6.8, 0.6 }, { 2, 5, 3 }, { Rotation = CFrame.Angles(0, 0, s * 0.35) })
-		ell(g, key, { s * 8.4, 3.2, 0.2 }, { 1.8, 2.2, 2.6 })
+		ell(g, "Ear", { s * 7.6, 7.4, 0 }, { 1.7, 4.6, 2.8 }, { Rotation = CFrame.Angles(0, 0, s * 0.28) })
+		ell(g, "Ear", { s * 8.6, 3.6, -0.2 }, { 1.6, 1.8, 2.4 })
 	end)
-	-- a darker patch over the right eye
+	-- a darker patch around the right eye
 	if H then
-		paint(g, "Patch2", { Kind = "Ellipsoid", Center = { 3.6, 7, -6 }, Radius = { 3.2, 3.2, 3 } }, "Fur")
+		paint(g, "Ear", { Kind = "Ellipsoid", Center = { 3.8, 7.4, -6 }, Radius = { 2.8, 3, 3 } }, "Fur")
 	end
 	sitBody(ctx, { PawKey = "Belly" })
 	paint(g, "Belly", { Kind = "Ellipsoid", Center = { 0, -3.4, -4.4 }, Radius = { 3.8, 4.8, 2.6 } }, "Fur")
-	addEyes(ctx, 5, 9, "Round")
-	blush(ctx, 5.3, 3.8, 3)
+	addEyes(ctx, 5, 9.2, "Round")
+	blush(ctx, 5.4, 4, 3)
+	-- a happy tail curled up over the back
 	local t = newTail(ctx, { 0, -7.5, 6.2 }, 0.5)
 	curve(t, "Fur", { { 0, 0, 0 }, { 0, 2.6, 2.4 }, { 0, 5.4, 2.6 }, { 0, 6.8, 0.6 } }, 1.7, 1.1)
 	ell(t, "Belly", { 0, 6.9, 0.4 }, { 1.3, 1.3, 1.3 })
-	ctx.Pal.Patch2 = darken(ctx.Pal.Fur, 0.25)
+	ctx.Pal.Ear = darken(ctx.Pal.Fur, 0.22)
+	ctx.Pal.Nose = rgb(54, 40, 42)
+	ctx.Pal.Muzzle = mix(ctx.Look.Secondary, rgb(255, 250, 242), 0.4)
 	ctx.EarX = 7.5
 	ctx.HeadTop = 13.6
-	ctx.FlowerAt = { 5, 12.4, -3 }
+	ctx.FlowerAt = { 4.6, 12.6, -3 }
 end
 
 SPECIES.Fox = function(ctx)
-	local g, H = ctx.Body, ctx.High
+	local g, H = ctx.Body, ctx.Fine
 	head(ctx, "Fur", { 0, 6.6, -0.4 }, { 8.4, 6.8, 7 })
 	-- white cheek ruffs sweeping out to the sides
 	pair(function(s)
@@ -803,6 +842,7 @@ SPECIES.Fox = function(ctx)
 		ell(g, "Belly", { s * 4.2, 3, -3.6 }, { 3.6, 2.8, 3.2 })
 	end)
 	-- pointed snout
+	ctx.Pal.Nose = rgb(48, 36, 40)
 	cone(g, "Belly", { 0, 3.6, -4.8 }, { 0, 3.2, -10.4 }, 3, 1.1)
 	ell(g, "Nose", { 0, 3.5, -10.4 }, { 1.2, 1, 0.9 })
 	paint(g, "Fur", { Kind = "Ellipsoid", Center = { 0, 5.8, -8 }, Radius = { 2, 1.6, 3 } }, "Belly")
@@ -830,7 +870,7 @@ SPECIES.Fox = function(ctx)
 end
 
 SPECIES.Bunny = function(ctx)
-	local g, H = ctx.Body, ctx.High
+	local g, H = ctx.Body, ctx.Fine
 	head(ctx, "Fur", { 0, 6.2, -0.4 }, { 8.2, 7, 7.2 })
 	pair(function(s)
 		ell(g, "Fur", { s * 4.8, 3.2, -2.6 }, { 3.8, 3, 3.6 })
@@ -868,7 +908,8 @@ SPECIES.Bunny = function(ctx)
 end
 
 local function bearHead(ctx, earKey, earInner)
-	local g, H = ctx.Body, ctx.High
+	local g, H = ctx.Body, ctx.Fine
+	ctx.Pal.Nose = rgb(58, 42, 44)
 	head(ctx, "Fur", { 0, 6.4, -0.4 }, { 8.6, 7.2, 7.2 })
 	pair(function(s)
 		ell(g, "Fur", { s * 5, 3.4, -2.6 }, { 3.8, 3, 3.6 })
@@ -898,7 +939,7 @@ SPECIES.Bear = function(ctx)
 end
 
 SPECIES.Panda = function(ctx)
-	local g, H = ctx.Body, ctx.High
+	local g, H = ctx.Body, ctx.Fine
 	bearHead(ctx, "Accent", "AccentDark")
 	-- the dark eye patches (tilted ovals) and the dark arms / shoulder band
 	pair(function(s)
@@ -922,21 +963,18 @@ SPECIES.Panda = function(ctx)
 end
 
 SPECIES.Dragon = function(ctx)
-	local g, H = ctx.Body, ctx.High
+	local g, H = ctx.Body, ctx.Fine
 	local look = ctx.Look
 	local cloudy = look.WingStyle == "Cloud"
-	head(ctx, "Fur", { 0, 6.8, -0.2 }, { 8.4, 7, 7.2 })
+	-- big round head (light), sky-coloured body and limbs, cream belly in plates (the game's mascot look)
+	head(ctx, "Fur", { 0, 6.8, -0.3 }, { 8.6, 7.2, 7.2 })
 	pair(function(s)
-		ell(g, "Fur", { s * 4.8, 3.6, -2.6 }, { 3.6, 3, 3.4 })
-		-- ear frills: little fins swept back
-		cone(g, "Accent", { s * 7, 9, 1.2 }, { s * 10.4, 11.6, 4.2 }, 2, 0.4)
-		if ctx.High then
-			paint(g, "AccentDark", { Kind = "Capsule", A = { s * 7.6, 9.6, 2 }, B = { s * 10, 11.2, 4 }, Radius = 0.6 }, "Accent")
-		end
+		ell(g, "Fur", { s * 5, 3.8, -2.4 }, { 3.8, 3.1, 3.6 })
 	end)
-	-- snout with two nostril dots
-	ell(g, "Muzzle", { 0, 3.2, -6.8 }, { 4, 2.8, 3 })
-	local nY = vx(4.4)
+	-- wide cream snout with two nostrils and an open smile
+	ell(g, "Muzzle", { 0, 2.6, -6.3 }, { 4.6, 2.8, 2.6 })
+	ell(g, "Muzzle", { 0, 2.2, -5.2 }, { 3.6, 2.6, 2.6 })
+	local nY = vx(4.2)
 	pair(function(s)
 		local X = vx(s * 1.6)
 		local z = frontZ(g, X, nY)
@@ -944,63 +982,73 @@ SPECIES.Dragon = function(ctx)
 			set(g, X, nY, z, "Nostril")
 		end
 	end)
-	if H then
-		face(ctx, "Mouth", { { -2, 1.8 }, { -1, 1.4 }, { 0, 1.4 }, { 1, 1.4 }, { 2, 1.8 } })
+	openMouth(ctx, 2.6)
+	-- the crown of the head: a cloud tuft (cloud dragons) or a little crest of spikes
+	if cloudy then
+		ell(g, "Cloud", { 0, 14, 0.4 }, { 2.4, 1.9, 2.2 })
+		ell(g, "Cloud", { 1.9, 13.4, 0.8 }, { 1.7, 1.5, 1.7 })
+		ell(g, "Cloud", { -1.9, 13.4, 0.8 }, { 1.7, 1.5, 1.7 })
+		ell(g, "Cloud", { 0, 13.2, 2.4 }, { 1.8, 1.5, 1.8 })
+	else
+		for i = 0, 2 do
+			cone(g, "Accent", { 0, 13.2 - i * 1.3, 0.4 + i * 2.2 }, { 0, 15.8 - i * 1.6, 2 + i * 2.4 }, 1.4, 0.2)
+		end
 	end
 	-- horn nubs (the Horns accessory replaces them with big golden horns)
 	if look.Accessory ~= "Horns" then
 		pair(function(s)
-			cone(g, "Horn", { s * 3.4, 11.8, 0 }, { s * 4.2, 15.6, 1.6 }, 1.5, 0.5)
+			cone(g, "Horn", { s * 4.2, 11.4, 0 }, { s * 5.6, 15.2, 1 }, 1.6, 0.45)
 		end)
 		ctx.Pal.Horn = mix(CREAM, look.Secondary, 0.25)
 	end
-	-- fluffy body with a cream belly in plates
-	sitBody(ctx, { BodyR = { 5.8, 6, 6 }, PawKey = "Fur", ToeKey = "Claw" })
-	paint(g, "Belly", { Kind = "Ellipsoid", Center = { 0, -4, -4.4 }, Radius = { 4, 5.4, 2.8 } }, "Fur")
+	sitBody(ctx, { BodyKey = "Scale", LegKey = "Scale", PawKey = "Scale", BodyR = { 5.8, 6, 6 }, ToeKey = "Claw", FootY = -11.4 })
+	paint(g, "Belly", { Kind = "Ellipsoid", Center = { 0, -4.2, -4.2 }, Radius = { 4.2, 5.4, 2.8 } }, "Scale")
 	if H then
 		for i = 0, 2 do
-			box(g, "BellyLine", { 0, -6.4 + i * 2.4, -6 }, { 9, 0.6, 6 }, { Op = "Paint", OnlyKeys = "Belly" })
+			box(g, "BellyLine", { 0, -7 + i * 2.4, -6 }, { 9, 0.6, 6 }, { Op = "Paint", OnlyKeys = "Belly" })
+		end
+		-- little back spikes / cloud tufts between the wings
+		for i = 0, 1 do
+			if cloudy then
+				ell(g, "Cloud", { 0, 0.6 - i * 3.4, 6.8 + i * 0.4 }, { 1.6, 1.5, 1.6 })
+			else
+				cone(g, "Accent", { 0, 0.4 - i * 3.4, 6.2 }, { 0, 1.8 - i * 3.4, 8.6 }, 1.3, 0.2)
+			end
 		end
 	end
-	-- spine tufts: little clouds (or spikes) in the accent colour
-	for i = 0, 3 do
-		local y = 11.6 - i * 3.2
-		local z = 4.2 + i * 1.5
-		if i >= 2 then
-			z = 6.2 + (i - 2) * 0.6
-			y = 2.4 - (i - 2) * 3.6
-		end
-		if cloudy then
-			ell(g, "Accent", { 0, y, z + 1.2 }, { 1.7, 1.6, 1.7 })
-		else
-			cone(g, "Accent", { 0, y - 0.6, z }, { 0, y + 1.4, z + 2.4 }, 1.6, 0.3)
-		end
-	end
-	addEyes(ctx, 5.2, 9.2, "Round")
-	blush(ctx, 5.4, 4.6, 3)
-	-- thick tapered tail curling up, ending in a cloud puff (cloud dragons) or a spade
-	local t = newTail(ctx, { 0, -8.4, 5.8 }, 0.3)
-	curve(t, "Fur", { { 0, 0, 0 }, { 0, 0.2, 4.4 }, { 0, 3.4, 8.2 }, { 0, 7.6, 9.2 } }, 2.2, 1.3)
-	paint(t, "Belly", { Kind = "Capsule", A = { 0, -1.6, 0 }, B = { 0, -1, 5.2 }, Radius = 1.2 }, "Fur")
+	addEyes(ctx, 6, 9.8, "Big")
+	blush(ctx, 5.6, 4.4, 3)
+	-- thick tail sweeping round to the side, ending in a big cloud puff (cloud dragons) or a spade
+	local t = newTail(ctx, { 0, -8.6, 5.6 }, 0.3)
+	curve(t, "Scale", { { 0, 0, 0 }, { 0.6, -0.4, 4.4 }, { 3, 1.4, 8 }, { 6.6, 4, 8.8 } }, 2.2, 1.2)
+	paint(t, "Belly", { Kind = "Capsule", A = { 0, -1.8, 0 }, B = { 1, -1.4, 5 }, Radius = 1.2 }, "Scale")
 	if cloudy then
-		ell(t, "Cloud", { 0, 9.4, 9.4 }, { 2.4, 2.1, 2.3 })
-		ell(t, "Cloud", { 1.8, 8.4, 9.8 }, { 1.7, 1.6, 1.7 })
-		ell(t, "Cloud", { -1.8, 8.6, 9 }, { 1.7, 1.6, 1.7 })
-		ell(t, "Accent", { 0, 7.6, 10.8 }, { 1.4, 1.2, 1.2 })
+		ell(t, "Cloud", { 7.8, 5.4, 9 }, { 2.7, 2.4, 2.4 })
+		ell(t, "Cloud", { 10, 4.4, 9 }, { 1.8, 1.7, 1.8 })
+		ell(t, "Cloud", { 6.6, 7.4, 9 }, { 1.7, 1.6, 1.7 })
 	else
-		cone(t, "Accent", { 0, 7.2, 9 }, { 0, 11.6, 10.4 }, 2.4, 0.2)
+		cone(t, "Accent", { 6.2, 3.6, 8.8 }, { 9.6, 6.4, 9.4 }, 2.3, 0.2)
 	end
-	ctx.Pal.Belly = mix(CREAM, look.Primary, 0.25)
-	ctx.Pal.BellyLine = darken(ctx.Pal.Belly, 0.12)
-	ctx.Pal.Muzzle = mix(look.Primary, CREAM, 0.35)
-	ctx.Pal.Cloud = mix(rgb(250, 252, 255), look.Primary, 0.25)
+	if cloudy then
+		ctx.Pal.Fur = mix(look.Primary, look.Secondary, 0.2)
+		ctx.Pal.Scale = mix(look.Primary, look.Secondary, 0.72)
+	else
+		ctx.Pal.Scale = mix(look.Primary, look.Secondary, 0.18)
+	end
+	ctx.Pal.Belly = mix(CREAM, look.Primary, 0.1)
+	ctx.Pal.BellyLine = darken(ctx.Pal.Belly, 0.14)
+	ctx.Pal.Muzzle = CREAM
+	ctx.Pal.Cloud = mix(rgb(252, 253, 255), look.Primary, 0.2)
+	ctx.Pal.Mouth = rgb(92, 44, 60)
 	ctx.EarX = 5
-	ctx.HeadTop = 13.6
+	ctx.HeadTop = 13.4
+	ctx.HornBase = { 4.2, 11.2, 0 }
 	ctx.FlowerAt = { 6.2, 11.8, -2.4 }
+	ctx.WingHinge = { 3.8, -1.2, 4.4 }
 end
 
 SPECIES.Owl = function(ctx)
-	local g, H = ctx.Body, ctx.High
+	local g, H = ctx.Body, ctx.Fine
 	-- one round body-head with a heart-shaped facial disc
 	head(ctx, "Fur", { 0, 3, 0 }, { 8.6, 10, 7.6 })
 	ell(g, "Fur", { 0, -4.6, 0.8 }, { 7.4, 6, 6.8 })
@@ -1056,7 +1104,7 @@ SPECIES.Owl = function(ctx)
 end
 
 SPECIES.Slime = function(ctx)
-	local g, H = ctx.Body, ctx.High
+	local g, H = ctx.Body, ctx.Fine
 	-- a squishy drop: flat bottom, rounded top, a little curl on top
 	head(ctx, "Fur", { 0, -1.6, 0 }, { 9.6, 8.6, 9 })
 	carve(g, { Kind = "Box", Center = { 0, -13.2, 0 }, Size = { 24, 6, 24 } })
@@ -1088,7 +1136,7 @@ SPECIES.Slime = function(ctx)
 end
 
 SPECIES.Unicorn = function(ctx)
-	local g, H = ctx.Body, ctx.High
+	local g, H = ctx.Body, ctx.Fine
 	head(ctx, "Fur", { 0, 6.8, 0 }, { 7.8, 7, 7 })
 	-- long soft muzzle with nostrils
 	ell(g, "Muzzle", { 0, 3.4, -6.8 }, { 4, 3.2, 3.4 })
@@ -1133,7 +1181,7 @@ SPECIES.Unicorn = function(ctx)
 end
 
 SPECIES.Phoenix = function(ctx)
-	local g, H = ctx.Body, ctx.High
+	local g, H = ctx.Body, ctx.Fine
 	head(ctx, "Fur", { 0, 5.4, -0.6 }, { 8, 7.4, 7 })
 	ell(g, "Fur", { 0, -4, 1 }, { 6.4, 6.6, 6.4 })
 	paint(g, "Belly", { Kind = "Ellipsoid", Center = { 0, -3.4, -4.2 }, Radius = { 4.4, 5.6, 3 } }, "Fur")
@@ -1175,7 +1223,7 @@ SPECIES.Phoenix = function(ctx)
 end
 
 SPECIES.Frog = function(ctx)
-	local g, H = ctx.Body, ctx.High
+	local g, H = ctx.Body, ctx.Fine
 	-- wide, flat head-body with bulging eye domes on top
 	head(ctx, "Fur", { 0, 2.4, -0.6 }, { 9.6, 6.4, 8 })
 	ell(g, "Fur", { 0, -4.4, 1.4 }, { 7.6, 5.6, 6.8 })
@@ -1215,7 +1263,7 @@ SPECIES.Frog = function(ctx)
 end
 
 SPECIES.Penguin = function(ctx)
-	local g, H = ctx.Body, ctx.High
+	local g, H = ctx.Body, ctx.Fine
 	-- egg-shaped body, white front with a heart-shaped face
 	head(ctx, "Fur", { 0, 5.2, -0.2 }, { 8, 7.4, 7.2 })
 	ell(g, "Fur", { 0, -3.8, 0.6 }, { 7.4, 7.6, 7 })
@@ -1243,7 +1291,7 @@ SPECIES.Penguin = function(ctx)
 end
 
 SPECIES.Axolotl = function(ctx)
-	local g, H = ctx.Body, ctx.High
+	local g, H = ctx.Body, ctx.Fine
 	head(ctx, "Fur", { 0, 5.4, -0.4 }, { 9, 6.6, 7 })
 	ell(g, "Fur", { 0, -4, 1.8 }, { 5.4, 5.6, 6.6 })
 	paint(g, "Belly", { Kind = "Ellipsoid", Center = { 0, -3.8, -3.6 }, Radius = { 3.8, 4.6, 2.6 } }, "Fur")
@@ -1293,23 +1341,26 @@ end
 -- Wings (sculpted in hinge-local design voxels: the LEFT wing reaches towards -X, up is +Y, back is +Z)
 ----------------------------------------------------------------------
 WINGS.Feather = function(ctx, w)
-	local H = ctx.High
-	-- shoulder coverts (light), then a row of long primaries fanning out, alternating shades
-	ell(w, "WingEdge", { -4.6, 3.8, 0 }, { 5, 2.6, 1 })
-	local tips = { { -13.4, 6.6 }, { -14, 3.4 }, { -13, 0 }, { -11, -2.6 }, { -8, -4.2 }, { -5, -4.6 } }
+	local H = ctx.Fine
+	-- long flight feathers fanning out (alternating shades, overlapping into one blade with scalloped tips),
+	-- a row of covert feathers over them and a light leading edge
+	local tips = { { -13.6, 5 }, { -14.2, 1.8 }, { -13.2, -1.4 }, { -11, -3.8 }, { -7.8, -5 } }
 	for i, tp in ipairs(tips) do
-		local key = (i % 2 == 0) and "WingTrim" or "Wing"
-		cap(w, key, { -2.4, 2.4, 0.2 }, { tp[1], tp[2], 0.8 }, 1.35, 1)
+		cap(w, (i % 2 == 0) and "WingTrim" or "Wing", { -3, 1.6, 0.4 }, { tp[1], tp[2], 0.8 }, 1.75, 1.3)
 	end
+	ell(w, "Wing", { -6.4, 2, 0.2 }, { 6.4, 2.6, 1.1 })
+	ell(w, "WingEdge", { -5.4, 4, 0 }, { 5.8, 2.2, 1.2 })
 	if H then
-		-- secondary coverts row
-		ell(w, "Wing", { -6.6, 2.2, -0.2 }, { 4.6, 1.6, 0.9 })
-		paint(w, "WingEdge", { Kind = "Ellipsoid", Center = { -4.6, 4.6, 0 }, Radius = { 4.6, 1.6, 2 } })
+		-- darker feather tips
+		for _, tp in ipairs(tips) do
+			ell(w, "WingTip", { tp[1], tp[2], 0.8 }, { 1.6, 1.6, 1.6 }, { Op = "Paint", OnlyKeys = { Wing = true, WingTrim = true } })
+		end
 	end
+	ctx.Pal.WingTip = darken(ctx.Look.WingColor, 0.32)
 end
 
 WINGS.Bat = function(ctx, w)
-	local H = ctx.High
+	local H = ctx.Fine
 	-- arm bone along the top edge to a little claw, three finger bones, membrane between them
 	curve(w, "WingTrim", { { 0, 0, 0 }, { -5, 4.4, 0.4 }, { -9.6, 6.6, 0.8 } }, 1.1, 0.8)
 	ell(w, "Claw", { -10, 7.2, 0.8 }, { 0.8, 0.9, 0.8 })
@@ -1340,7 +1391,7 @@ WINGS.Fairy = function(ctx, w)
 	-- upper and lower translucent lobes (1 voxel thin) with darker veins and bright spots
 	ell(w, "Wing", { -6.6, 4.6, 0 }, { 6.2, 4.2, 0.5 })
 	ell(w, "Wing", { -4.6, -2.4, 0 }, { 3.8, 2.6, 0.5 })
-	if ctx.High then
+	if ctx.Fine then
 		cap(w, "WingVein", { -1, 1.6, 0 }, { -10.4, 5.6, 0 }, 0.4, 0.3, { Op = "Paint", OnlyKeys = "Wing" })
 		cap(w, "WingVein", { -1, 0, 0 }, { -6.6, -2.6, 0 }, 0.4, 0.3, { Op = "Paint", OnlyKeys = "Wing" })
 		ell(w, "WingEdge", { -9.8, 3.6, 0 }, { 1.4, 1.4, 1 }, { Op = "Paint", OnlyKeys = "Wing" })
@@ -1355,19 +1406,21 @@ WINGS.Fairy = function(ctx, w)
 end
 
 WINGS.Cloud = function(ctx, w)
-	-- an arc of puffy cloud balls, bigger at the shoulder, shaded white / wing blue
-	local puffs = {
-		{ -3, 2.4, 0, 3 }, { -7, 4, 0.4, 3.3 }, { -11, 3.6, 0.8, 2.9 }, { -13.6, 1.6, 1, 2.3 },
-		{ -6, -0.6, 0.4, 2.6 }, { -9.6, -0.2, 0.8, 2.3 },
-	}
-	for i, p in ipairs(puffs) do
-		ell(w, (i % 3 == 0) and "Wing" or "Cloud", { p[1], p[2], p[3] }, { p[4], p[4] * 0.92, p[4] * 0.8 })
+	-- a soft feathered fan in the wing colour with darker feather lines, its top edge and tip trimmed with
+	-- puffy cloud balls
+	for _, tp in ipairs({ { -12.4, 4.6 }, { -12.4, 0.4 }, { -9.6, -3.4 } }) do
+		cap(w, "Wing", { -1.6, 1.8, 0.4 }, { tp[1], tp[2], 0.8 }, 2, 1.5)
+		if ctx.Fine then
+			cap(w, "WingVein", { -4, 1.8, -0.8 }, { tp[1] * 0.85, tp[2] * 0.85, -0.2 }, 0.4, 0.35, { Op = "Paint", OnlyKeys = "Wing" })
+		end
 	end
-	if ctx.High then
-		-- soft blue undersides
-		paint(w, "Wing", { Kind = "Box", Center = { -8, -2.6, 0.6 }, Size = { 18, 2.6, 8 } }, "Cloud")
+	local puffs = { { -3.4, 4.2, 0.6, 2.4 }, { -7.4, 5.8, 0.8, 2.7 }, { -11.6, 5.8, 1, 2.5 }, { -14.4, 2.8, 1.2, 2.1 } }
+	for _, p in ipairs(puffs) do
+		ell(w, "Cloud", { p[1], p[2], p[3] }, { p[4], p[4] * 0.92, p[4] * 0.8 })
 	end
-	ctx.Pal.Cloud = mix(rgb(250, 252, 255), ctx.Look.WingColor, 0.18)
+	ctx.Pal.Cloud = mix(rgb(252, 253, 255), ctx.Look.WingColor, 0.1)
+	ctx.Pal.WingVein = darken(ctx.Look.WingColor, 0.2)
+	ctx.Pal.Wing = mix(ctx.Look.WingColor, ctx.Look.Secondary, 0.25)
 end
 
 WINGS.Crystal = function(ctx, w)
@@ -1376,7 +1429,7 @@ WINGS.Crystal = function(ctx, w)
 	local shards = { { -8, 5.4, 7, 2.2 }, { -9.4, 1, 6.4, 1.8 }, { -6.4, -2.8, 4.6, 1.6 } }
 	for _, sh in ipairs(shards) do
 		shape(w, { Kind = "Ellipsoid", Center = { sh[1], sh[2], 0 }, Radius = { sh[3], sh[4], 0.5 }, Key = "Wing" })
-		if ctx.High then
+		if ctx.Fine then
 			box(w, "WingEdge", { sh[1] - 0.5, sh[2], 0 }, { sh[3] * 1.5, 1, 3 }, { Op = "Paint", OnlyKeys = "Wing" })
 		end
 	end
@@ -1409,14 +1462,15 @@ end
 ----------------------------------------------------------------------
 ACCESSORIES.Horns = function(ctx)
 	local g = ctx.Body
-	local top = ctx.HeadTop
+	local hb = ctx.HornBase or { 3.6, ctx.HeadTop - 2.4, ctx.HeadC[3] + 0.4 }
 	pair(function(s)
-		curve(g, "Horn", { { s * 2.6, top - 2.6, -0.4 }, { s * 3.6, top + 1, 0.2 }, { s * 5, top + 3.4, 1.4 }, { s * 6.8, top + 4, 3 } }, 1.5, 0.5)
-		if ctx.High then
-			paint(g, "HornRing", { Kind = "Box", Center = { s * 3.6, top + 0.6, 0 }, Size = { 4, 0.7, 4 } }, "Horn")
+		-- thick at the root, curving up and outwards to a sharp point, with a darker ring near the root
+		curve(g, "Horn", { { s * hb[1], hb[2], hb[3] }, { s * (hb[1] + 1.4), hb[2] + 3.6, hb[3] + 0.4 }, { s * (hb[1] + 3.4), hb[2] + 6.2, hb[3] + 1 }, { s * (hb[1] + 5), hb[2] + 7.2, hb[3] + 1.4 } }, 1.8, 0.4)
+		if ctx.Fine then
+			paint(g, "HornRing", { Kind = "Box", Center = { s * (hb[1] + 0.8), hb[2] + 1.8, hb[3] }, Size = { 5, 0.8, 5 } }, "Horn")
 		end
 	end)
-	ctx.Pal.HornRing = darken(ctx.Pal.Horn, 0.18)
+	ctx.Pal.HornRing = darken(ctx.Pal.Horn, 0.16)
 end
 
 ACCESSORIES.Crown = function(ctx)
@@ -1452,7 +1506,7 @@ ACCESSORIES.Leaf = function(ctx)
 	cap(g, "Stem", { 0, top - 1.4, z }, { 0.4, top + 2.6, z }, 0.6, 0.5)
 	-- the leaf: a tilted flattened ellipsoid with a darker midrib
 	ell(g, "Leaf", { 2.8, top + 3.6, z }, { 3.4, 1, 2 }, { Rotation = CFrame.Angles(0, 0, 0.45), Pivot = { 2.8, top + 3.6, z } })
-	if ctx.High then
+	if ctx.Fine then
 		cap(g, "LeafDeep", { 0.6, top + 2.4, z - 0.2 }, { 5, top + 5.4, z - 0.2 }, 0.45, 0.3, { Op = "Paint", OnlyKeys = "Leaf" })
 	end
 	ell(g, "Leaf", { -1.8, top + 2.4, z + 0.2 }, { 1.8, 0.8, 1.2 }, { Rotation = CFrame.Angles(0, 0, -0.5), Pivot = { -1.8, top + 2.4, z + 0.2 } })
@@ -1467,7 +1521,7 @@ ACCESSORIES.Mushroom = function(ctx)
 	carve(g, { Kind = "Box", Center = { 0, top + 0.4, z }, Size = { 12, 2, 12 } }, "Cap")
 	local spots = { { 2.6, top + 4.4, z - 2 }, { -2.8, top + 4, z - 1.4 }, { 0, top + 5, z + 1.6 }, { 3.4, top + 3, z + 2 }, { -3.6, top + 3, z + 1.8 } }
 	for i, p in ipairs(spots) do
-		if ctx.High or i <= 2 then
+		if ctx.Fine or i <= 2 then
 			ell(g, "CapSpot", p, { 1, 0.8, 1 }, { Op = "Paint", OnlyKeys = "Cap" })
 		end
 	end
@@ -1486,7 +1540,7 @@ ACCESSORIES.Scarf = function(ctx)
 	end
 	curve(g, "Scarf", pts, 1.6, 1.6, { Smooth = false })
 	cap(g, "Scarf", { 2.4, y - 0.6, z - rz - 0.4 }, { 3.4, y - 6, z - rz - 0.6 }, 1.5, 1.5)
-	if ctx.High then
+	if ctx.Fine then
 		local stripe = function(x, yy)
 			if floor(yy + 0.5) % 3 == 0 then
 				return "ScarfStripe"
@@ -1525,7 +1579,7 @@ ACCESSORIES.Flower = function(ctx)
 		ell(g, (i % 2 == 0) and "Petal" or "PetalDeep", { cx + math.cos(a) * 1.8, cy + math.sin(a) * 1.8, cz }, { 1.3, 1.3, 0.9 })
 	end
 	ell(g, "Pollen", { cx, cy, cz - 0.6 }, { 1, 1, 0.8 })
-	if ctx.High then
+	if ctx.Fine then
 		ell(g, "Leaf", { cx - 1.8, cy - 2.6, cz + 0.6 }, { 1.6, 0.7, 1 })
 	end
 end
@@ -1561,11 +1615,14 @@ local function mergeGroup(ctx, grid, budget)
 	return Voxel.Merge(grid, { Palette = ctx.Pal, MaxParts = budget, Keep = ctx.Keep })
 end
 
-local function buildBlueprint(look, detail)
+local function buildBlueprint(look, detail, lean)
 	local k = (detail == "Low") and LOW_K or 1
 	SK = k
 	local ok, result = pcall(function()
 		local ctx = newContext(look, detail)
+		if lean then
+			ctx.Fine = false
+		end
 		local budget = BUDGET[detail] or BUDGET.High
 		SPECIES[look.Species](ctx)
 		if look.Accessory then
@@ -1669,11 +1726,28 @@ lidBoxes = function(cells)
 	return out
 end
 
+local function partCount(bp)
+	local n = 1
+	for _, gr in ipairs(bp.Groups) do
+		n = n + #gr.Boxes
+	end
+	return n
+end
+
 local function getBlueprint(look, detail)
 	local key = lookSignature(look) .. "|" .. detail
 	local bp = blueprints[key]
 	if not bp then
 		bp = buildBlueprint(look, detail)
+		-- a rare heavy combination (big wings + bushy tail + accessory + aura): sculpt again without the
+		-- optional small details and keep whichever fits
+		local cap = (BUDGET[detail] or BUDGET.High).Cap
+		if partCount(bp) > cap then
+			local lean = buildBlueprint(look, detail, true)
+			if partCount(lean) < partCount(bp) then
+				bp = lean
+			end
+		end
 		blueprints[key] = bp
 	end
 	return bp, key
