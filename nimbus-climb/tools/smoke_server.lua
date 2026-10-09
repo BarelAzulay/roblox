@@ -738,9 +738,15 @@ local function paletteAudit(container, limits)
 				out.neonCount = out.neonCount + 1
 				local a, b, cc = size.X, size.Y, size.Z
 				local face = math.max(a * b, a * cc, b * cc)
-				if d.Shape == Enum.PartType.Ball or d.Shape == Enum.PartType.Cylinder then
-					-- a ball / cylinder shows its biggest circle, not the bounding face
+				if d.Shape == Enum.PartType.Ball then
+					-- a ball shows its biggest circle, not the bounding face
 					face = math.max(a, b, cc) ^ 2 * 0.785
+				elseif d.Shape == Enum.PartType.Cylinder then
+					-- Roblox cylinders run along X (Size.X = length, Size.Y / Size.Z = diameter). What a viewer sees is
+					-- either the round cap (a flat disc: pi/4 * d^2) or the long side (length * diameter, a rod);
+					-- squaring the longest dimension would count a thin 0.55 x 17.2 rod as a 231 stud^2 slab.
+					local diameter = math.max(b, cc)
+					face = math.max(a * diameter, 0.785 * diameter * diameter)
 				end
 				if face > maxNeonFace and d.Transparency < 0.5 then
 					out.bigNeonCount = out.bigNeonCount + 1

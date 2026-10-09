@@ -4447,9 +4447,10 @@ local function measureContent(inst, w, h, s)
 		local tw, th = textExtent(inst, limit)
 		return tw + l + r, th + t + b
 	end
-	local own = firstChildIs(inst, "UIScale")
-	local ownScale = own and prop(own, "Scale") or 1
-	local content = { x = 0, y = 0, w = mmax(0, w - l - r), h = mmax(0, h - t - b), s = s * ownScale }
+	-- The content is measured in the object's OWN (pre-UIScale) space with the parent's scale `s`: resolveSize
+	-- multiplies the measured size by the object's UIScale afterwards. Measuring with s * ownScale as well
+	-- applied the scale twice (a 304 px column at scale 0.72 came out 158 px tall instead of 219).
+	local content = { x = 0, y = 0, w = mmax(0, w - l - r), h = mmax(0, h - t - b), s = s }
 	local arr = arrangement(inst, content, false)
 	if arr then
 		return arr.cw + l + r, arr.ch + t + b
@@ -6613,11 +6614,25 @@ end
 
 -- Changes the screen size (rotation / resize / foldable) and fires Camera.ViewportSize changes like Roblox does.
 function Mock.SetViewport(width, height)
+	local old = Mock.Viewport
 	Mock.Viewport = v2(width, height)
 	Mock.GuiEpoch = Mock.GuiEpoch + 1
 	local cam = Mock.workspace and Mock.workspace[STATE].props.CurrentCamera
 	if cam then
 		firePropChanged(cam, cam[STATE], "ViewportSize")
+	end
+	-- Every ScreenGui resizes with the viewport, so scripts that relayout on
+	-- gui:GetPropertyChangedSignal("AbsoluteSize") (menu, hotbar) run exactly like in Roblox.
+	if old == nil or old.X ~= width or old.Y ~= height then
+		local lp = Mock.LocalPlayer
+		local pg = lp and IM.FindFirstChild(lp, "PlayerGui")
+		if pg then
+			for _, g in ipairs({ unpack(pg[STATE].children) }) do
+				if not g[STATE].destroyed and g[STATE].class.isA.ScreenGui then
+					firePropChanged(g, g[STATE], "AbsoluteSize")
+				end
+			end
+		end
 	end
 end
 

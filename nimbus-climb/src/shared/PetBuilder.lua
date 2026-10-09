@@ -1347,12 +1347,14 @@ local function addFlair(ctx, rarity)
 	if not f or not ctx.Head then
 		return
 	end
+	local hinge = CF(0, 0.5, 0.1)
 	for i = 1, f.Gems do
+		local phase = (i - 1) * TAU / f.Gems
 		local n = newNode(ctx, {
 			Kind = "orbit",
-			Hinge = CF(0, 0.5, 0.1),
+			Hinge = hinge,
 			Axis = "y",
-			Phase = (i - 1) * TAU / f.Gems,
+			Phase = phase,
 			Rate = 0.8 + i * 0.13,
 			Amp = 0.12,
 		})
@@ -1360,8 +1362,12 @@ local function addFlair(ctx, rarity)
 		if i % 2 == 0 then
 			col = f.B
 		end
-		local y = 0.2 + ((i * 0.53) % 1) * 1.3
-		blockCF(ctx, "Gem" .. i, CF(1.8, y, 0.1) * A(0.6, 0, PI / 4), V3(0.2, 0.2, 0.2), col, { Node = n, Material = NEON, Transparency = 0.1 })
+		-- Each gem gets its own height and its orbit phase baked into the rest pose (nodeMotion only adds
+		-- the running angle), so a pet that is never Animated (the lobby mascot statue) still shows the gems
+		-- spread evenly round the body instead of stacked on one side.
+		local y = 0.35 + (i - 1) * 0.5
+		local rest = hinge * A(0, phase, 0) * hinge:Inverse() * CF(1.8, y, 0.1)
+		blockCF(ctx, "Gem" .. i, rest * A(0.6, 0, PI / 4), V3(0.2, 0.2, 0.2), col, { Node = n, Material = NEON, Transparency = 0.1 })
 	end
 	local k = ctx.Scale
 	local e = Instance.new("ParticleEmitter")
@@ -1486,7 +1492,8 @@ local function nodeMotion(n, st)
 	elseif kind == "ear" then
 		a1 = a1 + n.Amp * math.sin(st.Sway * 1.3 + n.Phase) + earFlick(n, st)
 	elseif kind == "orbit" then
-		a1 = n.Phase + st.Sway * n.Rate
+		-- the node's Phase is already baked into the parts' rest CFrames (see addFlair); it only offsets the bob
+		a1 = st.Sway * n.Rate
 		lift = n.Amp * math.sin(st.Sway * 1.7 + n.Phase * 2)
 	elseif kind == "bob" then
 		lift = n.Amp * math.sin(st.Sway * n.Rate + n.Phase)

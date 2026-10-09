@@ -8,6 +8,9 @@
 --   * bloom only on genuinely bright accents (neon trims, tokens), tiny sun rays,
 --   * a little extra contrast, a hint of saturation, a cool tint, depth of field off.
 -- No asset ids anywhere: the stock sky textures stay, only the celestial bodies are tuned.
+-- Lighting.Technology (ShadowMap) cannot be written from a script (plugin security), so it is set
+-- by the "Lighting" node in default.project.json; ShadowSoftness and the environment scales
+-- below only matter with that technology.
 -- Plain Lua 5.1-compatible syntax only.
 
 local Lighting = game:GetService("Lighting")
@@ -24,7 +27,11 @@ local LightingService = {}
 local LOOK = {
 	Lighting = {
 		ClockTime = 15.2, -- mid-late afternoon: the sun is still up but already soft
-		GeographicLatitude = 28, -- lowers the sun a little, which gives longer, clearer shadows
+		-- A HIGHER latitude lowers the sun's path (a lower one pushes it towards the zenith). With
+		-- ClockTime 15.2 the sun stands about 36 degrees up at latitude 28, 30 at Roblox's default
+		-- (41.7) and 27 at 48: lower sun = longer, clearer shadows and ~10% less direct light on the
+		-- platform tops than the default, which is what the "too bright" fix wants.
+		GeographicLatitude = 48,
 		Brightness = 1.5,
 		Ambient = Color3.fromRGB(84, 96, 128),
 		OutdoorAmbient = Color3.fromRGB(108, 120, 152),

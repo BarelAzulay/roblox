@@ -73,7 +73,9 @@ Theme.Colors = {
 	Mist = rgb(226, 234, 246), -- pale cloud used for slot fills (never pure white)
 	MistDeep = rgb(176, 196, 228),
 	Gold = rgb(244, 196, 78),
-	Muted = rgb(176, 192, 222), -- secondary text on dark wells
+	-- Secondary text on dark wells. 4.6:1 on WellTop, 7.1:1 on WellBottom, 5.5:1 on PanelLight
+	-- (the old (176,192,222) gave only 3.4:1 on WellTop); still clearly dimmer than White.
+	Muted = rgb(212, 224, 246),
 }
 
 -- Base colours of the glossy button styles (CloudUI.Button / IconButton).
@@ -98,9 +100,12 @@ Theme.Kinds = {
 -- tops are clearly lighter than their sides, hazards are a distinct dark red/purple, checkpoints
 -- teal. Trim colours are per difficulty id (Config.Difficulties order) and also by index.
 Theme.World = {
-	CloudTop = rgb(202, 214, 236),
-	CloudSide = rgb(150, 168, 204),
-	CloudShadow = rgb(104, 122, 162),
+	-- Peaks are 214 / 184 / 150 on purpose: the same ceiling LobbyBuilder clamps to, so the lobby
+	-- and every course platform (and the Start/Finish pads) share one calm palette and the blue
+	-- channel does not clip towards white-cyan under the late-afternoon sun.
+	CloudTop = rgb(183, 194, 214),
+	CloudSide = rgb(135, 152, 184),
+	CloudShadow = rgb(96, 113, 150),
 	Hazard = rgb(160, 62, 94),
 	HazardGlow = rgb(222, 100, 124),
 	Checkpoint = rgb(62, 172, 152),
@@ -113,12 +118,12 @@ Theme.World = {
 		Medium = rgb(96, 160, 224),
 		Hard = rgb(226, 150, 74),
 		Extreme = rgb(214, 92, 104),
-		Saint = rgb(226, 190, 96),
+		Saint = rgb(150, 110, 220), -- violet, mirrors Config.Difficulties Saint (gold is reserved for stars/tokens)
 		rgb(96, 190, 140),
 		rgb(96, 160, 224),
 		rgb(226, 150, 74),
 		rgb(214, 92, 104),
-		rgb(226, 190, 96),
+		rgb(150, 110, 220),
 	},
 	Rainbow = {
 		rgb(206, 96, 112),

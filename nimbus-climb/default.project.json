@@ -16,6 +16,12 @@
         "$className": "StarterPlayerScripts",
         "Client": { "$path": "src/client" }
       }
+    },
+    "Lighting": {
+      "$className": "Lighting",
+      "$properties": {
+        "Technology": "ShadowMap"
+      }
     }
   }
 }
