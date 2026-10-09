@@ -18,6 +18,11 @@ local CONTROLLER_NAMES = {
 	"HotbarController",
 	"PetController",
 	"TokenFx",
+	-- v3 (ARCHITECTURE_V3.md)
+	"SkyDragonController",
+	"IndexController",
+	"NpcController",
+	"TutorialController",
 }
 
 local TAG = "[NimbusClimb] "

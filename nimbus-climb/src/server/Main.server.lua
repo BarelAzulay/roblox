@@ -191,6 +191,10 @@ local HazardService = loadService("HazardService")
 local CourseBuilder = loadService("CourseBuilder")
 local MatchService = loadService("MatchService")
 local PortalService = loadService("PortalService")
+-- v3 services (ARCHITECTURE_V3.md)
+local IndexService = loadService("IndexService")
+local NpcService = loadService("NpcService")
+local TutorialService = loadService("TutorialService")
 
 ----------------------------------------------------------------------
 -- 2. World: lighting, lobby, damage, tokens, persistence
@@ -291,6 +295,17 @@ if type(ItemService) == "table" and type(ItemService.SetMatchService) == "functi
 end
 
 call("PortalService.Init", PortalService, "Init", lobbyInfo, MatchService)
+
+-- v3: Pet Index rewards, lobby NPC pets, new-player tutorial (each handles players who joined before Init).
+call("IndexService.Init", IndexService, "Init", { DataService = DataService, PetService = PetService })
+call("NpcService.Init", NpcService, "Init", lobbyInfo, {})
+call("TutorialService.Init", TutorialService, "Init", lobbyInfo, {
+	DataService = DataService,
+	PetService = PetService,
+	MatchService = MatchService,
+	SpotService = SpotService,
+	IndexService = IndexService,
+})
 
 ----------------------------------------------------------------------
 -- 6. Dash relay: validate the cooldown server-side, then show the trail to everyone

@@ -63,6 +63,9 @@ Config.Attr = {
 	EquippedPets = "EquippedPets", -- csv of pet ids, e.g. "cloudy_dragon,pebble_pup" ("" when none)
 	SpotIndex = "SpotIndex", -- lobby spot number (1..Config.Lobby.SpotCount), absent when none
 	PerkStaminaRegen = "PerkStaminaRegen", -- number, e.g. 0.2 = +20% stamina regen (server writes)
+	-- v3 (see ARCHITECTURE_V3.md). Cash and Gems arrive with the tycoon phase; the HUD shows them only once set.
+	Cash = "Cash", -- number, tycoon money (server writes)
+	Gems = "Gems", -- number, premium currency (server writes)
 }
 
 Config.Remotes = {
@@ -76,6 +79,7 @@ Config.Remotes = {
 	"ProfileSync", -- (snapshot:table)  see ARCHITECTURE_V2.md
 	"RouletteResult", -- (result:table)    see ARCHITECTURE_V2.md
 	"OpenPanel", -- (panelId:string, args:table|nil)  e.g. ("Shop", {Tab="Roulette", RouletteId="Cloud"})
+	"TutorialState", -- (state:table)  v3, see ARCHITECTURE_V3.md
 	-- client -> server
 	"Dash", -- ()
 	"LeaveParty", -- ()
@@ -87,6 +91,8 @@ Config.Remotes = {
 	"BuyItem", -- (itemId:string, qty:number|nil)
 	"UseItem", -- (itemId:string)
 	"GoToSpot", -- ()
+	"TutorialEvent", -- (eventName:string)  v3: client-observed tutorial events (window opened, skip)
+	"IndexClaim", -- (groupId:string)  v3: claim a completed Pet Index group reward
 }
 
 ----------------------------------------------------------------------
@@ -108,8 +114,9 @@ Config.Lobby = {
 	Origin = Vector3.new(0, 300, 0), -- centre of the main plaza surface
 	PlazaRadius = 110,
 	PortalRingRadius = 88, -- the five portal gates stand on this ring
-	SpotRingRadius = 215, -- the player spots (personal cloud homes) stand on this ring
+	SpotRingRadius = 300, -- v3: the player home plots stand on this ring (bigger, for the tycoon homes)
 	SpotCount = 16, -- one saved spot per player; set the place's Max Players to <= this
+	PlotSize = 72, -- v3: flat square buildable area (studs) of each home plot; the phase-2 home is built on it
 	ShopOffset = Vector3.new(0, 0, -150), -- shop island centre relative to Origin
 	KillY = 100, -- fall below this -> teleport back to the plaza
 }
@@ -290,6 +297,7 @@ Config.Rarities = {
 	{ Id = "Epic", Order = 4, Color = Color3.fromRGB(176, 108, 232) },
 	{ Id = "Legendary", Order = 5, Color = Color3.fromRGB(242, 182, 68) },
 	{ Id = "Mythic", Order = 6, Color = Color3.fromRGB(238, 98, 140) },
+	{ Id = "Secret", Order = 7, Color = Color3.fromRGB(40, 40, 52) }, -- v3: gems-only Secret roulette (phase 2)
 }
 
 Config.Pets = {
@@ -330,6 +338,32 @@ Config.Roulettes = {
 		Color = Color3.fromRGB(236, 120, 170),
 		Odds = { Epic = 45, Legendary = 40, Mythic = 15 },
 	},
+}
+
+-- v3: Pet Index. One group per rarity; completing a group (discovering every pet in it) unlocks its reward once.
+Config.Index = {
+	Rewards = {
+		Common = { Tokens = 50 },
+		Uncommon = { Tokens = 120 },
+		Rare = { Tokens = 300 },
+		Epic = { Tokens = 800 },
+		Legendary = { Tokens = 2000 },
+		Mythic = { Tokens = 5000 },
+		Secret = { Tokens = 10000 },
+	},
+}
+
+-- v3: new-player tutorial guided by Nimbus, the Cloudy Dragon (steps live in shared/TutorialSteps.lua).
+Config.Tutorial = {
+	GiftTokens = 50, -- granted once at the "spin your first roulette" step so a new player can afford it
+	FinishReward = { Tokens = 100 },
+}
+
+-- v3: pet roles and battle/economy stats (values live per pet in PetCatalog; phases 2 and 3 use them).
+Config.PetStats = {
+	Roles = { "Economy", "Combat" },
+	-- Multiplier applied to a pet's base stats by rarity.
+	RarityScale = { Common = 1, Uncommon = 1.5, Rare = 2.3, Epic = 3.5, Legendary = 5.5, Mythic = 8.5, Secret = 13 },
 }
 
 Config.Items = {

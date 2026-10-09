@@ -5584,7 +5584,25 @@ service("Workspace", {
 		BulkMoveTo = function() end,
 	},
 })
-defclass("Terrain", "BasePart", { creatable = false, methods = { FillBlock = function() end, Clear = function() end } })
+defclass("Terrain", "BasePart", {
+	creatable = false,
+	-- Smooth-terrain API used to build soft cloud islands and ground. Voxel writes are not simulated; calls are
+	-- recorded in Terrain[STATE].fills so tests can assert that terrain was written (count and materials).
+	props = {
+		Decoration = T.bool(false), WaterColor = T.rgb(12, 84, 92), WaterReflectance = T.num(1),
+		WaterTransparency = T.num(0.3), WaterWaveSize = T.num(0.15), WaterWaveSpeed = T.num(10),
+	},
+	methods = {
+		FillBlock = function(self, cf, size, material) local st = self[STATE]; st.fills = st.fills or {}; table.insert(st.fills, { kind = "Block", material = material }) end,
+		FillBall = function(self, center, radius, material) local st = self[STATE]; st.fills = st.fills or {}; table.insert(st.fills, { kind = "Ball", material = material }) end,
+		FillCylinder = function(self, cf, height, radius, material) local st = self[STATE]; st.fills = st.fills or {}; table.insert(st.fills, { kind = "Cylinder", material = material }) end,
+		FillWedge = function(self, cf, size, material) local st = self[STATE]; st.fills = st.fills or {}; table.insert(st.fills, { kind = "Wedge", material = material }) end,
+		FillRegion = function(self, region, resolution, material) local st = self[STATE]; st.fills = st.fills or {}; table.insert(st.fills, { kind = "Region", material = material }) end,
+		Clear = function(self) self[STATE].fills = {} end,
+		SetMaterialColor = function(self, material, color) local st = self[STATE]; st.materialColors = st.materialColors or {}; st.materialColors[tostring(material)] = color end,
+		GetMaterialColor = function(self, material) local st = self[STATE]; return (st.materialColors and st.materialColors[tostring(material)]) or Color3.new(0.5, 0.5, 0.5) end,
+	},
+})
 
 service("Players", {
 	props = { CharacterAutoLoads = T.bool(true), RespawnTime = T.num(5), MaxPlayers = T.num(12), PreferredPlayers = T.num(12), BubbleChat = T.bool(false), ClassicChat = T.bool(false) },
