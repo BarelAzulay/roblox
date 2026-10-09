@@ -59,9 +59,10 @@ local DEFAULT_KILL_DROP = 60 -- CourseInfo.KillY fallback: origin.Y - this
 --     landings >= -3 below the pad) and the poll samples every 0.25 s, so two links cannot fit between
 --     two samples: honest play never changes the standing height by more than ~4 per sample;
 --   * hazard geometry (storm cloud, pendulum, lightning rods ...) is at most 12 studs above its step;
---   * two overlapping steps are always >= Config.Course.Clearance + 2 (step thickness) = 10 studs apart
---     top to top; over ~5500 stacked step pairs of 300 generated courses the closest was 10.3 and only
---     6 of them (0.1%) were closer than 12.
+--   * two overlapping steps are always >= Config.Course.Clearance + 2 (step thickness) = 15 studs apart
+--     top to top (the generator keeps the underside >= Clearance + 0.3 above the lower top); over the
+--     ~55000 overlapping step pairs of 1500 generated layouts (5 difficulties x 300 seeds) the closest
+--     was 15.3 and none was closer than 15, so stacked laps clear the 12 stud limit by about 3 studs.
 -- So landing more than 12 studs below the last standing height is always a fall, never a link.
 local FALL_DROP = 12
 -- Ground probe: a standing root is ~3 studs over the floor (HipHeight 2 + half the root, up to ~4.5 on
@@ -725,7 +726,7 @@ local function isGrounded(hum, root)
 end
 
 -- Laps are stacked: a missed jump on a Spiral (or any overlapping layout) usually lands on a lower lap
--- 10-40 studs down, long before KillY, so the plane alone never punishes it and the player is stranded
+-- 15-40 studs down, long before KillY, so the plane alone never punishes it and the player is stranded
 -- behind the team. Per player we remember the height they last stood at (rec.LastGroundY) and whether
 -- they have been in the air since (rec.Airborne). Touching ground again more than FALL_DROP studs below
 -- that height is a fall: this returns true ONCE, then the caller rescues the player (handleVoid /

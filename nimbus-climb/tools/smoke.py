@@ -7,18 +7,21 @@
 Two Lua worlds are booted (each its own state, so server and client cannot cheat by sharing globals):
 
   server world   smoke_server.lua   mock self-test, module loading, contract.json API check, boot of Main.server.lua, lobby,
-                                    players, portals, damage rules, the match lifecycle (victory / defeat / timeout / abandon /
-                                    leave / death / concurrent slots), persistence, shutdown, whole-run invariants
+                                    players, portals, damage rules, the fall rule (landing on a lower lap), the match lifecycle
+                                    (victory / defeat / timeout / abandon / leave / death / concurrent slots), persistence, DataStore
+                                    orphans (leaving during an outage), shutdown, whole-run invariants
                  smoke_content.lua  PetCatalog / ItemCatalog / roulette odds, Config shape, PetBuilder for every pet
                  smoke_course.lua   5 difficulties x N seeds of GenerateLayout + ValidateLayout + an independent audit with
                                     per-difficulty statistics, cannon ballistics, CourseBuilder.Build (budget, tags, attributes)
-                 smoke_economy.lua  spots, DataService / PetService economy, items, ProfileSync shape, v1 -> v2 migration,
+                 smoke_economy.lua  spots, DataService / PetService economy, items, match locks (items in the countdown, pets in
+                                    matches), ProfileSync shape, v1 -> v2 migration,
                                     the match lifecycle on all five difficulties, pet perks inside matches
-                 smoke_hazards.lua  HazardService on real generated courses (incl. pendulum, wind, cannon, golden tokens)
+                 smoke_hazards.lua  HazardService on real generated courses (incl. pendulum, wind, cannon, golden tokens) and the
+                                    TokenService no-animation rule (Config.Tokens.ClientAnimated)
   client world   smoke_client.lua   Main.client.lua boot, movement, HUD, toasts / results, damage fx, replay of the exact
                                     server traffic, final invariants, touch layout (390x844 phone)
-                 smoke_client_v2.lua CloudUI kit, State, menu + windows + roulette reveal, hotbar, pet followers, and the
-                                    "no text in the middle of the screen" rule at 1920x1080 and 390x844
+                 smoke_client_v2.lua CloudUI kit, State, menu + windows + roulette reveal, hotbar, pet followers, TokenFx
+                                    (client coin spin/bob), and the "no text in the middle of the screen" rule at 1920x1080 and 390x844
 
 `--list` prints the scenario names. Every tools/smoke_*.lua must be listed in `server_files` / `client_files` below and every
 scenario function must be listed in the scenario lists (smoke.py reports a failure otherwise). A scenario that crashes or runs
@@ -334,16 +337,16 @@ def main():
         ["mock_selftest", "load_modules"]
         + pure_scenarios
         + [
-            "boot", "lobby", "players", "spots", "economy", "items", "profile_sync", "migration", "portals", "damage_rules",
-            "match_victory", "match_defeat", "match_timeout", "match_abandon", "match_leave", "match_death",
-            "match_slots", "match_difficulties", "match_pets", "hazards", "persistence", "dash_relay", "shutdown",
+            "boot", "lobby", "players", "spots", "economy", "items", "match_locks", "profile_sync", "migration", "portals", "damage_rules",
+            "fall_rule", "match_victory", "match_defeat", "match_timeout", "match_abandon", "match_leave", "match_death",
+            "match_slots", "match_difficulties", "match_pets", "hazards", "persistence", "data_orphans", "dash_relay", "shutdown",
             "final_checks",
         ]
     )
     server_files = ["smoke_server.lua", "smoke_content.lua", "smoke_course.lua", "smoke_economy.lua", "smoke_hazards.lua"]
     client_scenarios = [
         "client_load", "client_ui_kit", "client_state", "client_input", "client_hud", "client_notify", "client_damage",
-        "client_menu", "client_hotbar", "client_pets", "client_layout_rule", "client_replay", "client_final",
+        "client_menu", "client_hotbar", "client_pets", "client_tokens", "client_layout_rule", "client_replay", "client_final",
     ]
     mobile_scenarios = ["client_mobile"]
     client_files = ["smoke_client.lua", "smoke_client_v2.lua"]

@@ -2,7 +2,7 @@
 # Runs every verification step for Nimbus Climb and prints one summary line per step.
 #
 #   tools/run_checks.sh                 # syntax + static analysis + full smoke test
-#   tools/run_checks.sh --quick         # same, with a shorter smoke test (fewer layout seeds, ~15 s)
+#   tools/run_checks.sh --quick         # same, with a shorter smoke test (40 layout seeds instead of 300, ~75 s; the full run takes ~2 min)
 #   tools/run_checks.sh --static        # only the fast checks (syntax + check.mjs)
 #   tools/run_checks.sh --smoke -v      # only the smoke test, verbose (every passing check is listed)
 #   tools/run_checks.sh --smoke --only match_victory,damage_rules

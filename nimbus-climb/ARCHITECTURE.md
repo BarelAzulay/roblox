@@ -1,4 +1,14 @@
 > **v2 update:** read `ARCHITECTURE_V2.md` too. It supersedes this file wherever they disagree (five difficulties, pets, spots, new UI, new course generator).
+>
+> **Behaviour changes from the v2 review** (details with numbers in `ARCHITECTURE_V2.md` section 12; they change statements below):
+> * MatchService: besides the kill plane, a landing more than **12 studs below the player's last standing height** is a void
+>   fall (VoidDamage + back to the team checkpoint), see "MatchService" below.
+> * Courses: `Config.Course.Clearance` is 13 (decor headroom: Start/Finish 18, Checkpoint 10.5) and jump corridors must stay
+>   free; the course no longer runs toward +Z (see v2 section 7).
+> * Tokens: `TokenFx` (client) spins/bobs the coins when `Config.Tokens.ClientAnimated` is true; the server animates nothing.
+> * SpotService podium pet: one welded assembly in a static pose, moved only within 55 studs of a player.
+> * DataService: a profile that could not be saved when its player left is kept as an orphan and retried (v2 section 1).
+> * PetService.Equip/Unequip are refused during matches; ItemService.Use is refused during the match countdown.
 
 # Nimbus Climb — architecture & module contracts
 
@@ -57,8 +67,9 @@ Require paths:
 * The lobby sits at `Config.Lobby.Origin` (y=300). Matches are built at
   `Config.Match.ArenaOrigin + Vector3.new((slot-1) * Config.Match.SlotSpacing, 0, 0)`.
 * Course direction: starts at its origin, progresses toward **+Z**, climbing. Never goes lower than
-  `origin.Y - 10`. Kill plane = `origin.Y - 60`.
-* Difficulty ids: `"Breeze" | "Gale" | "Thunderstorm"`.
+  `origin.Y - 10`. Kill plane = `origin.Y - 60`. *(v2: courses follow an archetype and may head in any direction; the
+  kill plane is unchanged and a 12 stud fall rule backs it up, see MatchService.)*
+* Difficulty ids: `"Breeze" | "Gale" | "Thunderstorm"`. *(v2: `"Easy" | "Medium" | "Hard" | "Extreme" | "Saint"`.)*
 
 ---
 
@@ -153,6 +164,9 @@ DataService.BindToClose()           -- game:BindToClose saves everybody
 DataService.AddTokens(player, n)    -- updates attr CloudTokens + leaderstats Tokens, marks dirty
 DataService.GetTokens(player) -> number
 ```
+*(v2: the profile is richer, see `ARCHITECTURE_V2.md` section 1. A leaving player's cache entry is freed only once the
+store holds everything it knows; after a failed final save it stays as an "orphan" that a rejoin picks up, that a background
+retry / the autosave sweep / BindToClose flush, and that is dropped after a successful write or 30 minutes.)*
 Uses `DataStoreService:GetDataStore(Config.Tokens.DataStoreName)`, key `"u_"..UserId`,
 `UpdateAsync` or `SetAsync` in pcall. In-memory cache so everything still works when the DataStore
 is unavailable.
@@ -201,6 +215,7 @@ TokenService.MakeTokenPart(position, parent, value) -> Part
    -- a small white puff, PointLight, sparkles, billboard "★" optional), tagged CloudToken,
    -- attr Value, CanCollide=false, Anchored. Slowly spins + bobs via a looped tween
    -- (Tween on CFrame is fine; or a single shared Heartbeat driver for all tokens in the container).
+   -- (v2: with `Config.Tokens.ClientAnimated = true` the server does not animate; the client controller `TokenFx` does.)
 ```
 CourseBuilder/LobbyBuilder call `TokenService.MakeTokenPart` to create tokens (do NOT duplicate the
 visual). The lobby may contain a few decorative tokens that are not tagged (no collection).
@@ -319,6 +334,9 @@ Flow:
    and flash a banner. Kill plane: every 0.25 s, any member whose root `Y < course.KillY` takes
    `Config.Damage.VoidDamage[id]` (`"Void"`), and if still up is teleported to the team checkpoint
    SpawnCFrame (Start if none); if downed by it, they are teleported to the checkpoint as downed.
+   **Fall rule (v2):** a member who touches ground more than 12 studs below the height they last stood at (after being in
+   the air) takes the same void hit and return, once; mid-air, ground-to-ground jumps, short hops, bounce/cannon flights,
+   downed and finished players are never judged (see `ARCHITECTURE_V2.md` section 12).
    Downed players stay frozen where they are and wait for a teammate to reach the next checkpoint
    (they are NOT respawned automatically) — BUT if no alive player remains → **defeat**.
    `AddTokens(player, n)`: `MatchTokens += n` and `DataService.AddTokens(player, n)`;
@@ -484,4 +502,6 @@ NotifyController.Init()
   server module, runs `CourseBuilder.GenerateLayout/ValidateLayout` for all difficulties over 200
   seeds, simulates a `MatchService` lifecycle with fake players and a fake clock (victory, defeat,
   abandon) and asserts invariants; also loads the client controllers.
-* `tools/run_checks.sh` runs both.
+* `tools/run_checks.sh` runs both. `python3 tools/smoke.py --list` prints every scenario; `--quick` runs 40 layout seeds per
+  difficulty instead of 300 (the FULL run, plain `python3 tools/smoke.py`, must pass before a release). The regression
+  scenarios for the v2 review changes are listed at the end of `ARCHITECTURE_V2.md` section 11.

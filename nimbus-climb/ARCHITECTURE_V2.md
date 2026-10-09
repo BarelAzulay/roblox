@@ -100,6 +100,13 @@ DataService.ProfileLoaded                      -- Util.Signal; Fire(player, prof
 Sent on join (after load), on `RequestProfile`, and after every Pet/Item mutation. Token changes are visible to the
 client through attribute `CloudTokens` (not through ProfileSync).
 
+**Leaving during a DataStore outage (orphan retention, see section 12).** A leaving player's cache entry is freed only
+once the store holds everything it knows. If the final save fails (outage, throttling, a load that never succeeded) the
+entry is kept as an *orphan*: a quick rejoin gets the unsaved profile back, a background retry (first after 10 s, backoff
+up to 120 s) and the autosave sweep (which walks the cache, not the player list) flush it, `BindToClose` flushes it, and it
+is dropped only after a successful write or after 30 minutes (with a `giving up` warning). `DataService.Release(player)`
+makes that decision; callers just call it.
+
 ## 2. Pets
 
 ### `shared/PetCatalog.lua` (catalog agent) — data + pure logic, no Instances
@@ -193,7 +200,9 @@ PetService.PerksChanged                  -- Util.Signal; Fire(player)
 * `RouletteResult` payload: `{ Ok = bool, Reason = string|nil, RouletteId, PetId = string|nil, IsNew = bool,
   Count = number, Tokens = number, Strip = { petId, ... } }` where `Strip` is a cosmetic list of ~40 pet ids drawn
   from `PossiblePets(rouletteId)` with `PetId` placed at index 34 (client scrolls the strip and stops there).
-* `Equip/Unequip`: validated against ownership and `Config.Pets.MaxEquipped`; writes `Profile.Equipped`,
+* `Equip/Unequip`: refused while the player attribute `InMatch` is true (`false, "Pets are locked during a match"`: the
+  pets in a match are the ones the player entered with; they work again after the match), validated against ownership
+  and `Config.Pets.MaxEquipped`; writes `Profile.Equipped`,
   sets Player attribute `EquippedPets` (csv, used by every client to draw followers) and `PerkStaminaRegen`; fires
   `PerksChanged`; `DataService.Sync`. On profile load, validate `Equipped` against `Pets` and set the attributes.
 * ProximityPrompts: for each `lobbyInfo.Shop.Roulettes[id].PromptPart`, create a `ProximityPrompt` there
@@ -205,7 +214,9 @@ PetService.PerksChanged                  -- Util.Signal; Fire(player)
 ```lua
 ItemService.Init(lobbyInfo, deps)     -- deps = { DataService=, DamageService=, MatchService= (set later by Main: ItemService.SetMatchService(ms) also allowed) }
 ItemService.Buy(player, itemId, qty) -> ok, reason      -- qty 1..MaxCarry; not in match; spends tokens; respects MaxCarry
-ItemService.Use(player, itemId) -> ok, reason           -- match only, alive, not downed; effects above; decrements; Sync; Notify
+ItemService.Use(player, itemId) -> ok, reason           -- match `Playing` only (refused while the match is still in its
+                                                        --   `Countdown` intro: nothing consumed, no cooldown started), alive,
+                                                        --   not downed; effects above; decrements; Sync; Notify
 ```
 Creates a `ProximityPrompt` on `lobbyInfo.Shop.ItemShop.PromptPart` -> `OpenPanel(player, "Shop", {Tab="Items"})`.
 Remotes `BuyItem` / `UseItem` are connected here (rate-limited, validated).
@@ -223,7 +234,10 @@ SpotService.Teleport(player)              -- pivot to the spot's SpawnCFrame (ig
   the profile/pets/tokens change; unowned spots read `"Free spot"` / `"Step in to claim"`).
 * **Showcase podium**: on the spot's podium show a slowly rotating (+ bobbing) `PetBuilder.Build` of the owner's
   best (highest rarity) equipped-or-owned pet, scale 1.4, with a small name/rarity billboard (Theme fonts).
-  Rebuild only when that pet changes. Everything parented under `SpotInfo.Folder`.
+  Rebuild only when that pet changes. Everything parented under `SpotInfo.Folder`. The pet is ONE welded assembly in a
+  static rest pose (only its PrimaryPart is Anchored, every other part is unanchored and welded to it, no
+  `PetBuilder.Animate`), so a spin/bob step is a single CFrame write; the server moves it at 10 Hz and only while a
+  player is within **55 studs** of the podium (section 12).
 * `Remotes.GoToSpot` -> `Teleport` (rate-limited; refuses InMatch).
 * New characters spawn in the lobby at `PlayerService.GetLobbySpawnCFrame()` unless they own a spot, in which case
   `PlayerService` asks `SpotService` via the spawn provider chain: first spawn -> plaza, later respawns in the lobby ->
@@ -267,6 +281,9 @@ Billboards use `MaxDistance`, `AlwaysOnTop = false`, readable at 40+ studs.
 * `MatchState` / `MatchResult` / `PartyState` payloads are unchanged (see ARCHITECTURE.md) except `DifficultyId`
   now spans the five ids and `MatchResult` adds `Stars = difficulty.Stars`.
 * Players cannot use shop/spot teleports during a match; `OpenPanel` for Shop is ignored in matches.
+* **Fall rule (stacked laps).** Besides the `KillY` plane, a landing more than **12 studs below the player's last
+  standing height** counts as a void fall: `VoidDamage[id]` (kind `"Void"`) and a return to the team checkpoint, once.
+  Details and exemptions in section 12.
 
 ## 6. Lighting + palette (world agent: `LightingService`; uikit agent: `Theme`)
 The previous look was blown-out. New target: **late-afternoon calm** — readable, moody-but-friendly, high clarity.
@@ -321,8 +338,9 @@ except `Archetype`, `Themes` added. `GenerateLayout(difficultyId, seed)` stays *
   walkable consecutive steps: edge-to-edge gap in `[GapMin, GapMax]` (DashGap steps in
   `[DashGapMin, DashGapMax]`, which must be `<= 0.85 * MaxDashGap` and `> 0.75 * MaxRunGap`), rise in
   `[-4, min(RiseMax, 0.7 * JumpHeight)]`; cannon links per above; steps never closer than 2 studs to any
-  non-adjacent step (3D box distance); **headroom**: no step's underside lies within `Config.Course.Clearance`
-  studs above another walkable step's top surface where their XZ footprints overlap; every step within
+  non-adjacent step (3D box distance); **headroom**: no step's underside lies within the lower step's `Headroom`
+  (>= `Config.Course.Clearance` = 13, more for decor and hazards, see section 12) above another walkable step's top surface
+  where their XZ footprints overlap, and the **jump corridors** stay free (section 12); every step within
   `Config.Course.MaxRadius` (horizontal) of the origin; no step lower than `origin.Y - 10`; platform sizes in
   range (Beams/Checkpoint/Start/Finish exceptions as before: Start >= 24x24, Checkpoint >= 14x14, Finish >= 28x28);
   exactly `Stages` checkpoints, the last one followed by the Finish; every hazard step is on a platform large enough
@@ -343,6 +361,8 @@ projectile launched from the root's CURRENT position lands exactly at `Target` a
 from fall/void damage for the flight; a small "poof" particle), golden tokens (`TokenService.MakeTokenPart(position,
 parent, value)` makes `Value == GoldenValue` tokens golden-white, 1.5x bigger, brighter sparkles, tagged both
 `GoldenToken` and `CloudToken`). Existing hazards keep working. `TokenService.Watch` stays the only collector.
+Coins are spun/bobbed by the **client** (`client/Controllers/TokenFx.lua`) while `Config.Tokens.ClientAnimated` is true,
+so the server replicates no per-frame token motion (section 12).
 Pet perk bonuses are applied by `MatchService`, not here.
 
 ## 9. Client
@@ -457,7 +477,7 @@ are always rendered. Pets are visual only (no collision). `Util.NewRng`-free; no
 `MovementController`: adapt only what v2 needs — stamina regen is multiplied by `(1 + attribute PerkStaminaRegen)`;
 mobile run/dash buttons must not overlap the new bottom-left HP bar (it is raised on touch) or the Roblox jump button.
 `Main.client.lua`: `State.Init()` then init `MovementController`, `HudController`, `DamageFx`, `NotifyController`,
-`MenuController`, `HotbarController`, `PetController` each in `pcall` + `warn`.
+`MenuController`, `HotbarController`, `PetController`, `TokenFx` each in `pcall` + `warn`.
 
 ## 10. Icon (icon agent: `branding/`)
 Create the game icon: the **Cloudy Dragon** as a cute, polished 512x512 and 1024x1024 PNG (`branding/icon-512.png`,
@@ -479,3 +499,53 @@ ballistics, roulette odds sum to 1 and every rollable rarity has pets, `PetCatal
 `ProfileSync` snapshot shape, pet follower build for every pet def (part budget), CloudUI/State load, layout
 rule: no text label centred on screen from the HUD/Notify controllers (assert anchors/positions are at the sides).
 `README.md` documents everything (controls, spots, pets, roulettes, items, difficulties, how to rebuild the place file with Rojo).
+
+Regression scenarios added after the review (`python3 tools/smoke.py --list` shows all; the FULL run is `python3 tools/smoke.py`,
+`--quick` uses 40 layout seeds instead of 300): `fall_rule` (MatchService fall rule, `smoke_server.lua`), `data_orphans` and the
+orphan case of `shutdown` (DataService orphan retention, `smoke_server.lua`), `match_locks` (items refused in the countdown, pets
+locked in matches, `smoke_economy.lua`), the podium radius / welded-assembly checks in `spots`, a mock self-test for
+`AutomaticSize` + `UIScale` and the phone menu-column geometry checks in `client_mobile`, and a self-test of the Neon palette
+audit (a thin neon rod is not a slab), `client_tokens` (TokenFx spin/bob rates, culling, release of collected coins,
+`smoke_client_v2.lua`) and, in `hazards`, the TokenService no-animation rule for `Config.Tokens.ClientAnimated`. The Roblox mock applies a `UIScale` once (a 304 px column at scale 0.72 is 219 px tall,
+not 158), moves welded parts with their root, and `Mock.SetViewport` notifies every ScreenGui like a real resize.
+
+## 12. Behaviour changes from the review (these supersede earlier text)
+
+* **MatchService fall rule.** Laps of Spiral/overlapping courses are stacked 15-40 studs apart, so a missed jump lands on a
+  LOWER lap long before `KillY` and strands the player. Every 0.25 s poll remembers each member's last *standing* height
+  (grounded = `Humanoid.FloorMaterial` or a 6 stud ray down) and whether the player has been in the air since. Touching
+  ground again **more than 12 studs below that height** (`FALL_DROP = 12`) is a fall: `VoidDamage[id]` as `"Void"` (ignores
+  i-frames), 1.5 s of protection and a teleport to the team checkpoint (Start while `Checkpoint == 0`), exactly once.
+  Never judged: mid-air (only a settled landing is), ground-to-ground position jumps with no poll moving down in the air
+  between them (teleport, respawn, lag), a poll that catches the player falling faster than 30 studs/s, hops under 12 studs
+  (stairs down; cannon landings are <= 3-4 below their pad), bounce/cannon/dash flights, downed or finished players. The
+  reference is the player's OWN last standing height, not the team checkpoint (stragglers on the previous stage are 15+ studs
+  below it). `teleportTo` and a new character clear the memory. In `Ended` state the same landing is rescued for free (no
+  damage). The 12 comes from the layout rules: honest links drop <= 4, while a step stacked above another keeps its
+  underside >= `Clearance` (13) above the lower one's top, so any lower lap is more than 12 studs below.
+* **Course headroom and jump corridors (`CourseLayout`).** `Config.Course.Clearance` is **13** (a full jump needs
+  `JumpHeight` 6.9 + the character's ~5.2 of free air). Every step carries `Headroom` = the free height above `Pos.Y` that
+  nothing of another step may enter where footprints overlap, and the maximum height of its own hazard/decor geometry:
+  `max(Clearance, decor or hazard height)`. Decor: **Start and Finish 18** (arches: StartBeam top 15.9, bunting 17.0, FinishBeam
+  top 17.8), **Checkpoint 10.5** (flag pole + orb 9.9, so effectively 13). The **jump-corridor rule**: for every Walk/Dash link
+  the strip a jump flies through (the last 4 studs of the take-off step, the gap, the first 3 studs of the landing step,
+  4 studs wide) has no OTHER solid within 1 stud of it whose underside is lower than `Clearance + 0.3` above the take-off
+  step's top. `ValidateLayout` reports a violation as `"<tag> <n> hangs only X studs above the jump from step a to step b"`.
+* **Tokens are animated by the client.** `Config.Tokens.ClientAnimated = true`: `client/Controllers/TokenFx.lua` spins and
+  bobs every `CloudToken` part within 140 studs of the camera; the server (`TokenService`) leaves coins still and runs no
+  Heartbeat driver, so no per-frame token CFrames replicate. The server still owns the pickup (the `Collected` attribute and
+  the burst); TokenFx lets go of a coin once `Collected` is set. With the flag false the old server-side driver (poses only
+  the coins next to a player, 15 Hz) is used instead.
+* **SpotService podium.** The showcase pet is a single welded assembly: its PrimaryPart is the only Anchored part, every other
+  part is unanchored with a `Weld` to it, and the pet keeps its static rest pose (`PetBuilder.Animate` is not used: it would
+  write every part and cannot drive a welded assembly). A spin/bob step is one CFrame write on the root, at most 10 per
+  second, and only for showcases with a player within a **55 stud** radius (it used to animate every part within ~120).
+* **DataService orphan retention.** See section 1: a profile that could not be saved when its player left stays in memory as
+  an orphan (a rejoin gets it back; a 10 s to 120 s backoff retry, the autosave sweep and `BindToClose` flush it; it is
+  dropped after a successful write or after 30 minutes). A session whose load failed is merged on top of the stored
+  profile, never over it.
+* **Pets are locked during matches.** `PetService.Equip/Unequip` return `false, "Pets are locked during a match"` while
+  `InMatch` is true (the countdown included) and work again afterwards (roulettes were already refused in matches).
+* **Items are refused during the countdown.** `ItemService.Use` requires `match.State == "Playing"`: during `Countdown` it
+  returns `false, "Wait for the countdown to finish"` without consuming the item or starting the use cooldown (the intro
+  freeze already grants invulnerability, so a shield or heal used then would be wasted).

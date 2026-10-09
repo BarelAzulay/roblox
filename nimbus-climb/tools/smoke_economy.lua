@@ -4,6 +4,7 @@
 --   economy            DataService + PetService: spend / refund / stack cap / equip limits / perks /
 --                      EquippedPets attribute / rate limiting / argument checks / prompts / stats
 --   items              ItemService: buy rules and the three item effects (heal, shield, phoenix revive)
+--   match_locks        items are refused during the match countdown (nothing consumed); pets are locked during matches
 --   profile_sync       the ProfileSync snapshot shape, when it is sent, and that it is a copy
 --   migration          v1 -> v2 save migration and untrusted stored data
 --   match_difficulties the full match lifecycle for all five difficulties (victory + defeat, stars, bonus, stats)
@@ -309,10 +310,38 @@ S.spots = guarded("spots", function()
 		local got = show1:GetExtentsSize().Y
 		T.check(abs(got - want) <= want * 0.25, "...at scale 1.4", fmt(got, 2) .. " vs " .. fmt(want, 2))
 		T.check(show1:FindFirstChild("WingL", true) ~= nil, "...built by PetBuilder (it has wings)")
-		-- rotation + bob (the server animates a showcase only while somebody is within ~120 studs of it)
+		-- ONE welded assembly: the model's PrimaryPart is the only Anchored part and every other part is unanchored and
+		-- welded to it, so a spin / bob step is a single CFrame write that replicates as one change (a ~70-part pet
+		-- moved part by part would flood every client). The pet keeps a static rest pose (no PetBuilder.Animate).
+		local rootPart = show1.PrimaryPart
+		local anchoredCount, partCount, welded = 0, 0, 0
+		for _, d in ipairs(show1:GetDescendants()) do
+			if d:IsA("BasePart") then
+				partCount = partCount + 1
+				if d.Anchored then
+					anchoredCount = anchoredCount + 1
+				end
+				if d ~= rootPart and d:FindFirstChildOfClass("Weld") and d:FindFirstChildOfClass("Weld").Part0 == rootPart and d:FindFirstChildOfClass("Weld").Part1 == d then
+					welded = welded + 1
+				end
+			end
+		end
+		T.check(rootPart ~= nil and rootPart.Anchored and anchoredCount == 1, "the podium pet has exactly one Anchored part (its PrimaryPart)", anchoredCount .. " anchored of " .. partCount)
+		T.eq(welded, partCount - 1, "...and every other part is welded to it (Weld.Part0 = the root)")
+		-- rotation + bob: the server moves a showcase only while somebody is within the cull radius (55 studs) of the podium
+		local podiumPos = qs.PodiumCFrame.Position
+		local wing = show1:FindFirstChild("WingL", true)
+		local wingRel = wing and rootPart and rootPart.CFrame:Inverse() * wing.CFrame
 		local farLook = show1:GetPivot().LookVector
 		advance(1.2)
-		T.check((show1:GetPivot().LookVector - farLook).Magnitude < 0.01, "a showcase nobody is near stays still (no server-side animation cost)")
+		T.check((show1:GetPivot().LookVector - farLook).Magnitude < 0.01, "a showcase nobody is near (the owner is at the plaza) stays still (no server-side animation cost)")
+		Mock.Teleport(Q, podiumPos + Vector3.new(70, 0, 0))
+		advance(1.2)
+		T.check((show1:GetPivot().LookVector - farLook).Magnitude < 0.01, "a showcase stays still while the nearest player is 70 studs away (radius 55)")
+		Mock.Teleport(Q, podiumPos + Vector3.new(40, 0, 0))
+		advance(1.2)
+		local near1 = (show1:GetPivot().LookVector - farLook).Magnitude
+		T.check(near1 > 0.02, "...and starts turning once a player is 40 studs away", "look vector changed by " .. fmt(near1, 3))
 		Mock.Teleport(Q, qs.SpawnCFrame)
 		advance(1.2)
 		local look0, y0 = show1:GetPivot().LookVector, show1:GetPivot().Position.Y
@@ -325,6 +354,10 @@ S.spots = guarded("spots", function()
 		local turned = (show1:GetPivot().LookVector - look0).Magnitude
 		T.check(turned > 0.05, "the showcase pet turns slowly", "look vector changed by " .. fmt(turned, 3))
 		T.check(hi - lo > 0.15, "...and bobs up and down", "range " .. fmt(hi - lo, 2) .. " studs")
+		if wing and wingRel then
+			local nowRel = rootPart.CFrame:Inverse() * wing.CFrame
+			T.check((nowRel.Position - wingRel.Position).Magnitude < 0.01 and (nowRel.LookVector - wingRel.LookVector).Magnitude < 0.01, "the welded parts follow the root rigidly (static rest pose: the wing keeps its place relative to the body)", tostring(nowRel.Position) .. " vs " .. tostring(wingRel.Position))
+		end
 		local tagText = {}
 		for _, d in ipairs(qs.Folder:GetDescendants()) do
 			if d:IsA("TextLabel") then
@@ -901,6 +934,112 @@ S.items = guarded("items", function()
 	removePlayers(players)
 	flushErrors("items")
 	flushWarnings("items")
+end)
+
+----------------------------------------------------------------------------------------------------
+-- scenario: match locks (items during the countdown, pets during a match)
+--
+--   * ItemService.Use is refused while the match is still in State "Countdown" (or Setup): the intro freeze already
+--     grants invulnerability, so a shield or heal used then would be burned for nothing. Nothing is consumed and no
+--     cooldown starts, so the same item works the moment the match reaches "Playing".
+--   * PetService.Equip / Unequip return false, "Pets are locked during a match" while InMatch is true (countdown and
+--     play alike; the pets in a match must be the ones the player entered with) and work again after the match.
+----------------------------------------------------------------------------------------------------
+S.match_locks = guarded("match_locks", function()
+	if not needBoot() then
+		return
+	end
+	local Config = config()
+	local IS, PS, DataS = mod("ItemService"), mod("PetService"), mod("DataService")
+	local R = remoteFolder()
+	local players = freshPlayers(2, "Lock")
+	local a, b = players[1], players[2]
+	local prof = profileOf(a)
+	local petA, petB = petOfRarity("Common", 1), petOfRarity("Common", 2)
+	grant(a, petA, 1)
+	grant(a, petB, 1)
+	prof.Items.heal_cloud = 2
+	prof.Items.shield_bubble = 2
+	DataS.MarkDirty(a)
+	DataS.Sync(a)
+	local perksChanged = 0
+	local conn = PS.PerksChanged:Connect(function()
+		perksChanged = perksChanged + 1
+	end)
+	T.eq(select(1, PS.Equip(a, petA)), true, "locks: a pet can be equipped in the lobby")
+	T.eq(equippedAttr(a), petA, "...and the EquippedPets attribute follows")
+	local baseline = perksChanged
+
+	-- inside the countdown
+	local m = startMatch("Easy", players)
+	if not T.check(m ~= nil, "locks: an Easy match starts") then
+		conn:Disconnect()
+		removePlayers(players)
+		return
+	end
+	T.eq(m.State, "Countdown", "locks: the match is in its intro countdown")
+	T.eq(a:GetAttribute("InMatch"), true, "locks: InMatch is true")
+	DS().SetHealthFraction(a, 0.5)
+	local healthBefore = hum(a).Health
+	local mark = logSize()
+	local ok, why = IS.Use(a, "heal_cloud")
+	T.check(ok == false and type(why) == "string" and why:lower():find("countdown", 1, true) ~= nil, "locks: heal_cloud is refused during the countdown (with the reason)", tostring(ok) .. " " .. tostring(why))
+	T.eq(prof.Items.heal_cloud, 2, "...the heal_cloud count is unchanged")
+	T.near(hum(a).Health, healthBefore, 0.01, "...and so is the health")
+	ok, why = IS.Use(a, "shield_bubble")
+	T.check(ok == false and type(why) == "string" and why:lower():find("countdown", 1, true) ~= nil, "locks: shield_bubble is refused during the countdown", tostring(ok) .. " " .. tostring(why))
+	T.eq(prof.Items.shield_bubble, 2, "...the shield_bubble count is unchanged")
+	Mock.FromClient(R.UseItem, a, "heal_cloud")
+	advance(0.1)
+	T.eq(prof.Items.heal_cloud, 2, "...also through the UseItem remote")
+	T.eq(#snapshots(a, mark), 0, "...and nothing is synced (no profile change)")
+	-- pets
+	ok, why = PS.Equip(a, petB)
+	T.check(ok == false and why == "Pets are locked during a match", "locks: Equip is refused during the countdown with 'Pets are locked during a match'", tostring(ok) .. " " .. tostring(why))
+	ok, why = PS.Unequip(a, petA)
+	T.check(ok == false and why == "Pets are locked during a match", "locks: Unequip is refused during the countdown", tostring(ok) .. " " .. tostring(why))
+	T.eq(table.concat(prof.Equipped, ","), petA, "...Profile.Equipped is unchanged")
+	T.eq(equippedAttr(a), petA, "...and so is the EquippedPets attribute")
+	advance(0.3)
+	Mock.FromClient(R.EquipPet, a, petB)
+	advance(0.3)
+	Mock.FromClient(R.UnequipPet, a, petA)
+	advance(0.3)
+	T.eq(table.concat(prof.Equipped, ","), petA, "...also through the EquipPet / UnequipPet remotes")
+	T.eq(perksChanged, baseline, "...and PerksChanged never fired")
+
+	-- play: items work right away (the refusal did not start a cooldown), pets stay locked
+	T.check(toPlaying(m), "locks: the match reaches Playing")
+	K.waitNotInvulnerable(a)
+	ok, why = IS.Use(a, "heal_cloud")
+	T.check(ok == true, "locks: the same heal_cloud works once the match is Playing", tostring(why))
+	T.eq(prof.Items.heal_cloud, 1, "...consuming exactly one")
+	ok, why = PS.Equip(a, petB)
+	T.check(ok == false and why == "Pets are locked during a match", "locks: Equip is still refused while playing", tostring(why))
+	T.eq(table.concat(prof.Equipped, ","), petA, "...nothing changed")
+
+	-- after the match both work again
+	endAllMatches(players)
+	advance(1.5)
+	T.eq(a:GetAttribute("InMatch"), false, "locks: InMatch is false after the match")
+	T.eq(select(1, PS.Equip(a, petB)), true, "locks: Equip works again after the match")
+	T.eq(table.concat(prof.Equipped, ","), petA .. "," .. petB, "...both pets are equipped")
+	T.eq(select(1, PS.Unequip(a, petA)), true, "locks: Unequip works again after the match")
+	T.eq(table.concat(prof.Equipped, ","), petB, "...only the second pet is left")
+	T.check(perksChanged > baseline, "...and PerksChanged fires for the real changes")
+	T.eq(select(1, IS.Use(a, "heal_cloud")), false, "locks: items stay unusable outside a match")
+
+	-- the attribute alone locks too (it is what the rule reads), and clearing it unlocks
+	b:SetAttribute("InMatch", true)
+	grant(b, petA, 1)
+	T.eq(select(1, PS.Equip(b, petA)), false, "locks: InMatch = true alone refuses Equip")
+	b:SetAttribute("InMatch", false)
+	T.eq(select(1, PS.Equip(b, petA)), true, "...and InMatch = false allows it")
+
+	conn:Disconnect()
+	removePlayers(players)
+	flushErrors("match_locks")
+	flushWarnings("match_locks")
 end)
 
 ----------------------------------------------------------------------------------------------------

@@ -701,6 +701,64 @@ S.hazards = guarded("hazards", function()
 		end
 		T.check(bigness(golden) >= bigness(regular) * 1.4, "golden tokens are 1.5x bigger", fmt(bigness(golden), 2) .. " vs " .. fmt(bigness(regular), 2))
 		T.check(golden.Color ~= regular.Color, "...and look different")
+
+		-- Animation: with Config.Tokens.ClientAnimated (the shipping setting) the SERVER never poses a coin, because every
+		-- pose would replicate to every client; TokenFx spins/bobs them locally (scenario client_tokens). With the flag
+		-- off the old server driver poses the coins next to a player. Both coins sit within the driver's 65 stud range of
+		-- the player here, so a driver that is running cannot miss them.
+		do
+			local function snapshot(token)
+				local out = { [token] = token.CFrame }
+				for _, d in ipairs(token:GetDescendants()) do
+					if d:IsA("BasePart") then
+						out[d] = d.CFrame
+					end
+				end
+				return out
+			end
+			local function moved(snap)
+				local n = 0
+				for part, cf in pairs(snap) do
+					if part.CFrame ~= cf then
+						n = n + 1
+					end
+				end
+				return n
+			end
+			local near = regular.Position + Vector3.new(12, 0, 0)
+			Mock.Teleport(a, near)
+			advance(0.6)
+			local snapRegular, snapGolden = snapshot(regular), snapshot(golden)
+			for _ = 1, 10 do
+				Mock.Teleport(a, near)
+				advance(0.25)
+			end
+			local rootPos = root().Position
+			T.check((rootPos - regular.Position).Magnitude < 40 and (rootPos - golden.Position).Magnitude < 65,
+				"token animation test: the player stands within the driver's range of both coins", fmt((rootPos - regular.Position).Magnitude, 1) .. " / " .. fmt((rootPos - golden.Position).Magnitude, 1) .. " studs")
+			if Config.Tokens.ClientAnimated == true then
+				T.eq(moved(snapRegular) + moved(snapGolden), 0, "Config.Tokens.ClientAnimated: TokenService does not animate (coins next to a player stay exactly as built after 2.5 s)")
+			else
+				T.check(moved(snapRegular) > 0 and moved(snapGolden) > 0, "Config.Tokens.ClientAnimated is false: TokenService's server driver spins and bobs the coins next to a player")
+			end
+			-- TokenFx takes the yaw the server built a coin with as its phase: coins must not all start alike
+			local yaws, distinct, extra = {}, 0, {}
+			for i = 1, 8 do
+				local t = TS.MakeTokenPart(Vector3.new(-3000 + i * 6, 3000, 300), tokenFolder, 1)
+				extra[#extra + 1] = t
+				local _, yaw = t.CFrame:ToEulerAnglesYXZ()
+				local key = string.format("%.3f", yaw)
+				if not yaws[key] then
+					yaws[key] = true
+					distinct = distinct + 1
+				end
+			end
+			T.check(distinct >= 6, "MakeTokenPart gives each coin its own random starting yaw (TokenFx uses it as the spin/bob phase)", distinct .. " distinct yaws of 8")
+			for _, t in ipairs(extra) do
+				t:Destroy()
+			end
+			away()
+		end
 		local collected = {}
 		local stop = TS.Watch(tokenFolder, { AddTokens = function(player, n)
 			collected[#collected + 1] = { player, n }

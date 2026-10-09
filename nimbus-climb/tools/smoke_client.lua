@@ -1057,6 +1057,42 @@ S.client_mobile = guarded("client_mobile", function()
 					T.check(not overlaps(r, o), label .. ": RUN does not cover " .. other[2], show(r) .. " vs " .. show(o))
 				end
 			end
+			-- The menu column against the other HUD pieces at EVERY size (it is scaled and centred by MenuController, so
+			-- a wrong size in the mock would hide a real overlap; the geometry check below pins the size itself).
+			local menuColumn = guiPart("NimbusMenu.MenuColumn")
+			if menuColumn then
+				local col = rectOf(menuColumn)
+				T.check(col.x0 >= 0 and col.y0 >= 0 and col.x1 <= w and col.y1 <= h, label .. ": the menu column is fully on screen", show(col))
+				for _, other in ipairs({ { "NimbusHud.BottomLeft.Vitals", "the HP bar" }, { "NimbusHotbar.Hotbar", "the hotbar" }, { "NimbusHud.TopRight.TokenPill", "the token pill" } }) do
+					local inst = guiPart(other[1])
+					if inst and inst.Visible ~= false then
+						local o = rectOf(inst)
+						T.check(not overlaps(col, o), label .. ": the menu column does not cover " .. other[2], show(col) .. " vs " .. show(o))
+					end
+				end
+				-- MenuController: a vertical list of five equal entries with a 6 px gap, the whole column under one UIScale
+				-- and anchored (0, 0.5). Its size must be the sum of its (already scaled) entries plus the scaled gaps, once
+				-- (the mock used to apply the UIScale twice: 158 px instead of 219 on a 844x390 phone), and it must sit
+				-- vertically centred in the ScreenGui area.
+				local sum, count = 0, 0
+				for _, entry in ipairs(menuColumn:GetChildren()) do
+					if entry:IsA("GuiObject") and entry.Name:find("^Entry_") then
+						sum = sum + entry.AbsoluteSize.Y
+						count = count + 1
+					end
+				end
+				local colScale = menuColumn:FindFirstChildOfClass("UIScale")
+				local factor = colScale and colScale.Scale or 1
+				if T.check(count == 5, label .. ": the menu column has five entries", tostring(count)) then
+					local expected = sum + 6 * (count - 1) * factor
+					T.check(math.abs(menuColumn.AbsoluteSize.Y - expected) <= 1.5, label .. ": the menu column height is its entries + gaps, scaled once", fmt(menuColumn.AbsoluteSize.Y, 1) .. " px vs " .. fmt(expected, 1))
+				end
+				local area = Mock.GuiLayerSize(menuColumn)
+				if area then
+					local centre = menuColumn.AbsolutePosition.Y + menuColumn.AbsoluteSize.Y / 2
+					T.check(math.abs(centre - area.Y / 2) <= 1.5, label .. ": the menu column is vertically centred in the screen area", fmt(centre, 1) .. " vs " .. fmt(area.Y / 2, 1))
+				end
+			end
 			local hotbar, vitals = guiPart("NimbusHotbar.Hotbar"), guiPart("NimbusHud.BottomLeft.Vitals")
 			if hotbar and vitals then
 				T.check(not overlaps(rectOf(hotbar), rectOf(vitals)), label .. ": the hotbar and the HP bar do not overlap", show(rectOf(hotbar)) .. " vs " .. show(rectOf(vitals)))

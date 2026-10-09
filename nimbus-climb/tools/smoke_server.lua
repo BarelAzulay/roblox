@@ -461,6 +461,34 @@ S.mock_selftest = guarded("mock_selftest", function()
 	b1.Position = UDim2.new(0, 10, 0, 5)
 	b1.Parent = box
 	T.check(box.AbsoluteSize.X == 80 and box.AbsoluteSize.Y == 35, "layout: AutomaticSize.XY wraps the children", tostring(box.AbsoluteSize))
+	-- AutomaticSize + UIScale on the SAME object (the left menu column): the content is measured once in the object's own
+	-- space and the scale is applied once afterwards. Applying it twice made a 304 px column 158 px tall instead of 219 and
+	-- moved its centre-anchored top edge down by ~30 px, so overlap checks against it were too lenient on phones.
+	local column = Instance.new("Frame")
+	column.AnchorPoint = Vector2.new(0, 0.5)
+	column.Position = UDim2.new(0, 10, 0.5, 0)
+	column.Size = UDim2.new(0, 68, 0, 0)
+	column.AutomaticSize = Enum.AutomaticSize.Y
+	column.Parent = gui
+	local colLayout = Instance.new("UIListLayout")
+	colLayout.Padding = UDim.new(0, 6)
+	colLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	colLayout.Parent = column
+	local colScale = Instance.new("UIScale")
+	colScale.Scale = 0.72
+	colScale.Parent = column
+	local colRows = {}
+	for i = 1, 5 do
+		local row = Instance.new("Frame")
+		row.Size = UDim2.new(0, 68, 0, 56)
+		row.LayoutOrder = i
+		row.Parent = column
+		colRows[i] = row
+	end
+	T.near(column.AbsoluteSize.Y, (5 * 56 + 4 * 6) * 0.72, 0.01, "layout: AutomaticSize + UIScale measure the content once (304 px at scale 0.72 = 218.9 px)")
+	T.near(column.AbsoluteSize.X, 68 * 0.72, 0.01, "layout: ...and scale the fixed width once")
+	T.near(column.AbsolutePosition.Y + column.AbsoluteSize.Y / 2, 540, 0.01, "layout: ...so a (0, 0.5)-anchored column stays vertically centred")
+	T.near(colRows[2].AbsolutePosition.Y - colRows[1].AbsolutePosition.Y, (56 + 6) * 0.72, 0.01, "layout: ...with scaled row pitch")
 	Mock.SetViewport(390, 844)
 	T.check(px(Mock.GuiBox(gui).w) == 390, "layout: Mock.SetViewport changes every ScreenGui")
 	Mock.Viewport = savedViewport
@@ -842,7 +870,29 @@ S.lobby = guarded("lobby", function()
 		end
 	end
 	T.eq(spawns, 0, "no SpawnLocation is used (players are placed with SpawnCFrame)")
-	-- palette
+	-- palette: first prove the audit itself (a thin neon rod is not a slab; a big neon disc / pillar / ball / block is)
+	do
+		local probe = Instance.new("Folder")
+		local function neon(name, shape, size)
+			local part = Instance.new("Part")
+			part.Name = name
+			part.Material = Enum.Material.Neon
+			part.Shape = shape
+			part.Size = size
+			part.Parent = probe
+		end
+		neon("ThinRod", Enum.PartType.Cylinder, Vector3.new(17.2, 0.55, 0.55)) -- CourseBuilder LavaStreak: length along X
+		neon("SmallBlock", Enum.PartType.Block, Vector3.new(4, 4, 4))
+		local ok = paletteAudit(probe, { maxNeonFace = 220 })
+		T.eq(ok.neonCount, 2, "palette audit self-test: counts the neon parts")
+		T.eq(ok.bigNeonCount, 0, "palette audit self-test: a 0.55 x 17.2 neon rod (face ~9.5 studs^2) is not a big neon surface")
+		neon("BigDisc", Enum.PartType.Cylinder, Vector3.new(0.5, 20, 20)) -- 314 studs^2 cap
+		neon("BigPillar", Enum.PartType.Cylinder, Vector3.new(40, 6, 6)) -- 240 studs^2 side
+		neon("BigBall", Enum.PartType.Ball, Vector3.new(20, 20, 20)) -- 314 studs^2 circle
+		neon("BigBlock", Enum.PartType.Block, Vector3.new(20, 20, 1)) -- 400 studs^2 face
+		T.eq(paletteAudit(probe, { maxNeonFace = 220 }).bigNeonCount, 4, "palette audit self-test: a big disc, pillar, ball and block are all flagged")
+		probe:Destroy()
+	end
 	local pal = paletteAudit(folder)
 	T.check(pal.whiteCount == 0, "no lobby part is pure white", pal.whiteCount .. " parts, e.g. " .. table.concat(pal.white, "; "))
 	T.check(pal.bigNeonCount == 0, "Neon is used for small accents only (no big opaque Neon surfaces)", pal.bigNeonCount .. " big parts, e.g. " .. table.concat(pal.bigNeon, "; "))
@@ -1850,6 +1900,291 @@ S.damage_rules = guarded("damage_rules", function()
 end)
 
 ----------------------------------------------------------------------------------------------------
+-- scenario: MatchService fall rule (stacked laps)
+--
+-- Laps of a Spiral / overlapping course are stacked 15-40 studs above each other, so a missed jump usually lands on a
+-- LOWER lap long before the KillY plane and the player was stranded behind the team. The rule: per player the server
+-- remembers the height they last stood at; touching ground again MORE than 12 studs below it after being in the air is a
+-- fall, treated exactly like a void fall (VoidDamage + back to the team checkpoint, once). It must never fire
+--   * mid-air (only a landing is judged), on a teleport / respawn from ground to ground (no poll moved down in the air),
+--     on ordinary hops (< 12 studs: stairs, cannon landings are <= 3-4 below the pad), bounce / cannon flights,
+--   * for downed players, or relative to the TEAM checkpoint (stragglers on the previous stage are 15+ studs below it).
+-- In Ended state the same landing is rescued for free (no damage).
+-- The floors are test slabs far away from the course: the mock raycast (GROUND_REACH 6) finds them like real parts.
+----------------------------------------------------------------------------------------------------
+S.fall_rule = guarded("fall_rule", function()
+	if not needBoot() then
+		return
+	end
+	local Config = config()
+	local Workspace = game:GetService("Workspace")
+	local players = freshPlayers(2, "Fall")
+	local a, b = players[1], players[2]
+	local m = startMatch("Easy", players)
+	if not T.check(m ~= nil, "fall rule: an Easy match starts") then
+		removePlayers(players)
+		return
+	end
+	toPlaying(m)
+	waitNotInvulnerable(a) -- the start protection would absorb the void hit
+	waitNotInvulnerable(b)
+	advance(0.6)
+	local voidDamage = Config.Damage.VoidDamage.Easy
+	local killY = m.Course.KillY
+	local startPos = m.Course.StartCFrame.Position
+	local STAND = 3 -- a standing root is ~3 studs above the floor top
+	local arena = Instance.new("Folder")
+	arena.Name = "FallRuleArena"
+	arena.Parent = Workspace
+	local lane = 0
+	local function floorAt(topY)
+		lane = lane + 1
+		local f = Instance.new("Part")
+		f.Name = "FallFloor" .. lane
+		f.Anchored = true
+		f.CanCollide = true
+		f.Size = Vector3.new(60, 2, 60)
+		f.Position = Vector3.new(startPos.X + 900 + lane * 80, topY - 1, startPos.Z)
+		f.Parent = arena
+		return f
+	end
+	local function topOf(f)
+		return f.Position.Y + f.Size.Y / 2
+	end
+	local function standOn(f)
+		return Vector3.new(f.Position.X, topOf(f) + STAND, f.Position.Z)
+	end
+	local function above(f, height)
+		return Vector3.new(f.Position.X, topOf(f) + height, f.Position.Z)
+	end
+	-- teleports the player and sets the vertical speed, then lets the 4 Hz match poll look at it
+	local function step(player, pos, vy, polls)
+		Mock.Teleport(player, pos)
+		root(player).AssemblyLinearVelocity = Vector3.new(0, vy or 0, 0)
+		advance(0.3 * (polls or 1))
+	end
+	local function voidsSince(player, mark)
+		local n = 0
+		for _, e in ipairs(remotesFor("DamageTaken", player.UserId, mark)) do
+			if e.args[2] == "Void" and e.args[1] == voidDamage then
+				n = n + 1
+			end
+		end
+		return n
+	end
+	local function atCheckpoint(player)
+		local r = root(player)
+		return r ~= nil and distance(r.Position, startPos) <= 14
+	end
+	local function fresh(player)
+		DS().SetHealthFraction(player, 1)
+		return logSize()
+	end
+	-- no fall: no Void damage, the player was not moved (still where the last step put them)
+	local function expectStay(label, player, mark, where)
+		T.eq(voidsSince(player, mark), 0, label .. ": no void damage")
+		T.check(distance(root(player).Position, where) <= 1, label .. ": the player is not moved", fmt(distance(root(player).Position, where)))
+		T.near(hum(player).Health, hum(player).MaxHealth, 0.5, label .. ": health untouched")
+	end
+	-- fall: exactly one VoidDamage hit, back at the team checkpoint (Start while Checkpoint == 0), then no repeat
+	local function expectFall(label, player, mark)
+		advance(0.9) -- more polls: the rescue happens ONCE and clears the memory
+		T.eq(voidsSince(player, mark), 1, label .. ": exactly one void hit")
+		T.check(atCheckpoint(player), label .. ": back at the team checkpoint", fmt(distance(root(player).Position, startPos)))
+		T.near(hum(player).Health, hum(player).MaxHealth - voidDamage, 1.5, label .. ": VoidDamage[Easy] (" .. voidDamage .. ") is applied")
+	end
+
+	local T0 = killY + 150 -- the "upper lap"
+	T.eq(m.Checkpoint, 0, "fall rule: the team starts at the Start platform (checkpoint 0)")
+
+	-- 1. a missed jump onto a lap 20 studs lower
+	do
+		local up, low = floorAt(T0), floorAt(T0 - 20)
+		local mark = fresh(a)
+		step(a, standOn(up), 0, 2)
+		expectStay("stand on the upper lap", a, mark, standOn(up))
+		step(a, above(low, 14), -60, 1) -- falling over the lower lap
+		T.eq(voidsSince(a, mark), 0, "20 studs lower: nothing happens in mid-air")
+		T.check(distance(root(a).Position, above(low, 14)) <= 1, "...the player is not rescued before landing")
+		step(a, standOn(low), 0, 1)
+		expectFall("20 studs lower", a, mark)
+		T.check(a:GetAttribute("Downed") == false and m.State == "Playing", "...one fall does not down the player or end the match")
+	end
+
+	-- 2. every hop below 12 studs is fine, each measured from the LAST standing height (stairs down: 3 x 11 = 33)
+	do
+		local f0, f1, f2, f3 = floorAt(T0), floorAt(T0 - 11), floorAt(T0 - 22), floorAt(T0 - 33)
+		local mark = fresh(a)
+		step(a, standOn(f0), 0, 2)
+		step(a, above(f1, 10), -45, 1)
+		step(a, standOn(f1), 0, 2)
+		expectStay("hop 11 studs down", a, mark, standOn(f1))
+		step(a, above(f2, 10), -45, 1)
+		step(a, standOn(f2), 0, 2)
+		expectStay("another 11 down (22 below the first lap)", a, mark, standOn(f2))
+		step(a, above(f3, 10), -45, 1)
+		step(a, standOn(f3), 0, 2)
+		expectStay("and another 11 down (33 below)", a, mark, standOn(f3))
+	end
+
+	-- 3. the limit is a strict 12 studs: 11.5 is a hop, 12.5 a fall
+	do
+		local f0, near = floorAt(T0), floorAt(T0 - 11.5)
+		local mark = fresh(a)
+		step(a, standOn(f0), 0, 2)
+		step(a, above(near, 10), -45, 1)
+		step(a, standOn(near), 0, 2)
+		expectStay("11.5 studs lower", a, mark, standOn(near))
+		local g0, far = floorAt(T0), floorAt(T0 - 12.5)
+		step(a, standOn(g0), 0, 2)
+		step(a, above(far, 10), -45, 1)
+		step(a, standOn(far), 0, 1)
+		expectFall("12.5 studs lower", a, mark)
+	end
+
+	-- 4. ground to ground without a poll in the air (teleport, respawn, lag spike): never read as a fall
+	do
+		local up, low = floorAt(T0), floorAt(T0 - 30)
+		local mark = fresh(a)
+		step(a, standOn(up), 0, 2)
+		step(a, standOn(low), 0, 2)
+		expectStay("teleport 30 studs down from ground to ground", a, mark, standOn(low))
+		-- ...and the new height is the reference from now on
+		local lower = floorAt(T0 - 30 - 5)
+		step(a, above(lower, 10), -45, 1)
+		step(a, standOn(lower), 0, 2)
+		expectStay("then a 5 stud hop from the new height", a, mark, standOn(lower))
+	end
+
+	-- 5. a long drop over empty space is never judged mid-air (only KillY punishes it); the LANDING is judged
+	do
+		local up, low = floorAt(T0), floorAt(T0 - 40)
+		local mark = fresh(a)
+		step(a, standOn(up), 0, 2)
+		for i = 1, 3 do
+			step(a, above(up, -15 - 12 * i), -100, 1) -- 15..51 studs below the upper lap, nothing under the feet
+			T.eq(voidsSince(a, mark), 0, "falling through empty space, poll " .. i .. ": no judgement in mid-air")
+		end
+		step(a, standOn(low), 0, 1)
+		expectFall("40 studs lower after a long drop", a, mark)
+	end
+
+	-- 6. a jump (rising / apex, no poll moving down) that ends on a lower lap is a teleport-like landing: no fall
+	do
+		local up, low = floorAt(T0), floorAt(T0 - 25)
+		local mark = fresh(a)
+		step(a, standOn(up), 0, 2)
+		step(a, above(up, 9), 60, 1) -- rising
+		step(a, above(up, 12), 0, 1) -- apex
+		step(a, standOn(low), 0, 2)
+		expectStay("rising / apex polls only", a, mark, standOn(low))
+	end
+
+	-- 7. a poll that catches the fall right above the floor (> 30 studs/s down) is never judged itself, the settled one is
+	do
+		local up, low = floorAt(T0), floorAt(T0 - 22)
+		local mark = fresh(a)
+		step(a, standOn(up), 0, 2)
+		step(a, above(low, 4), -70, 1) -- 4 studs above the lower floor, falling fast: the ray finds a floor
+		T.eq(voidsSince(a, mark), 0, "fast fall right above the floor: that poll is not judged")
+		step(a, standOn(low), 0, 1)
+		expectFall("settled on the lower lap after a fast fall", a, mark)
+	end
+
+	-- 8. bounce pads / cannons / dashes: flights up and a few studs down are safe, and landing higher moves the reference up
+	do
+		local pad, high, deep = floorAt(T0), floorAt(T0 + 9), floorAt(T0 + 9 - 13)
+		local mark = fresh(a)
+		step(a, standOn(pad), 0, 2)
+		step(a, above(pad, 40), 90, 1) -- bounce: rising fast
+		step(a, above(high, 30), 0, 1) -- apex
+		step(a, above(high, 12), -45, 1) -- coming down onto a platform 9 studs higher
+		step(a, standOn(high), 0, 2)
+		expectStay("bounce onto a platform 9 studs higher", a, mark, standOn(high))
+		-- the reference moved up with the landing: 13 studs below the HIGH platform is a fall (only 4 below the pad)
+		step(a, above(deep, 12), -60, 1)
+		step(a, standOn(deep), 0, 1)
+		expectFall("13 studs below the platform the bounce landed on", a, mark)
+		-- a cannon flight ends at most ~3-4 studs below its pad
+		local launch, land = floorAt(T0), floorAt(T0 - 4)
+		mark = fresh(a)
+		step(a, standOn(launch), 0, 2)
+		step(a, above(launch, 25), 70, 1)
+		step(a, above(land, 12), -50, 1)
+		step(a, standOn(land), 0, 2)
+		expectStay("cannon landing 4 studs below the take-off", a, mark, standOn(land))
+	end
+
+	-- 9. the reference is the player's OWN last standing height, not the team checkpoint (stragglers on an earlier stage
+	--    stand far below it): these slabs are ~30 studs below the Start platform that is the team checkpoint
+	do
+		local low1, low2 = floorAt(killY + 30), floorAt(killY + 27)
+		T.check(topOf(low1) < startPos.Y - 20, "fall rule: the straggler floors are far below the team checkpoint", fmt(topOf(low1)) .. " vs " .. fmt(startPos.Y))
+		local mark = fresh(a)
+		step(a, standOn(low1), 0, 2)
+		step(a, above(low2, 10), -45, 1)
+		step(a, standOn(low2), 0, 2)
+		expectStay("3 stud hop on a stage far below the team checkpoint", a, mark, standOn(low2))
+	end
+
+	-- 10. a respawned character starts with a clean slate: without that the respawn at the team checkpoint (90 studs below
+	--     the remembered height, memory says "airborne") would count as a fall
+	do
+		local up, low = floorAt(T0), floorAt(T0 - 30)
+		local mark = fresh(a)
+		step(a, standOn(up), 0, 2)
+		step(a, above(low, 14), -60, 1) -- in the air, remembered as airborne
+		local old = a.Character
+		Mock.Kill(a)
+		T.check(waitFor(function()
+			return a.Character ~= nil and a.Character ~= old and hum(a) ~= nil and hum(a).Health > 0
+		end, 12), "respawn: the character is replaced")
+		advance(1.2)
+		T.eq(voidsSince(a, mark), 0, "respawn: coming back at the team checkpoint is not a fall")
+		fresh(a)
+		step(a, standOn(low), 0, 2) -- a ground-to-ground "landing" 30 below the old reference
+		expectStay("first landing of a respawned character", a, mark, standOn(low))
+	end
+
+	-- 11. downed players are not judged (they wait frozen for a revive)
+	do
+		local up, low = floorAt(T0), floorAt(T0 - 30)
+		waitNotInvulnerable(b)
+		step(b, standOn(up), 0, 2)
+		DS().Damage(b, 999, "Other", { IgnoreIFrames = true })
+		advance(0.5)
+		T.eq(DS().IsDowned(b), true, "downed player: b is downed")
+		local mark = logSize()
+		step(b, above(low, 14), -60, 1)
+		step(b, standOn(low), 0, 2)
+		T.eq(voidsSince(b, mark), 0, "downed player: a landing on a lower lap is not a fall (no void damage)")
+		T.check(distance(root(b).Position, standOn(low)) <= 1, "...and they are not moved")
+	end
+
+	-- 12. the match is over (Ended): the same landing is rescued for free
+	do
+		local up, low = floorAt(T0), floorAt(T0 - 30)
+		local mark = fresh(a)
+		step(a, standOn(up), 0, 2)
+		m.StartedAt = m.StartedAt - Config.GetDifficulty("Easy").TimeLimit - 5 -- the clock ran out
+		advance(0.8)
+		T.eq(m.State, "Ended", "ended: the time limit ended the match")
+		step(a, standOn(up), 0, 2)
+		step(a, above(low, 14), -60, 1)
+		step(a, standOn(low), 0, 1)
+		advance(0.9)
+		T.check(atCheckpoint(a), "ended: a landing on a lower lap brings the player back to the team checkpoint", fmt(distance(root(a).Position, startPos)))
+		T.eq(voidsSince(a, mark), 0, "...without any damage (results screen)")
+	end
+
+	arena:Destroy()
+	endAllMatches(players)
+	removePlayers(players)
+	flushErrors("fall_rule")
+	flushWarnings("fall_rule")
+end)
+
+----------------------------------------------------------------------------------------------------
 -- scenario: victory
 ----------------------------------------------------------------------------------------------------
 local function lobbyCheck(player, label)
@@ -2373,6 +2708,117 @@ S.persistence = guarded("persistence", function()
 end)
 
 ----------------------------------------------------------------------------------------------------
+-- scenario: DataService orphan retention (a player who leaves during a DataStore outage)
+--
+-- The cache entry of a leaving player used to be dropped right after the final save, even when that save failed:
+-- the session's tokens / pets were lost for good, and a quick rejoin during the outage started from a stale or empty
+-- profile. Now a dirty entry stays behind as an "orphan": a rejoin gets it back, a background retry (backoff, 10 s
+-- first) and the autosave sweep flush it, BindToClose flushes it (see the `shutdown` scenario), and it is dropped only
+-- after a successful write or after ORPHAN_TIMEOUT (30 minutes) with a "giving up" warning.
+----------------------------------------------------------------------------------------------------
+S.data_orphans = guarded("data_orphans", function()
+	if not needBoot() then
+		return
+	end
+	local Config = config()
+	local DataService = mod("DataService")
+	local DSt = Mock.DataStore
+	local function key(id)
+		return Config.Tokens.DataStoreName .. "/u_" .. id
+	end
+	local function join(name, userId)
+		local p = Mock.AddPlayer(name, userId)
+		advance(1.5)
+		return p
+	end
+	-- simulates a write by another server: the next join must read exactly this
+	local function setStored(userId, tokens)
+		local e = DSt.Data[key(userId)]
+		if e then
+			e.Tokens = tokens
+		else
+			DSt.Data[key(userId)] = { Version = 2, Tokens = tokens }
+		end
+	end
+
+	-- A: leaves during the outage with 12 unsaved tokens; a quick rejoin during the outage gets them back; leaves again;
+	--    the background retry stores them once the store is back and the entry is released after that
+	local a = join("OrphanA", 880001)
+	DataService.AddTokens(a, 12)
+	DSt.Fail = true
+	Mock.RemovePlayer(a)
+	advance(6)
+	T.eq(storedTokens(880001), nil, "orphan A: nothing is stored while the DataStore is down")
+	local a2 = join("OrphanA", 880001)
+	T.eq(a2:GetAttribute("CloudTokens"), 12, "orphan A: a quick rejoin during the outage gets the unsaved tokens back (CloudTokens)")
+	T.eq(DataService.GetTokens(a2), 12, "...and DataService.GetTokens agrees")
+	T.eq(a2:FindFirstChild("leaderstats") and a2.leaderstats.Tokens.Value, 12, "...and the leaderboard too")
+	Mock.RemovePlayer(a2)
+	advance(6)
+	DSt.Fail = false
+	advance(40)
+	T.eq(storedTokens(880001), 12, "orphan A: the background retry stores the tokens once the DataStore is back", tostring(storedTokens(880001)))
+	setStored(880001, 99)
+	local a3 = join("OrphanA", 880001)
+	T.eq(a3:GetAttribute("CloudTokens"), 99, "orphan A: after the successful flush the entry is released (the next join reads the store afresh)")
+	Mock.RemovePlayer(a3)
+	advance(2)
+
+	-- B: the LOAD failed (outage), the session earned 4 tokens and left during the outage; the store holds 7.
+	--    The failed-load session is merged on top of the stored profile, never over it.
+	DSt.Data[key(880002)] = { Version = 2, Tokens = 7 }
+	DSt.Fail = true
+	local b = Mock.AddPlayer("OrphanB", 880002)
+	advance(4)
+	DataService.AddTokens(b, 4)
+	Mock.RemovePlayer(b)
+	advance(8)
+	T.eq(storedTokens(880002), 7, "orphan B: the stored profile is untouched during the outage")
+	DSt.Fail = false
+	advance(40)
+	T.eq(storedTokens(880002), 11, "orphan B: the failed-load session is merged on top of the stored 7 tokens (7 + 4)", tostring(storedTokens(880002)))
+
+	-- C: a clean leave (the store holds everything) frees the entry at once, so the next join reads the store
+	local c = join("CleanC", 880003)
+	DataService.AddTokens(c, 5)
+	Mock.RemovePlayer(c)
+	advance(2)
+	T.eq(storedTokens(880003), 5, "clean C: a normal leave saves")
+	setStored(880003, 50)
+	local c2 = join("CleanC", 880003)
+	T.eq(c2:GetAttribute("CloudTokens"), 50, "clean C: the entry was released on leave (the next join sees what is in the store)")
+	Mock.RemovePlayer(c2)
+	advance(2)
+
+	-- E: a hopeless store: the orphan is dropped only after ORPHAN_TIMEOUT (30 minutes), with a warning, and the server
+	--    keeps working. Before that it is still there (a rejoin after 10 minutes still gets the tokens).
+	DSt.Fail = true
+	local e = join("OrphanE", 880005)
+	DataService.AddTokens(e, 5)
+	Mock.RemovePlayer(e)
+	advance(600)
+	local e2 = join("OrphanE", 880005)
+	T.eq(e2:GetAttribute("CloudTokens"), 5, "orphan E: still retained after 10 minutes of outage")
+	Mock.RemovePlayer(e2)
+	advance(2000)
+	local gaveUp = false
+	for _, o in ipairs(Mock.Output) do
+		if o.kind == "warn" and o.text:find("giving up", 1, true) then
+			gaveUp = true
+		end
+	end
+	T.check(gaveUp, "orphan E: giving up after the timeout is logged")
+	DSt.Fail = false
+	local e3 = join("OrphanE", 880005)
+	T.eq(e3:GetAttribute("CloudTokens"), 0, "orphan E: the dropped entry is gone (a fresh profile, no stale memory leak)")
+	Mock.RemovePlayer(e3)
+	advance(2)
+
+	flushErrors("data_orphans")
+	flushWarnings("data_orphans", { "[DataService]" })
+end)
+
+----------------------------------------------------------------------------------------------------
 -- scenario: Dash relay (Main.server.lua)
 ----------------------------------------------------------------------------------------------------
 S.dash_relay = guarded("dash_relay", function()
@@ -2406,6 +2852,15 @@ S.shutdown = guarded("shutdown", function()
 		return
 	end
 	local DataService = mod("DataService")
+	-- an orphan (left during a DataStore outage, still unsaved) must be flushed by BindToClose as well
+	local d = Mock.AddPlayer("OrphanD", 880004)
+	advance(1.5)
+	DataService.AddTokens(d, 8)
+	Mock.DataStore.Fail = true
+	Mock.RemovePlayer(d)
+	advance(6)
+	T.eq(storedTokens(880004), nil, "shutdown: an orphan has nothing stored while the DataStore is down")
+	Mock.DataStore.Fail = false
 	local p = Mock.AddPlayer("LastOut", 777003)
 	advance(1.0)
 	DataService.AddTokens(p, 9)
@@ -2414,7 +2869,9 @@ S.shutdown = guarded("shutdown", function()
 	Mock.DataStore.Latency = 0
 	T.check(finished, "all BindToClose callbacks finish within 30 s")
 	T.eq(storedTokens(777003), 9, "BindToClose saves players that are still online", tostring(storedTokens(777003)))
+	T.eq(storedTokens(880004), 8, "BindToClose also flushes orphans (players who left during an outage)", tostring(storedTokens(880004)))
 	flushErrors("shutdown")
+	flushWarnings("shutdown", { "[DataService]" })
 end)
 
 ----------------------------------------------------------------------------------------------------

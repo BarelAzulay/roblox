@@ -302,6 +302,11 @@
         "Stop",
         "GetPetCount"
       ]
+    },
+    "client/Controllers/TokenFx": {
+      "functions": [
+        "Init"
+      ]
     }
   },
   "scripts": [

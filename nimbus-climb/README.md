@@ -2,33 +2,48 @@
 
 > *Climb the storm. Together.*
 
-A cosy, co-op **cloud parkour** hobby game for Roblox. You wake up in a floating cloud village, step into a
-glowing **portal** with up to three friends, and get flown to a freshly generated **sky course** that you
-have to climb as a team: dash across gaps, dodge spinning bars and lightning, hold pressure plates so your
-friends can cross, share checkpoints, lift each other back up and collect **cloud tokens** floating over the
-trickiest steps.
+A cosy, co-op **cloud parkour** game for Roblox. You live in a floating cloud village, step into one of five
+glowing **portals** with up to three friends, and get flown to a freshly generated **sky course** that you climb
+as a team: dash over gaps, dodge spinning bars, lightning and swinging beams, share checkpoints and pick each
+other back up. Along the way you collect **cloud tokens**, and back home you spend them on **winged pets** (from
+roulettes) and **usable items**. Every player also gets a personal **spot** in the village to show off their pets.
 
-Everything is built from plain parts and particles (no asset ids, no toolbox models), and every piece of
-text goes through one small `Theme` module, so the whole game shares the same rounded, friendly fonts.
+Everything is built from plain parts and particles (no asset ids, no toolbox models), and all text uses one
+small `Theme` module, so the whole game shares the same chunky, friendly look.
 
-## Highlights
+## How to open the game
 
-- **Cloud village lobby** - a big puffy plaza, floating islands and bridges, a rainbow arch, lanterns, ponds,
-  fireflies, a welcome sign and a "How to play" board. The lobby is safe: nobody can get hurt there.
-- **Three portals = three difficulties** - *Soft Breeze*, *Gale Force*, *Thunderstorm*. Standing on a portal
-  pad joins its party (1-4 players); a countdown launches the match.
-- **Procedural courses** - every match builds a new course from a seed, validated against reach-ability rules
-  (run gaps, dash gaps, jump heights, no overlapping platforms) before it is built.
-- **Co-op rules** - shared checkpoints, downed teammates that can be revived, pressure-plate bridges that need
-  somebody to stand on the plate, and a team result at the end.
-- **Hazards** - spinning bars, storm clouds, lightning zones with a red warning disc, vanishing clouds,
-  moving clouds, bounce pads (they throw you forward at a fixed speed, so the next cloud is always reachable).
-- **Cloud tokens** - golden tokens floating over risky steps. They are saved between visits (DataStore) and
-  appear in the HUD counter (top-right). The server still keeps a `leaderstats` folder with a `Tokens` value per
-  player, but Roblox's default leaderboard / player list is hidden so it does not cover the counter.
-- **Health, stamina and damage** - a custom health bar, damage numbers, screen flash and camera shake. Health
-  never reaches zero in a match: a lethal hit puts you in the *downed* state until a teammate reaches the next
-  checkpoint.
+**Just play (nothing to install):** open `play/NimbusClimb.rbxlx` in Roblox Studio (double-click it, or
+File -> Open from File) and press **Play**. It is a ready-made copy of everything in `src/`.
+
+**One-click Rojo launchers (to edit the code with live sync):** extract the ZIP first (never run anything from
+inside it), then start the Rojo server with the launcher for your computer. The first run downloads Rojo 7.7.1
+(about 5 MB). Keep the window open, open a Baseplate place in Studio, click **Plugins -> Rojo -> Connect**
+(install the Rojo 7.7.1 plugin once), then press **Play**.
+
+- **Windows:** double-click `Start-Rojo-Windows.bat`. If it says the server stopped with "already in use",
+  another Rojo window is still open: close it and try again.
+- **Mac:** `Start-Rojo-Mac.command` is blocked the first time because it came from a download. Easiest fix
+  (works on every macOS): open Terminal, type `bash ` (with a trailing space), drag the file from Finder into the
+  window and press Enter. Alternatives: right-click -> **Open** (macOS 14 and earlier), or double-click once,
+  then System Settings -> Privacy & Security -> **Open Anyway** (macOS 15 and later; the button stays for about an
+  hour). If macOS asks about the Downloads folder, click **Allow**.
+
+Prefer the command line? In this folder run `rojo serve` (needs Rojo 7.7.1, [Rokit](https://github.com/rojo-rbx/rokit)
+or the VS Code "Rojo" extension are the easy ways to get it).
+
+**Place settings that matter**
+
+- **Max Players: 16 or less** (a place setting, in Studio's Game Settings or the place's settings on the Creator
+  Hub). The lobby has exactly 16 spots (`Config.Lobby.SpotCount`); a 17th player would still play but would have
+  no spot.
+- **Saving needs a published place.** Tokens, pets, items and stats are saved in a DataStore, and DataStores only
+  work in a place published to Roblox (File -> Publish to Roblox). In Studio also turn on Game Settings ->
+  Security -> **Enable Studio Access to API Services**. Without these the game still runs, it just forgets
+  everything when you stop. Saves happen on leave, every 90 s and at server shutdown (older v1 token saves are
+  migrated once).
+- Leave *StreamingEnabled* off. Everything else (sky, lighting, gravity, lobby) is created by the scripts, so an
+  empty baseplate is all you need. To test parties use Test -> Clients and Servers with 2-4 players.
 
 ## Controls
 
@@ -36,36 +51,90 @@ text goes through one small `Theme` module, so the whole game shares the same ro
 |---|---|---|---|
 | Move | `W` `A` `S` `D` | thumbstick | left stick |
 | Jump | `Space` | jump button | `A` |
-| Run (uses stamina) | hold `Left Shift` (or `Right Shift`) | **RUN** button (tap to toggle) | `L3` (press to toggle) |
-| Dash (uses stamina, 1.6 s cooldown, also in the air) | `Q` | **DASH** button | `B` |
-| Leave party / match | on-screen **Leave** / **Leave match** buttons (the match button asks you to press it twice) | same | same |
+| Run (drains stamina) | hold `Shift` | **RUN** button (tap to toggle) | `L3` (toggle) |
+| Dash (35 stamina, 1.6 s cooldown, works in the air) | `Q` | **DASH** button | `B` |
+| Use an item | `1` `2` `3` `4` (or click / tap a slot) | tap a slot | - |
+| Close a window | `Esc` or the red X | red X | - |
 
-## One-click start
+## The five portals
 
-*(If you only want to play, skip this section and open `play/NimbusClimb.rbxlx`, see the next section.)*
+Stand on a portal pad to join its party (1-4 players). A 15 s countdown starts (4 s once the party is full),
+then everyone is flown to the start platform of a new course. Every course is generated from a seed, in one of
+four shapes (Straight, Zigzag, Serpent, Spiral) and mixed from stage themes (moving clouds, spinning bars, storms,
+lightning, vanishing steps, cannons, wind, pendulums, co-op plate bridges, dash-only gaps ...), and it is
+validated for reachability before it is built.
 
-Extract the downloaded ZIP first (do not run anything from inside the ZIP). Then start the Rojo server with the launcher for your computer. The first run downloads Rojo 7.7.1 (about 5 MB) and asks nothing more. Keep the window open while you work, then connect from Roblox Studio (Plugins - Rojo - Connect).
+| Portal | Stars | Stages | Time limit | Void fall costs | Win bonus | Feel |
+|---|---|---|---|---|---|---|
+| **Easy** | 1 | 4 | 9 min | 10 HP | 10 tokens | Chill clouds and wide steps. |
+| **Medium** | 2 | 5 | 12 min | 15 HP | 20 tokens | Moving clouds, spinning bars, your first co-op bridge. |
+| **Hard** | 3 | 6 | 15 min | 22 HP | 35 tokens | Vanishing steps, lightning, swinging beams. |
+| **Extreme** | 4 | 8 | 20 min | 30 HP | 60 tokens | Dash-only gaps, storms, narrow beams. Bring friends. |
+| **Saint** | 5 | 10 | 25 min | 40 HP | 100 tokens | Tiny steps, relentless hazards. |
 
-**Windows:** double-click `Start-Rojo-Windows.bat`. If the window says the Rojo server stopped and mentions "already in use", another Rojo window is still open: close it and try again.
+Team rules: the first player to touch a checkpoint sets it for everyone, heals the living (35 %) and revives all
+downed teammates. A lethal hit does not kill you, it leaves you **downed** (1 HP, frozen) until a teammate reaches
+the next checkpoint. If everybody is downed, or time runs out, the team loses; if every living player stands on the
+finish pad, it wins. Falling into the void, or missing a jump onto a lower lap of a spiral, costs health and puts
+you back at the team checkpoint. Golden tokens (worth 5) sit on the riskiest steps.
 
-**Mac:** macOS blocks a script that came from a downloaded ZIP the first time you double-click it. Use one of these (needed only once):
+## Your spot
 
-- **Option A, works on every macOS version and is the simplest.** Open Terminal and type `bash ` (with a trailing space). Drag `Start-Rojo-Mac.command` from Finder into the Terminal window, then press Enter.
-- **Option B, macOS 14 and earlier.** Right-click (or Control-click) `Start-Rojo-Mac.command`, choose **Open**, then click **Open** in the dialog.
-- **Option C, macOS 15 and later.** Double-click it once and click **Done** (do NOT click Move to Trash). Open System Settings > Privacy & Security and scroll to the Security section. Click **Open Anyway** next to `Start-Rojo-Mac.command`, enter your password or Touch ID, and click **Open Anyway** again. The button only appears for about an hour after the blocked attempt. If it is gone, double-click the file again.
+Every player owns one of **16 cloud islands** on the village's outer ring. It is saved with your profile (you get
+the same one back when it is free), shows your name and totals, and has a podium with a slowly spinning copy of
+your best pet. You respawn there, and the **Spot** button (house icon) teleports you home. Not during a climb.
 
-If macOS asks to let Terminal access your Downloads folder, click **Allow**. If you click Don't Allow, the launcher may wrongly say it cannot find `default.project.json`.
+## Pets and roulettes
 
-## Open it in Roblox Studio
+26 chibi winged pets in six rarities (Common 6, Uncommon 6, Rare 5, Epic 4, Legendary 3, Mythic 2) fly beside
+their owner, and everybody sees everybody's pets. Visit the **shop island** (four roulette machines and an item
+counter) or press the **Shop** button, pick a roulette and spin. Duplicates stack (up to 99 per pet).
 
-There are two ways in. Pick the one that matches what you want to do.
+| Roulette | Price | Odds per spin (pets inside a rarity are equally likely) |
+|---|---|---|
+| **Cloud** | 50 tokens | Common 60 %, Uncommon 28 %, Rare 10 %, Epic 2 % |
+| **Storm** | 250 tokens | Uncommon 35 %, Rare 40 %, Epic 20 %, Legendary 5 % |
+| **Sky** | 1,000 tokens | Rare 35 %, Epic 45 %, Legendary 17 %, Mythic 3 % |
+| **Celestial** | 5,000 tokens | Epic 45 %, Legendary 40 %, Mythic 15 % |
 
-**Just play it (no tools at all):** open `play/NimbusClimb.rbxlx` directly (double-click it, or File -> Open from
-File in Studio) and press **Play**. It is a ready-made copy of everything in `src/`, so you do not need Rojo, Node
-or Python for this. Remember it is a snapshot: if you edit `src/`, rebuild it (see below) or use live sync.
+Equip up to **3** pets from the Pets window. Each pet has one or two perks: **Max Health**, **Cloud Tokens**
+(more tokens per pickup), **Stamina Regen** and **Checkpoint Heal**. Perks add up, with caps (+50 % health, +100 %
+tokens, +60 % stamina regen, +100 % checkpoint heal). Pets never change run speed or jump height, and your
+loadout is locked while a climb is running. The mascot is the Mythic **Cloudy Dragon**.
 
-**Edit the code (live sync with Rojo):** the repository is a [Rojo](https://rojo.space) project
-(`default.project.json`):
+## Items
+
+Bought in the shop for cloud tokens, carried up to 5 of each, used on keys `1`-`4` during a climb (they do nothing
+in the lobby or during the intro countdown). Slot 4 is a locked placeholder for a future item.
+
+| Slot | Item | Price | What it does |
+|---|---|---|---|
+| 1 | **Heal Cloud** | 30 | Heals 40 % of your max health. |
+| 2 | **Shield Bubble** | 45 | Nothing can hurt you for 8 seconds. |
+| 3 | **Phoenix Feather** | 150 | Revives the nearest downed teammate at 50 % health (only used up if someone was revived). |
+
+## The screen
+
+Nothing the game says appears in the middle of the screen. Layout, with a compact HUD:
+
+- **Left, vertically centred: the menu column** of five round buttons: Inventory, Pets, Shop, Spot, Stats.
+  Windows you open are centred on purpose (you asked for them) and close with Esc.
+- **Right: toasts** stack under the token counter (top-right) and the compact result card shows up at the right
+  edge after a climb.
+- **Top-left:** party panel in the lobby, match panel (timer, checkpoints, tokens, team) in a climb.
+- **Bottom-left:** health and stamina. **Bottom-centre:** the item hotbar (1-4).
+
+## Rebuilding the place file
+
+`play/NimbusClimb.rbxlx` is generated from `src/`; never edit it by hand. After changing code, rebuild it from this
+folder with [Rojo](https://rojo.space) 7.7.1:
+
+```bash
+rojo build default.project.json -o play/NimbusClimb.rbxlx
+```
+
+It contains only the three script containers below (plus the lighting technology); the world is built by the
+scripts when the game starts.
 
 | Folder | Becomes |
 |---|---|
@@ -73,168 +142,53 @@ or Python for this. Remember it is a snapshot: if you edit `src/`, rebuild it (s
 | `src/server` | `ServerScriptService.Server` |
 | `src/client` | `StarterPlayer.StarterPlayerScripts.Client` |
 
-1. **Install Rojo** - the easiest way is the VS Code extension "Rojo", or install the CLI with
-   [Rokit](https://github.com/rojo-rbx/rokit) (`rokit add rojo-rbx/rojo`) or from the
-   [releases page](https://github.com/rojo-rbx/rojo/releases). Also install the **Rojo plugin** in Studio
-   (Plugins tab -> Manage Plugins, or `rojo plugin install`). The launchers above use Rojo 7.7.1, so the
-   matching 7.7.1 plugin is the safest choice.
-2. **Live sync:** in the `nimbus-climb` folder (the one that contains `default.project.json`) run
+## Game icon
 
-   ```bash
-   rojo serve
-   ```
+The icon is the Cloudy Dragon on a sky background: `branding/icon-512.png` is the file to upload to Roblox
+(`icon-1024.png` and the source `icon.svg` are there too). It is placeholder-quality vector art; see
+`branding/README.md` for the upload steps, design notes and how to replace it.
 
-   open a new **Baseplate** place in Studio, click **Connect** in the Rojo plugin (Plugins -> Rojo -> Connect),
-   then press **Play**. The `Start-Rojo-Windows.bat` / `Start-Rojo-Mac.command` launchers start the same server
-   and download the Rojo command line tool for you (you still need the Studio plugin).
-3. **Rebuild the ready-made place file** (`play/NimbusClimb.rbxlx`) after you change anything in `src/`. From the
-   `nimbus-climb` folder run:
-
-   ```bash
-   rojo build default.project.json -o play/NimbusClimb.rbxlx
-   ```
-
-   The place file is a generated copy of `src/`; never edit it by hand, always rebuild it. It holds only the
-   three script containers from the table above (no baseplate, no lighting, no map): everything else is created
-   by the scripts when the game starts.
-4. Recommended place settings: *Game Settings -> Security -> Enable Studio Access to API Services* (so saving
-   tokens works in Studio) and leave *StreamingEnabled* off. The server script already sets the sky, lighting,
-   gravity and the fall-destroy height, so an empty baseplate is all you need: the game places players itself.
-
-To test parties in Studio use **Test -> Clients and Servers** with 2-4 players, then walk onto the same portal.
-
-## How a session works
-
-```
-lobby plaza --walk onto a portal pad--> party (1-4 players, countdown 15 s, 4 s once full)
-   ^                                        |
-   |                                        v
- results screen (10 s) <--- course <--- intro countdown (5 s, frozen) <--- teleport to the start platform
-```
-
-* **Portals** - `PortalService` polls the pad zones 5x per second. Stepping off the pad (or pressing *Leave*)
-  leaves the party. The first player starts the countdown; a full party shortens it. If all six arena slots are
-  busy the party is told *"All sky arenas are busy"*.
-* **Matches** - `MatchService` owns the state machine *Setup -> Countdown -> Playing -> Ended*. Each match gets
-  its own arena slot far from the lobby (`Config.Match.ArenaOrigin` + slot x `SlotSpacing`), so up to six
-  matches run side by side. When it ends, the course, hazards, token watchers and all event connections are
-  torn down and the slot is reused.
-* **Checkpoints are shared** - the first player to touch checkpoint *n* sets it for the whole team, heals every
-  living teammate (35 %) and **revives all downed teammates** on that pad. Falling into the void costs health
-  (15 / 22 / 30) and brings you back to the team checkpoint.
-* **Downed** - a lethal hit leaves you at 1 HP, frozen and see-through until a teammate reaches the next
-  checkpoint (revive = 50 % health). If *everybody* is downed the team loses.
-* **Winning** - every living player has to stand on the finish pad. Finished players are parked safely on the
-  pad and every finisher gets the win bonus (10 / 20 / 40 tokens). Running out of time (10 / 15 / 20 minutes)
-  is a defeat.
-* **Reset button** - respawns you at the team checkpoint with 50 % health, no penalty.
-* **Co-op gimmicks** - `PressurePlate` + `PlateBridge`: the bridge only exists while a teammate stands on the
-  plate. `DashGap`s can only be crossed with a dash (a **DASH!** sign warns you).
-
-## Architecture in one minute
-
-`ARCHITECTURE.md` is the binding contract between all modules (names, argument order, payload shapes).
-
-```
-default.project.json   Rojo project (maps src/ into the game, see the table above)
-play/NimbusClimb.rbxlx ready-made place file, built from src/ with rojo build
-Start-Rojo-*.{bat,command}  one-click Rojo launchers for Windows / Mac
-tools/                 syntax check, static analysis and the Roblox-mock smoke test (see "Checking your changes")
-ARCHITECTURE.md        module contracts
-
-src/shared    Config  Theme  Util  Remotes                (pure data / helpers, used by both sides)
-src/server    Main.server.lua                              boots everything in order, each step under pcall
-  Services/   LightingService   sky, atmosphere, gravity
-              LobbyBuilder      builds the cloud village, returns portals + spawn
-              PlayerService     leaderstats, humanoid stats, spawn placement, lobby safety loop
-              DataService       DataStore + in-memory cache (tokens), autosave, BindToClose
-              DamageService     the only place health changes: i-frames, downed, revive
-              TokenService      cloud token parts + collection
-              HazardService     animates tagged course parts and damages through DamageService
-              CourseBuilder     procedural layout (pure) + part builder
-              MatchService      match lifecycle and team rules
-              PortalService     parties at the portals
-src/client    Main.client.lua                              starts the controllers
-  Controllers/ MovementController  run / dash / stamina / mobile buttons
-              HudController       health, stamina, tokens, match panel, party panel, countdown
-              DamageFx            vignette, camera shake, floating damage numbers
-              NotifyController    toasts, results card, other players' dash trails
-```
-
-Rules of the road: the **server is authoritative** (health, damage, tokens, checkpoints, match flow); clients
-only do input, movement feel and UI. Behaviour is attached with `CollectionService` **tags** (`Config.Tags`)
-plus **attributes** for parameters. Server -> client state travels over a handful of RemoteEvents
-(`Config.Remotes`: `Notify`, `DamageTaken`, `PartyState`, `MatchState`, `MatchResult`, `DashFx`); the client talks
-back with three small ones (`Dash`, `LeaveParty`, `LeaveMatch`). All Lua is
-plain Lua 5.1-compatible syntax (no Luau-only syntax) so the tooling can parse it with stock parsers.
-
-## Tuning: `src/shared/Config.lua`
-
-Every number lives there. The ones you will touch most:
-
-| Section | What it controls |
-|---|---|
-| `Physics` | gravity, walk / run speed, jump power, dash speed / duration / cooldown / stamina cost, stamina regen. The course generator derives its maximum jump height and gap lengths from these, so changing them keeps courses fair. |
-| `Damage` | i-frame length, downed health, revive / checkpoint heal fractions, void damage per difficulty. |
-| `Lobby` | where the village floats (`Origin`), plaza and portal ring radius, the "fell off" height. |
-| `Match` | player limits, party / full-party / intro / results countdowns, arena origin, slot spacing, number of concurrent matches, win bonus per difficulty. |
-| `Difficulties` | per difficulty: number of stages, steps per stage, gap and rise ranges, platform sizes, hazard and dash-gap chances, tokens per stage, time limit, stars, colour. |
-| `Tokens` | DataStore name, autosave interval, token value. |
-
-Adding a fourth difficulty is mostly a new entry in `Config.Difficulties` (plus a damage / bonus entry); the
-lobby builds one portal per entry.
-
-## Checking your changes
+## Tests
 
 ```bash
-pip install lupa            # once: embedded Lua for the syntax check and the smoke test (also needs Python 3 and Node 18+)
-tools/run_checks.sh         # everything (about 20 s); add --quick for a shorter run
+pip install lupa            # once (also needs Python 3 and Node 18+; npm packages install on first use)
+tools/run_checks.sh         # everything, about 2 minutes
+tools/run_checks.sh --quick # shorter smoke test (fewer layout seeds), about 75 s
 tools/run_checks.sh --static   # only the fast checks
 ```
 
-`run_checks.sh` runs three things and exits non-zero if one fails:
+The script exits non-zero if anything fails and runs three steps:
 
-1. **`tools/syntax.py`** - every `.lua` file must parse as plain Lua (this rejects Luau-only syntax such as
-   `+=`, `continue`, type annotations and backtick strings).
-2. **`tools/check.mjs`** (Node + [`luaparse`](https://www.npmjs.com/package/luaparse), installed on first use)
-   - static analysis: undefined globals (typos, locals used before they are declared), assignments to globals,
-   deprecated `wait/spawn/delay`, raw `Enum.Font` outside `Theme.lua`, `Instance.new` with a class Roblox cannot
-   create, unknown services, `require` of missing modules, modules that do not `return`, more than 200 locals in
-   a function, and the public API from `ARCHITECTURE.md` (`tools/contract.json`).
-3. **`tools/smoke.py`** - loads the real modules into a **Roblox mock** (`tools/robloxmock.lua`: Instances,
-   datatypes, Enums, signals, a fake clock, Players/Workspace/DataStore/... on `lupa`) and plays the game:
-   - generates and audits 200 course layouts per difficulty (gaps, rises, tokens, checkpoints, determinism) and
-     prints their stats, builds real courses and inspects the parts, tags and attributes;
-   - boots `Main.server.lua`, joins fake players, walks them into portals, runs full matches - victory,
-     defeat (everybody downed), timeout, everybody leaves, leaving through the HUD button, reset-button
-     deaths, six concurrent matches - and checks damage, i-frames, downing, revives, checkpoints, void,
-     tokens, win bonus, hazards (spin bars, storms, lightning, vanishing / moving clouds, bounce pads, plates),
-     DataStore saves (also during an outage) and `BindToClose`;
-   - verifies every remote payload against `ARCHITECTURE.md`, that every text label uses a Theme font and that
-     nothing leaks (workspace, connections, threads, tweens) after the matches;
-   - loads the client controllers with a fake `LocalPlayer`, presses run / dash, feeds the HUD synthetic
-     payloads and then **replays the exact remote traffic the real server produced**; a second run simulates a
-     phone (touch buttons).
+1. **`tools/syntax.py`**: every `.lua` file must parse as plain Lua 5.1 (no Luau-only syntax).
+2. **`tools/check.mjs`**: static analysis (undefined globals, deprecated APIs, raw fonts, bad `Instance.new`,
+   missing `require`s, and the public API listed in `tools/contract.json`).
+3. **`tools/smoke.py`**: loads the real modules into a Roblox mock (`tools/robloxmock.lua`) and plays the game:
+   5 difficulties x 300 generated courses audited (reach, headroom, cannons, tokens), full matches (victory,
+   defeat, timeout, leaving, concurrent slots), damage and the fall rule, hazards, spots, pets, roulettes, items,
+   saving (also during DataStore outages), and the whole client UI including the "nothing in the middle of the
+   screen" rule on desktop and phone sizes. Handy flags: `-v`, `--only match_victory,damage_rules`, `--list`,
+   `--seeds N`, `--strict`.
 
-   Useful flags: `-v` (list passing checks), `--only match_victory,damage_rules` (`--list` shows all scenario
-   names), `--seeds N`, `--strict` (warnings fail), `--strict-members` (reading a property that does not exist
-   raises, like Roblox), `--engine lua54`. The mock is deliberately strict where Roblox is (wrong property
-   types, `Instance.new("Typo")`, parenting a destroyed instance, `FireServer` on the server ...) but it is not
-   a physics engine: characters do not walk, touches are derived from overlapping boxes and moving platforms
-   are not simulated. Anything it records as *unknown member* is a hint to check the Roblox API docs, or to
-   teach the mock the property in `tools/robloxmock.lua`. Real class and service names live in
-   `tools/roblox-api.json`.
+The mock is not a physics engine (characters do not walk, moving platforms are not simulated), so test the feel
+in Studio too.
 
-## Ideas for next steps
+## Project layout
 
-- Sound: footsteps on clouds, wind, thunder, a gentle lobby theme (needs asset ids, which were avoided so far).
-- Cosmetics shop in the lobby that spends cloud tokens (trails, hats, dash colours) and a custom token leaderboard (the default Roblox one is hidden).
-- Daily seed: one shared course per day with a best-time board, and ghost runs of friends.
-- More hazards: wind gusts that push sideways, rotating platforms, ice clouds, rising storm "lava" that forces
-  the team forward.
-- Co-op tools: a team rope between players, a boost or shield power-up, emotes and a ping marker.
-- Accessibility: colour-blind safe hazard markers, an assist mode with longer i-frames, remappable controls.
-- Private servers / invite-a-friend parties and a spectator camera for downed players.
-- Real assets (meshes, sounds, decals) once the base game feels good.
+```
+default.project.json   Rojo project           play/NimbusClimb.rbxlx   ready-made place file
+Start-Rojo-*           one-click launchers    branding/                game icon (see branding/README.md)
+tools/                 syntax check, static analysis, smoke test (see "Tests")
+ARCHITECTURE.md + ARCHITECTURE_V2.md   module contracts (v2 wins where they differ)
+
+src/shared   Config (every number)  Theme  Util  Remotes  PetCatalog  ItemCatalog  PetBuilder
+src/server   Main.server.lua; Services: Lighting, Lobby, Player, Data, Damage, Token, Hazard, Course (layout +
+             builder), Match, Portal, Spot, Pet, Item
+src/client   Main.client.lua; State; UI/CloudUI; Controllers: Movement, Hud, DamageFx, Notify, Menu, Hotbar,
+             Pet, TokenFx
+```
+
+The **server is authoritative** (health, tokens, pets, items, checkpoints, matches); clients only do input,
+movement feel and UI. Behaviour is attached with `CollectionService` tags (`Config.Tags`). Every tunable number,
+including roulette prices and odds, difficulties and physics, lives in `src/shared/Config.lua`.
 
 Have fun climbing!

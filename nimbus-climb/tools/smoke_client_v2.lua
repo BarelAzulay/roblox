@@ -6,6 +6,7 @@
 --                      the roulette spin + reveal, OpenPanel, Esc, one window at a time
 --   client_hotbar      HotbarController: 4 slots, keys 1-4, dimmed in the lobby, UseItem remote, cooldown
 --   client_pets        PetController: followers of every player, culling, snapping, clean-up
+--   client_tokens      TokenFx: the client-side coin spin + bob (rates, amplitude, culling, release of collected coins)
 --   client_layout_rule NO text from the HUD / toasts / countdown / party / results / menu / hotbar in the middle of
 --                      the screen at 1920x1080 (and, from client_mobile, at 390x844)
 -- Plain Lua 5.1 syntax only.
@@ -1236,6 +1237,164 @@ S.client_pets = guarded("client_pets", function()
 	advance(0.5)
 	flushErrors("client_pets")
 	flushWarnings("client_pets")
+end)
+
+----------------------------------------------------------------------------------------------------
+-- scenario: TokenFx (the client-side coin spin + bob)
+----------------------------------------------------------------------------------------------------
+-- With Config.Tokens.ClientAnimated = true the server leaves the coins still (server side: scenario `hazards`,
+-- "TokenService does not animate") and TokenFx poses them on this client every frame:
+--   * every CloudToken part of the workspace (also ones that appear later) spins around Y and bobs; X/Z never change
+--   * normal coins: spin 2.0 rad/s, bob +-0.45 studs; golden coins (GoldenToken tag): 2.6 rad/s, +-0.6 studs
+--   * the yaw the server built the coin with is the phase, so neighbours do not move in lockstep
+--   * only coins within ~140 studs of the camera are posed (the rest are not even touched)
+--   * a coin that is being collected (attribute Collected), destroyed, or no longer tagged is let go of for good
+--   * one RenderStepped connection for all coins, no instances created per frame, Init() is idempotent
+-- With the flag false TokenFx must stay passive and leave every coin exactly where the server put it.
+S.client_tokens = guarded("client_tokens", function()
+	local Config = env()
+	local CollectionService = game:GetService("CollectionService")
+	local TokenFx = M.TokenFx
+	if not T.check(TokenFx ~= nil and type(TokenFx.Init) == "function", "TokenFx loads and has Init") then
+		return
+	end
+	local animated = Config.Tokens.ClientAnimated == true
+	local camera = workspace.CurrentCamera
+	if not T.check(camera ~= nil, "the workspace has a CurrentCamera") then
+		return
+	end
+	local cameraBefore = camera.CFrame
+	local eye = Vector3.new(6000, 300, 0)
+	camera.CFrame = CFrame.new(eye)
+
+	local holder = Instance.new("Folder")
+	holder.Name = "SmokeCoins"
+	holder.Parent = workspace
+	local function makeCoin(offset, golden, yaw)
+		local coin = Instance.new("Part")
+		coin.Name = golden and "SmokeGoldenCoin" or "SmokeCoin"
+		coin.Anchored = true
+		coin.CanCollide = false
+		coin.CFrame = CFrame.new(eye + offset) * CFrame.Angles(0, yaw or 0, 0)
+		-- like TokenService.MakeTokenPart: both tags first, then into the world (TokenFx reads the golden tag
+		-- the moment it sees the CloudToken tag)
+		CollectionService:AddTag(coin, Config.Tags.CloudToken)
+		if golden then
+			CollectionService:AddTag(coin, Config.Tags.GoldenToken)
+		end
+		coin.Parent = holder
+		return coin
+	end
+	local function yawOf(part)
+		local look = part.CFrame.LookVector
+		return math.atan2(-look.X, -look.Z)
+	end
+	local function wrap(a)
+		return (a + math.pi) % (2 * math.pi) - math.pi
+	end
+
+	local normal = makeCoin(Vector3.new(30, 0, 0), false, 0.0)
+	local neighbour = makeCoin(Vector3.new(30, 0, 8), false, 1.9)
+	local golden = makeCoin(Vector3.new(0, 0, 30), true, 0.7)
+	local far = makeCoin(Vector3.new(0, 0, 400), false, 0.4)
+	local farBefore = far.CFrame
+	local normalBase, goldenBase = normal.Position, golden.Position
+
+	if not animated then
+		advance(1.5)
+		T.check(normal.CFrame == CFrame.new(eye + Vector3.new(30, 0, 0)) * CFrame.Angles(0, 0.0, 0) and golden.CFrame == CFrame.new(eye + Vector3.new(0, 0, 30)) * CFrame.Angles(0, 0.7, 0),
+			"Config.Tokens.ClientAnimated is false: TokenFx leaves the coins exactly where the server put them")
+	else
+		-- the first pose snaps a coin from the server's yaw to now * spin + yaw: take the baseline after it, then
+		-- sample two whole bob periods (2 * 2pi / 2.2 = 5.7 s) every frame (1/30 s)
+		advance(1 / 30)
+		local clock0 = os.clock()
+		local last = { n = yawOf(normal), g = yawOf(golden) }
+		local turned = { n = 0, g = 0 }
+		local lo = { n = math.huge, g = math.huge }
+		local hi = { n = -math.huge, g = -math.huge }
+		local drift = 0
+		local lockstep = true
+		local meanDy = { n = 0, g = 0 }
+		local samples = 0
+		for _ = 1, 171 do
+			advance(1 / 30)
+			samples = samples + 1
+			local yn, yg = yawOf(normal), yawOf(golden)
+			turned.n = turned.n + wrap(yn - last.n)
+			turned.g = turned.g + wrap(yg - last.g)
+			last.n, last.g = yn, yg
+			local dn, dg = normal.Position.Y - normalBase.Y, golden.Position.Y - goldenBase.Y
+			lo.n, hi.n = math.min(lo.n, dn), math.max(hi.n, dn)
+			lo.g, hi.g = math.min(lo.g, dg), math.max(hi.g, dg)
+			meanDy.n, meanDy.g = meanDy.n + dn, meanDy.g + dg
+			drift = math.max(drift,
+				math.abs(normal.Position.X - normalBase.X), math.abs(normal.Position.Z - normalBase.Z),
+				math.abs(golden.Position.X - goldenBase.X), math.abs(golden.Position.Z - goldenBase.Z))
+			if math.abs((neighbour.Position.Y - (eye.Y)) - dn) > 0.02 then
+				lockstep = false
+			end
+		end
+		local elapsed = os.clock() - clock0
+		T.near(turned.n / elapsed, 2.0, 0.2, "a normal coin spins at about 2.0 rad/s")
+		T.near(turned.g / elapsed, 2.6, 0.2, "a golden coin spins faster, about 2.6 rad/s")
+		T.check(hi.n <= 0.46 and lo.n >= -0.46 and hi.n - lo.n >= 0.7, "a normal coin bobs +-0.45 studs around its base", "range " .. fmt(lo.n, 2) .. " .. " .. fmt(hi.n, 2))
+		T.check(hi.g <= 0.61 and lo.g >= -0.61 and hi.g - lo.g >= 0.95, "a golden coin bobs +-0.6 studs around its base", "range " .. fmt(lo.g, 2) .. " .. " .. fmt(hi.g, 2))
+		T.check(math.abs(meanDy.n / samples) < 0.04 and math.abs(meanDy.g / samples) < 0.05, "...centred on the base height (the coin does not sink or rise over time)", fmt(meanDy.n / samples, 3) .. " / " .. fmt(meanDy.g / samples, 3))
+		T.check(drift < 1e-3, "X and Z never change (spin and bob only)", "drift " .. fmt(drift, 4))
+		T.check(not lockstep, "a neighbour with another starting yaw bobs out of step (the server's yaw is the phase)")
+		T.check(far.CFrame == farBefore, "a coin 400 studs from the camera is not posed (culled, untouched)")
+
+		-- the camera comes closer: the far coin starts to move
+		camera.CFrame = CFrame.new(eye + Vector3.new(0, 0, 380))
+		advance(0.5)
+		T.check(far.CFrame ~= farBefore, "...and is posed as soon as the camera is within range")
+		camera.CFrame = CFrame.new(eye)
+		advance(0.3)
+
+		-- a coin that appears later is picked up; one root-level connection serves every coin
+		local stats0 = Mock.Stats().connections["RunService.RenderStepped"] or 0
+		local late, lateStart = {}, {}
+		for i = 1, 20 do
+			late[i] = makeCoin(Vector3.new(-20 + i, 0, -30), i % 5 == 0, i * 0.3)
+			lateStart[i] = late[i].CFrame
+		end
+		advance(0.5)
+		T.check(late[1].CFrame ~= lateStart[1] and late[20].CFrame ~= lateStart[20], "coins added after Init are spun too")
+		local stats1 = Mock.Stats().connections["RunService.RenderStepped"] or 0
+		T.eq(stats1, stats0, "20 more coins add no RenderStepped connection (one shared driver)")
+		TokenFx.Init()
+		T.eq(Mock.Stats().connections["RunService.RenderStepped"] or 0, stats0, "a second Init() adds no connection either")
+		local count = Mock.CountDescendants(workspace)
+		advance(2)
+		T.eq(Mock.CountDescendants(workspace), count, "posing the coins allocates no instances")
+
+		-- let go: collected, untagged, destroyed
+		local pickedUp = late[1]
+		pickedUp:SetAttribute("Collected", true)
+		advance(0.1)
+		local server = pickedUp.CFrame * CFrame.new(0, 4, 0) -- what the server's pickup animation does
+		pickedUp.CFrame = server
+		advance(0.5)
+		T.check(pickedUp.CFrame == server, "a coin with the Collected attribute is no longer posed (the pickup animation owns it)")
+		local untagged = late[2]
+		CollectionService:RemoveTag(untagged, Config.Tags.CloudToken)
+		advance(0.1)
+		local frozen = untagged.CFrame
+		advance(0.5)
+		T.check(untagged.CFrame == frozen, "a coin that loses its CloudToken tag is no longer posed")
+		late[3]:Destroy()
+		advance(0.5)
+		local others = late[4].CFrame
+		advance(0.3)
+		T.check(late[4].CFrame ~= others, "destroying a coin does not stop the others")
+	end
+
+	holder:Destroy()
+	camera.CFrame = cameraBefore
+	advance(0.3)
+	flushErrors("client_tokens")
+	flushWarnings("client_tokens")
 end)
 
 ----------------------------------------------------------------------------------------------------
