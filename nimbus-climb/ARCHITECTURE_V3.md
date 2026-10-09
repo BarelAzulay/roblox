@@ -301,6 +301,45 @@ crystal altar ring), `branding/stormfang-art.png` (same, transparent background)
   its detail view also shows the 2D art (`Config.Art.StormfangImage`) as a banner.
 * **Tutorial/NPCs:** one NPC tip mentions the Storm Altar and Secret pets.
 
+## 11. Elements, battle teams and the Fusion Machine (asked for by the player during the build)
+**Elements (build now, with the Stormfang round):** every pet gets one `Element` besides its rarity. Eight elements
+(`Config.Elements`), fitting the sky/cloud world, from the player's list (lightning + wind -> Storm, dark/demonic ->
+Shadow, light/angelic -> Celestial) plus Frost for the icy pets:
+```
+Wheel (each beats the next):  Water > Flame > Frost > Nature > Earth > Storm > (back to) Water
+Pair (each beats the other):  Celestial <-> Shadow
+Damage: strong x1.5, weak x0.75, otherwise x1.
+```
+* `PetCatalog`: `Element` on every pet (required, validated against `Config.Elements.Order`), assigned by species, look
+  and theme (Phoenix/flame looks -> Flame, Penguin/icy -> Frost, Frog/Axolotl/sea colours -> Water, Bunny/Panda/leafy
+  -> Nature, Bear/Dog/earthy -> Earth, Owl/Fox/electric -> Storm, Unicorn/angelic/halo -> Celestial, dark Secrets ->
+  Shadow; Stormfang -> Storm). Every element has at least 3 pets and appears across several rarities.
+  Helpers: `PetCatalog.GetElements(petId) -> {element...}`, `PetCatalog.ElementMultiplier(attackElement,
+  defendElement) -> number` (from Config.Elements), `PetCatalog.ElementsOf(def)`.
+* UI: an element badge (coloured pill with the element name, colour from `Config.Elements.Info`; no asset ids)
+  on Index cards (only once discovered), the Index detail view (with "Strong vs X / Weak vs Y"), the Pets
+  inventory panel and the roulette odds list. A small "Elements" help card in the Index shows the wheel.
+* NPC tips: one NPC explains elements.
+
+**Battle teams (Phase 3):** a battle team holds 3 pets; a 4th slot unlocks at Prestige 1 (or for Gems). Up to 3 saved
+team presets (`Teams` in the profile). Team synergy shown live in the Team screen: 2 pets of the same element ->
++10% Power for them, 3 -> +20%, 4 -> +30%; 3+ different elements -> "Balanced" +10% Health for the team. Battles use
+`ElementMultiplier` on every hit (dual-element attackers use their better element against the target).
+
+**Fusion Machine (Phase 2, needs the per-copy pet data):** a crafted voxel machine in the lobby (`FusionMachine`:
+two input pods, a swirling cloud chamber, an output pod; fusion animation on the client). Two tabs:
+* **UPGRADE:** 3 copies of the same pet and tier -> 1 of the next tier: Normal -> **Golden** (x1.5 stats/perk bonus,
+  gold shimmer material) -> **Rainbow** (x2.5, animated rainbow shimmer). Costs Cloud Tokens by rarity.
+* **MIX:** 2 different pets -> a brand-new hybrid: the body/species of the first, the colours, wings, accessory and
+  element of the second added (Elements = both, deduplicated), rarity = the higher of the two, stats = average x1.2,
+  a generated blended name (e.g. Penguin + Phoenix -> "Pengnix"), built by PetBuilder from a merged Look (the
+  procedural pets make every hybrid look unique). Costs Tokens (or Gems for Secret/Mythic inputs). Hybrids live in a
+  "Fusions" tab of the Index (not part of group rewards).
+* Data: `Pets[petId] = count` stays for Normal copies; add `Tiers[petId] = {Golden = n, Rainbow = n}` and
+  `Hybrids[uid] = {Body = petId, Style = petId, Elements = {...}, Name, Rarity, Tier}`; migration + delta save +
+  ProfileSync like every other field; fusion is server-authoritative, validated and rate-limited, never consumes
+  equipped pets without unequipping them first, and is atomic (inputs removed and output added in one step).
+
 ## Phase 2 outline (tycoon) — design only, do not build yet
 Home on each plot: rooms **Kitchen** (makes pet food + cash), **Garden** (economy pets work here: cash/s =
 sum(Income * RarityScale * level factor)), **Gym** (combat pets gain XP over time), **Vault** (cash cap, offline
@@ -308,11 +347,11 @@ earnings), **Arena Gate** (unlocks battles). Rooms have levels bought with Cash 
 Prestige at Home level 25: reset Cash and room levels for a permanent income multiplier and Gems. Gems: developer
 products (product ids in Config, placeholders until the owner creates them), idempotent ProcessReceipt; roulettes
 priced in gems too (cheap) and a gems-only Secret roulette; respect PolicyService paid-random-items restrictions and
-always show odds.
+always show odds. The Fusion Machine (section 11) is built in this phase.
 
 ## Phase 3 outline (pet battles) — design only
 Arena island in the lobby. PvE ladder (10 tiers of NPC teams) and PvP challenges between players in the arena.
-Teams = up to 3 equipped combat pets. Server-simulated auto-battle (10 Hz ticks: Speed -> attack interval, Power ->
+Teams = 3 pets (4th slot at Prestige 1), element synergy and the element chart (section 11). Server-simulated auto-battle (10 Hz ticks: Speed -> attack interval, Power ->
 damage, Health -> HP); a special meter charges and the owner presses SPECIAL to fire the pet's `Special` (Kind decides
 the effect). Client plays animations: lunges, hit flashes, damage numbers, special effects per Kind. Pet food (bought
 with Cash) feeds pets -> XP -> level -> `PetCatalog.GetStats(petId, level)`. Rewards: Cloud Tokens, trophies, rare Gems.

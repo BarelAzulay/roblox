@@ -366,6 +366,37 @@ Config.PetStats = {
 	RarityScale = { Common = 1, Uncommon = 1.5, Rare = 2.3, Epic = 3.5, Legendary = 5.5, Mythic = 8.5, Secret = 13 },
 }
 
+-- v3: pet elements (ARCHITECTURE_V3.md section 11). Every pet has one Element (fused hybrids can have two).
+-- The wheel: each element is strong against the next one and weak against the previous one:
+--   Water > Flame > Frost > Nature > Earth > Storm > Water
+-- and Celestial and Shadow are each strong against the other. Anything else is neutral.
+Config.Elements = {
+	Order = { "Water", "Flame", "Frost", "Nature", "Earth", "Storm", "Celestial", "Shadow" },
+	Info = {
+		Water = { Color = Color3.fromRGB(64, 148, 236), Blurb = "Douses Flame" },
+		Flame = { Color = Color3.fromRGB(240, 108, 56), Blurb = "Melts Frost" },
+		Frost = { Color = Color3.fromRGB(150, 222, 248), Blurb = "Freezes Nature" },
+		Nature = { Color = Color3.fromRGB(104, 190, 86), Blurb = "Roots crack Earth" },
+		Earth = { Color = Color3.fromRGB(178, 128, 80), Blurb = "Grounds Storm" },
+		Storm = { Color = Color3.fromRGB(110, 128, 255), Blurb = "Electrifies Water" },
+		Celestial = { Color = Color3.fromRGB(255, 212, 104), Blurb = "Shines through Shadow" },
+		Shadow = { Color = Color3.fromRGB(128, 72, 178), Blurb = "Swallows Celestial light" },
+	},
+	-- Strong[attacker] = the defender elements it deals extra damage to.
+	Strong = {
+		Water = { "Flame" },
+		Flame = { "Frost" },
+		Frost = { "Nature" },
+		Nature = { "Earth" },
+		Earth = { "Storm" },
+		Storm = { "Water" },
+		Celestial = { "Shadow" },
+		Shadow = { "Celestial" },
+	},
+	StrongMultiplier = 1.5, -- attacker strong against the defender
+	WeakMultiplier = 0.75, -- the defender's element is strong against the attacker
+}
+
 -- v3: 2D artwork the player uploaded to Roblox (decal/image ids). Used for Stormfang's Pet Index banner and the
 -- Storm Altar poster. The source files live in branding/ (stormfang-art.png has a transparent background).
 Config.Art = {
