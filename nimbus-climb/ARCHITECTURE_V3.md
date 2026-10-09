@@ -27,50 +27,54 @@ loads `SkyDragonController`, `IndexController`, `NpcController`, `TutorialContro
     a special-attack button; currencies = **Cash** (tycoon), **Cloud Tokens** (obby + battles, roulettes/items),
     **Gems** (Robux; buy roulettes cheaply in gems, and a gems-only **Secret** roulette). All art is built in code.
 
-## ART DIRECTION (decided by the player after the plan): blocky pixel / voxel style EVERYWHERE
+## ART DIRECTION (decided by the player after the plan): DETAILED voxel style everywhere
 **This section overrides sections 6, 7 and 8 wherever they mention smooth terrain, round parts or Ball shapes.**
-The player wants the whole game in a clean, high-quality **voxel ("pixel") style**, like Pet Simulator 99 cube pets
-and the blocky RollAnt-style world with studded surfaces. Everything is built from axis-aligned **cubes / boxes on a
-grid**: pets, NPC pets, tokens, trees, flowers, lamps, signs, decor, the sky dragon, the cloud islands and the ground.
-Why: on a grid every detail lines up exactly (eyes, mouths, ears can never look stuck on), one consistent style
-looks deliberate and polished, and blocky shapes read well at small sizes (Index tiles, hotbar).
+The player chose a voxel ("pixel") look for the whole game, and then clarified with a reference image: **NOT chunky /
+low-resolution blocks**, but the **detailed, fine-voxel MagicaVoxel style**: small voxels relative to the model
+(pets ~24-32 voxels tall), natural readable proportions, smooth-looking curves (curled horns, rounded heads, tapered
+legs), 2-3 shades per colour region for depth (lighter on top, darker underneath and in creases), fur patterns
+(stripes, spots, masks, bellies), carved eye sockets with a dark iris, a white highlight voxel and darker brows/lids,
+fine details (claws, beaks, nostrils, inner ears, feather/fur tufts). Cute and appealing (these are pets), but crafted.
 
-* **`shared/Voxel.lua` (new, owned by the pets agent)** — the shared voxel kit everyone uses:
+* **`shared/Voxel.lua` (new, owned by the pets agent)** — the voxel kit everyone uses. It SCULPTS models from signed
+  distance shapes instead of hand-typed voxels:
   ```lua
-  Voxel.Parse(layers, legend) -> grid          -- layers: list (bottom->top) of string rows; legend: char -> paletteKey
-  Voxel.Build(grid, opts) -> Model             -- opts: { VoxelSize = studs, Palette = {key -> Color3 | {Color, Material, Transparency}},
-                                               --   Anchored = true, Studs = false (top-surface studs), Name, PrimaryKey }
-  Voxel.Box(parent, cframe, size, color, material, props) -> Part   -- one block helper (Anchored, SmoothPlastic default)
-  Voxel.Merge(grid) -> { {min=Vector3int, max=Vector3int, key=paletteKey}, ... } -- greedy merge of same-key runs
+  Voxel.NewGrid(resolution)               -- e.g. 32 voxels per model height; grid keys are integer voxel coords
+  Voxel.Shape(grid, shape)                -- shape = { Kind = "Ellipsoid"|"Capsule"|"Box"|"RoundBox"|"Cone"|"Torus"|"Curve",
+                                          --   ...geometry in voxel units..., Key = paletteKey, Op = "Add"|"Carve"|"Paint",
+                                          --   Rotation = CFrame (optional), Pattern = optional fn(x,y,z)->paletteKey }
+  Voxel.Shade(grid, opts)                 -- assigns shade variants per voxel: <key>_Light on exposed tops, <key>_Dark
+                                          --   on undersides/creases (ambient-occlusion-like), deterministic
+  Voxel.Build(grid, opts) -> Model        -- opts: { VoxelSize = studs, Palette = {key -> Color3 | {Color, Material, Transparency}},
+                                          --   Anchored = true, Name, PrimaryKey, MaxParts = n }; 3D greedy merge of same-colour
+                                          --   voxels into box Parts; if over MaxParts, merges nearly-equal shades first (LOD)
+  Voxel.Merge(grid) -> boxes              -- the greedy merge used by Build
+  Voxel.Box(parent, cframe, size, color, material, props) -> Part   -- single block helper for world building
   ```
-  `Build` greedily merges runs of same-key voxels into larger box Parts (3D greedy meshing) so a 12x12x12 pet stays
-  around 40-90 parts. Parts: `Anchored`, `CanCollide/CanTouch/CanQuery` false unless the caller asks, `CastShadow`
-  false for small parts, Material SmoothPlastic (or the palette's material). No studs on pets; studs allowed on
-  world surfaces (`TopSurface = Enum.SurfaceType.Studs`).
-* **Pets (PetBuilder, pets agent):** rewrite every species as hand-designed voxel art (about 10-14 voxels tall,
-  Pet-Sim style: big cube head, small body, stubby feet), data-driven per species with palette keys mapped from
-  `Look` (Primary, Secondary, Eye, Blush, Accent, Wing...). Eyes are 2x2 or 2x3 dark voxels with a 1-voxel white
-  highlight, flush with the face; blush voxels; species features (ears, snout, beak, horns, tail) as voxels;
-  accessories voxel (crown, halo, leaf, mushroom, scarf, antlers, flower, horns); wings as voxel slabs per WingStyle,
-  grouped so Animate can flap them about a hinge. Rarity flair: Legendary+ subtle sparkle, Secret pets an aura of
-  floating voxels. **Same public API** (`Build/Animate/GetHeight`, `WingL/WingR`, Animate from the PrimaryPart, works in
-  ViewportFrames). Part budget after merging: <= ~90 per pet. The Cloudy Dragon: white/sky-blue voxel dragon, gold
-  voxel horns, cloud-puff voxel wings and tail tuft (it is the icon mascot: make it the best one).
-* **Tokens (TokenService/TokenFx):** a voxel coin (stepped round coin silhouette, gold with a lighter rim and a cloud
-  glyph in voxels on both faces) and a soft halo that moves with the coin; golden tokens bigger/brighter.
-* **World (world agent):** NO smooth terrain. Cloud islands = blocky voxel clouds (stacked rounded-ish voxel masses of
-  large cubes, e.g. 4-6 stud voxels, white/very light blue with slightly darker under-layers for depth, greedy-merged);
-  ground = tiled studded blocks (`TopSurface Studs`) with per-tile colour variation (grass in 3-4 close greens, path
-  tiles in sand/stone/wood plank colours, flower pixels), clear path borders, block trees (trunk + leafy cube
-  canopies in 2-3 greens, some blossom pink), blocky lamps/benches/fences/banners/fountains (water = translucent
-  blue blocks), bright cheerful colours (still not neon-blinding). The roulette machines, portals, shop and home plots
-  get the same blocky style. A soft `Clouds` sky object and `Atmosphere` may stay for the sky. Part budget for the
-  whole lobby after merging: <= ~5000 (prefer bigger blocks over many small ones; reuse colour variation sparingly).
-* **Sky Dragon (skydragon agent):** a voxel eastern dragon: each body segment a small voxel chunk (sage-green scale
-  voxels, cream belly voxels, a darker spine ridge), voxel head with gold horns, whiskers as thin block chains, voxel
-  cloud puffs trailing. Same flight/animation rules as section 7, <= ~220 parts.
-* **NPC pets** use PetBuilder (so they are voxel automatically) at Scale ~2.2 on blocky pedestals.
-* **UI** stays the chunky cloud UI (2D), with a subtle pixel accent (e.g. pixel-style corner notches) only if it looks good.
+  Shade variants: Palette may define `Fur`, `Fur_Light`, `Fur_Dark`; when a variant is missing, derive it from the base
+  colour (lighter/darker by ~10-15%). Parts: `Anchored`, `CanCollide/CanTouch/CanQuery` false unless asked,
+  `CastShadow` false for small parts, SmoothPlastic unless the palette says otherwise.
+* **Pets (PetBuilder, pets agent):** every species sculpted in this detailed voxel style (Cat, Dog, Fox, Bunny, Bear,
+  Panda, Dragon, Owl, Slime, Unicorn, Phoenix, Frog, Penguin, Axolotl), palettes from `Look` with shading and
+  species patterns, accessories and wings (per WingStyle) sculpted too; wings grouped for flapping. **Two levels of
+  detail:** `PetBuilder.Build(def, {Detail = "High"|"Low", Scale})`: High (default) for ViewportFrames (Index, menu),
+  podiums and NPCs, <= ~350 parts; Low for follower pets of other players / far away, <= ~120 parts.
+  `PetController` uses High for the local player's pets and Low for others (the petcontroller code is in client/
+  Controllers/PetController.lua: the pets agent may make this one-line LOD change there). Same public API otherwise
+  (`Build/Animate/GetHeight`, `WingL/WingR`, Animate from the PrimaryPart, works in ViewportFrames). Build results are
+  cached per (petId, detail) on the client and cloned, so opening the Index stays fast.
+* **Tokens:** a detailed voxel coin (round silhouette at fine resolution, gold with lighter rim and a cloud emblem in
+  relief) and a soft halo that moves with the coin; golden tokens bigger/brighter.
+* **World (world agent):** NO smooth terrain. Cloud islands = sculpted voxel clouds (puffy, soft, several shades of
+  white/very light blue, bigger voxels than pets, e.g. 2-3 studs, so part counts stay sane); ground = tiles with subtle
+  colour variation and clear stone/sand/wood paths; detailed voxel trees (sculpted canopies with shading), lamps,
+  benches, fences, banners, fountains (translucent blue water blocks), flower clusters; portals, roulette machines,
+  shop and home plots in the same crafted style. Cheerful colours, not blinding. Whole lobby <= ~6000 parts after
+  merging; build heavy decor once and reuse by `:Clone()`.
+* **Sky Dragon (skydragon agent):** a detailed voxel eastern Sage Dragon sculpted with the kit (segments, head with
+  horns/whiskers/mane), <= ~300 parts.
+* **NPC pets** use PetBuilder High detail at Scale ~2.2 on crafted voxel pedestals.
+* **UI** stays the chunky cloud UI (2D).
 
 ## Phases
 * **Phase 1 (this build):** items 1–9 + the data foundations phases 2/3 need (pet roles/stats/specials, secret pets,
