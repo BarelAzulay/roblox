@@ -151,7 +151,11 @@ Config.StageThemes = {
 }
 Config.Course = {
 	MaxRadius = 170, -- no step further than this (horizontal) from the start platform centre
-	Clearance = 8, -- min free headroom above any walkable top surface (no overhanging steps)
+	-- Min free headroom above any walkable top surface (no overhanging steps). A full jump needs
+	-- JumpHeight (~6.9, Config.Physics) + the character's height (~5.2) = ~12.1 studs of free air, so the
+	-- generator keeps the underside of anything overhanging at least Clearance + 0.3 above the top. Do not
+	-- lower this below ~12: an overhanging step would make a full jump bonk its head on it.
+	Clearance = 13,
 }
 
 -- Order here == order of portals around the lobby (easy -> hardest).
@@ -231,13 +235,13 @@ Config.Difficulties = {
 		TokensPerStage = 5,
 		TimeLimit = 1200,
 		Archetypes = { Zigzag = 2, Serpent = 2, Spiral = 4 },
-		Themes = { Beams = 3, Spin = 2, Vanish = 3, Lightning = 3, Storm = 3, Pendulum = 3, Wind = 3, Plates = 2, Cannon = 2, DashGap = 3, Gauntlet = 2 },
+		Themes = { Stones = 1, Beams = 3, Spin = 2, Vanish = 3, Lightning = 3, Storm = 3, Pendulum = 3, Wind = 3, Plates = 2, Cannon = 2, DashGap = 3, Gauntlet = 2 },
 	},
 	{
 		Id = "Saint",
 		DisplayName = "Saint",
 		Blurb = "Only the saintly finish. Tiny steps, relentless hazards.",
-		Color = Color3.fromRGB(226, 190, 96),
+		Color = Color3.fromRGB(150, 110, 220), -- violet: gold stays reserved for stars and tokens (Theme.World.Trim.Saint mirrors it)
 		Stars = 5,
 		Stages = 10,
 		StepsPerStage = { 7, 10 },
@@ -250,7 +254,7 @@ Config.Difficulties = {
 		TokensPerStage = 6,
 		TimeLimit = 1500,
 		Archetypes = { Spiral = 4, Serpent = 2, Zigzag = 2 },
-		Themes = { Beams = 3, Vanish = 3, Lightning = 3, Storm = 3, Pendulum = 3, Wind = 3, Plates = 2, Cannon = 2, DashGap = 4, Gauntlet = 4, Spin = 2 },
+		Themes = { Stones = 1, Beams = 3, Vanish = 3, Lightning = 3, Storm = 3, Pendulum = 3, Wind = 3, Plates = 2, Cannon = 2, DashGap = 4, Gauntlet = 4, Spin = 2 },
 	},
 }
 

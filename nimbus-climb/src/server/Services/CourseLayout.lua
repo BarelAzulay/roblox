@@ -71,8 +71,10 @@
 --   Variant = 1..4,            -- cosmetic seed for the builder (shape/puff variation); no gameplay meaning
 --   Headroom = number,         -- free height above Pos.Y that nothing of ANOTHER step may enter where footprints
 --                              --   overlap, and the maximum height of THIS step's own hazard geometry and decor.
---                              --   >= Config.Course.Clearance (8). Bounce = pad apex + 1; Storm 10.5; Lightning 12;
---                              --   Pendulum 11.5; Wind 10; CannonPad 9.
+--                              --   >= Config.Course.Clearance (13: a full jump needs JumpHeight 6.9 + the character's ~5.2).
+--                              --   Bounce = pad apex + 1; Start 18 and Finish 18 (their arches); Checkpoint 10.5 (flag);
+--                              --   Storm 10.5; Lightning 12; Pendulum 11.5; Wind 10; CannonPad 9; each raised to at least
+--                              --   Clearance.
 --   Hazard = table|nil,        -- per Kind below; nil for kinds without one
 --   Tokens = { Token, ... }|nil,
 --   DashHint = { From = i-1, Pos = Vector3, Dir = Vector3 }|nil,  -- DashGap and PlateBridge only: Pos is a spot on
@@ -165,7 +167,11 @@
 --            drop: rise >= -4 always.      Moving steps satisfy the gap limits over their whole slide.
 --   steps never closer than 2 studs (3D box distance) to any non-adjacent step; no step's underside within the lower
 --            step's Headroom above another walkable top where footprints overlap (<= 1 stud apart); steps i and j >= i+3
---            are never within 22 studs of each other unless j is more than 6 above i (no jump-skips)
+--            are never within 22 studs of each other unless j is out of jump reach of i: more than JumpHeight + 0.5 above
+--            it, or more than a Bounce pad's reach (its apex + 0.5 to 1.5) above it when i is a Bounce step (no jump-skips)
+--   jumps    free air above every Walk / Dash link: no other solid within 1 stud of the strip a jump flies through (the last
+--            4 studs of the take-off step, the gap, the first 3 studs of the landing step, 4 studs wide) may have its
+--            underside lower than Config.Course.Clearance + 0.3 above the take-off step's top
 --   every step within Config.Course.MaxRadius (horizontal, all corners and the whole slide) of the origin and no lower
 --            than origin.Y - 10; exactly diff.Stages checkpoints, the last one right before the Finish; every stage has
 --            StepsPerStage steps; sizes in range (see KINDS); hazards on platforms big enough (Pendulum/Wind >= 9)
@@ -202,11 +208,19 @@ local ROOT_H = 3 -- HumanoidRootPart height above the feet
 local SIZES = { Start = 26, Checkpoint = 16, Finish = 30 } -- fixed footprints (X and Z)
 local MAX_DROP = 4
 local SKIP_GAP = 22 -- no step j >= i + 3 may be closer than this (edge gap) to step i unless it is out of jump reach
-local SKIP_RISE = 6 -- ... "out of jump reach" = higher than this above step i
+local SKIP_RISE = PH.JumpHeight + 0.5 -- ... "out of jump reach" = higher than a full jump (6.89) plus a margin above step i;
+-- above a Bounce step i the limit is the pad's apex instead (see shortcutProblem)
+-- Height of the CourseBuilder decor standing on these steps (Start arch: StartBeam top 15.9, bunting 17.0; checkpoint flag
+-- pole + orb 9.9; Finish arch: FinishBeam top 17.8). Their Headroom keeps later steps from poking through the decor.
+local DECOR_HEAD = { Start = 18, Checkpoint = 10.5, Finish = 18 }
 local BODY_R, BODY_UP, BODY_DOWN = 1.5, 2.7, 3.0 -- player body used for cannon flight clearance
 local CENTRE_LIMIT = 142 -- the macro planner keeps step centres inside this radius (MaxRadius is checked on corners)
 local HEAD_CLEAR = 1.0 -- footprints closer than this count as "overlapping" for the headroom rule
 local LATERAL_NEED = 3 -- required overlap (studs) of two consecutive steps seen from the jump direction
+-- Jump corridor of a Walk / Dash link a -> b: the strip (CORRIDOR_HALF to each side of the line between the middles of the two
+-- steps) from CORRIDOR_BEFORE studs inside a's edge to CORRIDOR_AFTER studs inside b's edge. A full jump out of it needs free
+-- air up to Config.Course.Clearance (+ 0.3) above a's top, so no other solid within CORRIDOR_NEAR of the strip may hang lower.
+local CORRIDOR_BEFORE, CORRIDOR_AFTER, CORRIDOR_HALF, CORRIDOR_NEAR = 4, 3, 2, 1
 local MAX_PROBLEMS = 80
 
 local KINDS = {
@@ -1028,6 +1042,9 @@ local function hazardProblem(diff, step, g, prev, gPrev)
 	if not isNum(step.Headroom) or step.Headroom < Config.Course.Clearance - EPS then
 		return "Headroom is missing or below Config.Course.Clearance"
 	end
+	if DECOR_HEAD[kind] and step.Headroom < DECOR_HEAD[kind] - EPS then
+		return kind .. " Headroom must cover its decor (" .. DECOR_HEAD[kind] .. ")"
+	end
 	local minDim = minDimOf(step.Size)
 
 	if kind == "Moving" then
@@ -1386,7 +1403,12 @@ local function shortcutProblem(a, b)
 	if hi.owner - lo.owner < 3 then
 		return nil
 	end
-	if hi.g.top - lo.g.top > SKIP_RISE then
+	local reach = SKIP_RISE
+	if lo.g.kind == "Bounce" then
+		-- a pad launches to its apex; its Headroom is ceil(apex + 1), so Headroom - 0.5 is apex + 0.5 (up to 1.5 with the rounding)
+		reach = max(reach, lo.g.head - 0.5)
+	end
+	if hi.g.top - lo.g.top > reach then
 		return nil
 	end
 	local d = shapeDist(lo.g.hull, hi.g.hull, SKIP_GAP + 2)
@@ -1394,6 +1416,62 @@ local function shortcutProblem(a, b)
 		return string.format("steps %d and %d are only %.1f apart (jump-skip)", lo.owner, hi.owner, d)
 	end
 	return nil
+end
+
+-- distance from the middle of g's sweep to its edge along the horizontal unit vector (dx, dz)
+local function exitDistOf(g, dx, dz)
+	local lux = dx * g.c - dz * g.s
+	local luz = dx * g.s + dz * g.c
+	return min(g.hx / max(abs(lux), 1e-6), g.hz / max(abs(luz), 1e-6))
+end
+
+-- Jump corridor of the link from step `aIndex` (geometry ga) to step `bIndex` (gb): sample points (flat x,z array)
+local function makeCorridor(ga, aIndex, gb, bIndex)
+	local dx, dz = gb.mx - ga.mx, gb.mz - ga.mz
+	local D = hypot(dx, dz)
+	if D < 0.01 then
+		return nil
+	end
+	dx, dz = dx / D, dz / D
+	local t0 = max(0, exitDistOf(ga, dx, dz) - CORRIDOR_BEFORE)
+	local t1 = min(D, D - exitDistOf(gb, -dx, -dz) + CORRIDOR_AFTER)
+	local c = { a = aIndex, b = bIndex, top = ga.top, need = Config.Course.Clearance + 0.3, n = 0 }
+	local t = t0
+	while t <= t1 + 1e-6 do
+		for _, off in ipairs({ -CORRIDOR_HALF, 0, CORRIDOR_HALF }) do
+			c.n = c.n + 1
+			c[2 * c.n - 1], c[2 * c.n] = ga.mx + dx * t - dz * off, ga.mz + dz * t + dx * off
+		end
+		t = t + 1
+	end
+	return c
+end
+
+-- Does the solid `sol` hang in the free air a jump through corridor `c` needs? (a, b and their bridge parts never do)
+local function corridorBlocked(c, sol)
+	if sol.owner == c.a or sol.owner == c.b then
+		return false
+	end
+	local g = sol.g
+	if g.top <= c.top or g.bot >= c.top + c.need - EPS then
+		return false
+	end
+	local h = g.hull
+	for k = 1, c.n do
+		local x, z = c[2 * k - 1], c[2 * k]
+		if hypot(x - h.cx, z - h.cz) <= h.r + CORRIDOR_NEAR and pointDist(x, z, h) < CORRIDOR_NEAR then
+			return true
+		end
+	end
+	return false
+end
+
+-- the pieces runAttempt needs, in one table (a Lua 5.1 function may only capture 60 upvalues)
+local JUMPROOM = { Decor = DECOR_HEAD, MakeCorridor = makeCorridor, Blocked = corridorBlocked }
+
+local function corridorMessage(c, sol)
+	return string.format("%s %d hangs only %.1f studs above the jump from step %d to step %d (needs %.1f)", sol.tag, sol.owner,
+		sol.g.bot - c.top, c.a, c.b, c.need)
 end
 
 -- Does the arc of a cannon flight (samples) hit the solid? (pad and landing owners are skipped)
@@ -1875,6 +1953,7 @@ local function runAttempt(diff, tier, seed, attemptNo, dbg)
 	local maxRadius = Config.Course.MaxRadius
 
 	local steps, geos, heads, solids, arcs = {}, {}, {}, {}, {}
+	local corridors = {} -- jump corridors of the accepted Walk / Dash links
 	local bridgeCount = 0
 
 	local function note(reason)
@@ -2072,22 +2151,24 @@ local function runAttempt(diff, tier, seed, attemptNo, dbg)
 	----------------------------------------------------------------
 	-- solids / history
 	----------------------------------------------------------------
+	-- never below Config.Course.Clearance, whatever the hazard geometry itself needs
 	local function headOf(kind)
+		local h = JUMPROOM.Decor[kind] or 0
 		if kind == "Bounce" then
 			local p = byTier(TIER.BouncePower, tier)
-			return ceil(p * p / (2 * PH.Gravity) + 1)
+			h = ceil(p * p / (2 * PH.Gravity) + 1)
 		elseif kind == "StormPlatform" then
-			return 10.5
+			h = 10.5
 		elseif kind == "LightningPlatform" then
-			return 12
+			h = 12
 		elseif kind == "PendulumPlatform" then
-			return 11.5
+			h = 11.5
 		elseif kind == "WindPlatform" then
-			return 10
+			h = 10
 		elseif kind == "CannonPad" then
-			return 9
+			h = 9
 		end
-		return clearance
+		return max(clearance, h)
 	end
 
 	-- lowest top surface that keeps the headroom rule with every solid under/near the new footprint
@@ -2109,7 +2190,7 @@ local function runAttempt(diff, tier, seed, attemptNo, dbg)
 		return need
 	end
 
-	local function historyProblem(newSolids)
+	local function historyProblem(newSolids, newCorridor)
 		for _, ns in ipairs(newSolids) do
 			for _, es in ipairs(solids) do
 				if not solidsExempt(ns, es) then
@@ -2126,6 +2207,18 @@ local function runAttempt(diff, tier, seed, attemptNo, dbg)
 			for _, arc in ipairs(arcs) do
 				if arcProblem(arc.samples, arc.pad, arc.land, ns) then
 					return "blocks a cannon flight"
+				end
+			end
+			for _, c in ipairs(corridors) do
+				if JUMPROOM.Blocked(c, ns) then
+					return "hangs over an earlier jump"
+				end
+			end
+		end
+		if newCorridor then
+			for _, es in ipairs(solids) do
+				if JUMPROOM.Blocked(newCorridor, es) then
+					return "its jump runs under an earlier step"
 				end
 			end
 		end
@@ -2693,7 +2786,11 @@ local function runAttempt(diff, tier, seed, attemptNo, dbg)
 			end
 			newSolids[#newSolids + 1] = e
 		end
-		msg = historyProblem(newSolids)
+		local corridor = nil
+		if link == "Walk" or link == "Dash" then
+			corridor = JUMPROOM.MakeCorridor(gPrev, index - 1, g, index)
+		end
+		msg = historyProblem(newSolids, corridor)
 		if not msg and prev.Kind == "CannonPad" then
 			local samples = cannonArcSamples(prev.Hazard, prev.Pos.Y)
 			for _, s in ipairs(solids) do
@@ -2725,6 +2822,9 @@ local function runAttempt(diff, tier, seed, attemptNo, dbg)
 		steps[index], geos[index], heads[index] = step, g, heading
 		for _, s in ipairs(newSolids) do
 			solids[#solids + 1] = s
+		end
+		if corridor then
+			corridors[#corridors + 1] = corridor
 		end
 		if kind == "PlateBridge" then
 			bridgeCount = bridgeCount + 1
@@ -3027,7 +3127,7 @@ local function runAttempt(diff, tier, seed, attemptNo, dbg)
 	local startSize = SIZES.Start
 	local start = {
 		Index = 1, Stage = 0, Kind = "Start", Pos = Vector3.new(0, 0, 0), Size = Vector3.new(startSize, TH, startSize),
-		Yaw = heading0 % 360, Variant = I(1, 4), Headroom = clearance,
+		Yaw = heading0 % 360, Variant = I(1, 4), Headroom = headOf("Start"),
 	}
 	steps[1] = start
 	geos[1] = makeGeo(start)
@@ -3405,6 +3505,19 @@ function CourseLayout.ValidateLayout(layout)
 	for _, s in ipairs(solids) do
 		if s.tag ~= "step" and shapeRadius(s.g.hull) > maxRadius + EPS then
 			bad("%s of step %d reaches beyond the course radius", s.tag, s.owner)
+		end
+	end
+	-- jump corridors: a full jump of a Walk / Dash link must not bonk its head under another solid
+	for i = 2, n do
+		if steps[i].Link == "Walk" or steps[i].Link == "Dash" then
+			local c = makeCorridor(geos[i - 1], i - 1, geos[i], i)
+			if c then
+				for _, sol in ipairs(solids) do
+					if corridorBlocked(c, sol) then
+						bad("%s", corridorMessage(c, sol))
+					end
+				end
+			end
 		end
 	end
 

@@ -1,6 +1,12 @@
 -- TokenService: the cloud tokens. MakeTokenPart builds the visual (a glowing golden coin with a
--- little cloud puff on it), one shared Heartbeat driver spins and bobs every token near a player,
--- and Watch() turns tokens inside a match course into collectable pickups.
+-- little cloud puff on it), one shared Heartbeat driver gives the tokens right next to a player a
+-- cheap spin + bob (see "Shared animation driver" for what that costs), and Watch() turns tokens
+-- inside a match course into collectable pickups.
+--
+-- Animation cost: a server-side pose replicates to EVERY client (StreamingEnabled is off) and the
+-- clients do not interpolate it, so the server only poses what a player can actually see, slowly.
+-- If Config.Tokens.ClientAnimated is true the server does not animate at all and a client
+-- controller is expected to spin/bob the coins locally instead (that costs the network nothing).
 --
 -- v2: golden bonus tokens. MakeTokenPart(position, parent, value) with value >= Config.Tokens.GoldenValue
 -- builds a bigger (1.5x), paler-gold, brighter-sparkling coin with a flare disc and a glint star,
@@ -43,9 +49,9 @@ local RIM_DIAMETER = 3.6
 local RIM_THICKNESS = 0.4
 local HALO_DIAMETER = 5.2
 
-local ANIM_STEP = 1 / 30 -- the driver updates tokens at 30 Hz (replication cannot show more)
-local CULL_DISTANCE = 220 -- tokens farther than this from every player are left alone
-local PLAYER_REFRESH = 0.5 -- how often the driver re-reads player positions
+local ANIM_STEP = 1 / 15 -- the driver poses tokens at 15 Hz: a slow spin does not need more
+local CULL_DISTANCE = 65 -- tokens farther than this from every player are left alone (not even looked at)
+local PLAYER_REFRESH = 0.5 -- how often the driver re-reads player positions and re-picks the tokens to pose
 
 local PICKUP_POLL = 0.12 -- backup proximity poll inside Watch()
 local PICKUP_RADIUS = 3.2 -- studs from the character's root to the token centre
@@ -115,37 +121,76 @@ local BOB_SPEED = 2.2 -- radians per second of the up/down sine
 ----------------------------------------------------------------------
 -- Shared animation driver
 --   One Heartbeat connection for every token in the server. Each token gets an entry with its
---   base position and a random phase so neighbours never move in lockstep. Tokens that are
---   not in the workspace yet are skipped; tokens that were destroyed are dropped; tokens far
---   from every player are not touched at all (no CPU, no replication).
+--   base position and a random phase so neighbours never move in lockstep.
+--
+--   Cost model (why it is built like this): the coin is an anchored root plus welded pieces, and
+--   every pose is a CFrame write that replicates to every client, once per part of the moving
+--   assembly. A Saint course has ~95 tokens (~20 golden, ~620 parts). Posing every token (6 parts,
+--   golden 9) at 30 Hz was ~18k part updates per second for the whole server (measured on generated
+--   courses with the smoke mock). Now only tokens within CULL_DISTANCE of a player are posed, at
+--   15 Hz, and the aura (a sphere, so spinning never changes how it looks) is not part of the
+--   moving assembly (5 parts per coin, 8 per golden one): ~1.4k updates per second with one player
+--   on Saint, ~3.7k-4.2k with four (Easy: ~5k before, ~0.3k-1.9k now). The tokens that are not
+--   posed are only looked at every PLAYER_REFRESH seconds (that is when the short list of tokens
+--   to pose is rebuilt); the per-step work is a plain walk over that list.
+--
+--   Tokens that are not in the workspace yet wait; tokens that were destroyed are dropped.
+--   Config.Tokens.ClientAnimated = true switches the whole driver off (clients animate locally).
 ----------------------------------------------------------------------
+local SERVER_ANIMATION = Config.Tokens.ClientAnimated ~= true
+
 local animated = {} -- token part -> { base, lastPos, phase, parented, spin, bob }
+local active = {} -- array of the token parts near a player, rebuilt by refreshActive()
 local driverConnection = nil
 local nextStepAt = 0
 local nextRefreshAt = 0
-local playerPositions = {}
 local phaseRng = Random.new()
 local CULL_DISTANCE_SQ = CULL_DISTANCE * CULL_DISTANCE
 
-local function refreshPlayerPositions(now)
-	playerPositions = {}
+-- If something else moved the token (e.g. its course was pivoted), follow along instead of
+-- snapping it back to the old place.
+local function followExternalMove(token, rec)
+	local moved = token.Position - rec.lastPos
+	if moved:Dot(moved) > 0.0625 then
+		rec.base = rec.base + moved
+		rec.lastPos = rec.lastPos + moved
+	end
+end
+
+-- Re-read the player positions and rebuild `active`. Also forgets tokens that were in the world and
+-- are gone (destroyed, or their course folder was: that leaves Parent set, hence IsDescendantOf).
+local function refreshActive(now)
+	nextRefreshAt = now + PLAYER_REFRESH
+	local positions = {}
 	for _, player in ipairs(Players:GetPlayers()) do
 		local root = Util.GetRoot(player)
 		if root then
-			table.insert(playerPositions, root.Position)
+			positions[#positions + 1] = root.Position
 		end
 	end
-	nextRefreshAt = now + PLAYER_REFRESH
-end
 
-local function nearAnyPlayer(position)
-	for _, p in ipairs(playerPositions) do
-		local d = position - p
-		if d:Dot(d) <= CULL_DISTANCE_SQ then
-			return true
+	active = {}
+	for token, rec in pairs(animated) do
+		if token.Parent == nil or not token:IsDescendantOf(Workspace) then
+			-- Not in the world. Never-parented tokens just wait; one that WAS in the world and is gone
+			-- is forgotten so this table never keeps dead tokens alive.
+			if rec.parented then
+				animated[token] = nil
+			end
+		else
+			-- Welded pieces only follow the root once the token is in the workspace.
+			rec.parented = true
+			followExternalMove(token, rec)
+			local base = rec.base
+			for _, position in ipairs(positions) do
+				local d = base - position
+				if d:Dot(d) <= CULL_DISTANCE_SQ then
+					active[#active + 1] = token
+					break
+				end
+			end
 		end
 	end
-	return false
 end
 
 local function stepTokens()
@@ -153,43 +198,35 @@ local function stepTokens()
 	if now < nextStepAt then
 		return
 	end
-	nextStepAt = now + ANIM_STEP
+	-- steady cadence: schedule from the previous due time, so a frame that lands a hair early does not
+	-- cost a whole extra frame; after a hitch do not try to catch up
+	nextStepAt = nextStepAt + ANIM_STEP
+	if nextStepAt <= now then
+		nextStepAt = now + ANIM_STEP
+	end
 	if next(animated) == nil then
 		return
 	end
 	if now >= nextRefreshAt then
-		refreshPlayerPositions(now)
+		refreshActive(now)
 	end
 
-	for token, rec in pairs(animated) do
-		if token.Parent == nil or not token:IsDescendantOf(Workspace) then
-			-- Not in the world. Never-parented tokens just wait; one that WAS in the world and is gone
-			-- (destroyed, or its course folder was: that leaves Parent set) is forgotten so this table
-			-- never keeps dead tokens alive.
-			if rec.parented then
-				animated[token] = nil
-			end
-		else
-			-- Welded pieces only follow the root once the token is in the workspace.
-			rec.parented = true
-			local current = token.Position
-			local moved = current - rec.lastPos
-			if moved:Dot(moved) > 0.0625 then
-				-- something else (e.g. the course was pivoted) moved it: follow along
-				rec.base = rec.base + moved
-			end
-			if nearAnyPlayer(current) then
-				local bob = math.sin(now * BOB_SPEED + rec.phase) * rec.bob
-				local position = Vector3.new(rec.base.X, rec.base.Y + bob, rec.base.Z)
-				token.CFrame = CFrame.new(position) * CFrame.Angles(0, now * rec.spin + rec.phase, 0)
-				rec.lastPos = position
-			end
+	for i = 1, #active do
+		local token = active[i]
+		local rec = animated[token] -- nil once collected / forgotten since the last refresh
+		if rec and token.Parent ~= nil then
+			followExternalMove(token, rec)
+			local base = rec.base
+			local bob = math.sin(now * BOB_SPEED + rec.phase) * rec.bob
+			local position = Vector3.new(base.X, base.Y + bob, base.Z)
+			token.CFrame = CFrame.new(position) * CFrame.Angles(0, now * rec.spin + rec.phase, 0)
+			rec.lastPos = position
 		end
 	end
 end
 
 local function ensureDriver()
-	if driverConnection then
+	if driverConnection or not SERVER_ANIMATION then
 		return
 	end
 	driverConnection = RunService.Heartbeat:Connect(function()
@@ -209,7 +246,9 @@ end
 ----------------------------------------------------------------------
 -- A non-colliding decorative piece welded to the token root, positioned by `offset` (relative to
 -- the root). Welded children follow every CFrame change of the anchored root.
-local function addPiece(token, name, shape, size, offset, color, material, transparency)
+-- static = true: the piece is anchored and NOT welded, so it stays where it is when the root is posed
+-- (only for shapes that look the same whatever the coin does, e.g. the spherical aura).
+local function addPiece(token, name, shape, size, offset, color, material, transparency, static)
 	local piece = Instance.new("Part")
 	piece.Name = name
 	piece.Shape = shape
@@ -217,7 +256,7 @@ local function addPiece(token, name, shape, size, offset, color, material, trans
 	piece.Material = material
 	piece.Color = color
 	piece.Transparency = transparency or 0
-	piece.Anchored = false
+	piece.Anchored = static == true
 	piece.Massless = true
 	piece.CanCollide = false
 	piece.CanTouch = false
@@ -225,10 +264,12 @@ local function addPiece(token, name, shape, size, offset, color, material, trans
 	piece.CastShadow = false
 	piece.CFrame = token.CFrame * offset
 	piece.Parent = token
-	local weld = Instance.new("WeldConstraint")
-	weld.Part0 = token
-	weld.Part1 = piece
-	weld.Parent = piece
+	if not static then
+		local weld = Instance.new("WeldConstraint")
+		weld.Part0 = token
+		weld.Part1 = piece
+		weld.Parent = piece
+	end
 	return piece
 end
 
@@ -283,10 +324,12 @@ function TokenService.MakeTokenPart(position, parent, value)
 	addPiece(token, "PuffRight", Enum.PartType.Ball, Vector3.new(0.85 * s, 0.85 * s, 0.85 * s),
 		CFrame.new(0, -0.12 * s, 0.7 * s), look.puff, Enum.Material.SmoothPlastic, 0)
 
-	-- soft translucent aura so tokens read from far away
+	-- soft translucent aura so tokens read from far away. A sphere looks the same however the coin turns
+	-- and it is 2.6+ studs in radius against a 0.45-0.6 stud bob, so it stays put (static) instead of
+	-- being re-posed with the coin: one replicated part less per coin and per pose.
 	local haloSize = HALO_DIAMETER * look.haloScale * s
 	addPiece(token, "Halo", Enum.PartType.Ball, Vector3.new(haloSize, haloSize, haloSize),
-		CFrame.new(0, 0, 0), look.glow, Enum.Material.Neon, look.haloTransparency)
+		CFrame.new(0, 0, 0), look.glow, Enum.Material.Neon, look.haloTransparency, true)
 
 	if golden then
 		-- a big thin flare disc behind the coin and a four-point glint star across its face
@@ -335,14 +378,16 @@ function TokenService.MakeTokenPart(position, parent, value)
 	if golden then
 		CollectionService:AddTag(token, GOLDEN_TAG)
 	end
-	animated[token] = {
-		base = position,
-		lastPos = position,
-		phase = phase,
-		parented = false,
-		spin = look.spin,
-		bob = look.bob,
-	}
+	if SERVER_ANIMATION then
+		animated[token] = {
+			base = position,
+			lastPos = position,
+			phase = phase,
+			parented = false,
+			spin = look.spin,
+			bob = look.bob,
+		}
+	end
 	token.Parent = parent
 	return token
 end
@@ -437,9 +482,15 @@ local function playCollectEffect(token, effectParent, golden)
 	end
 
 	-- the coin itself: float up, fade every piece, dim the light, stop the sparkles
+	local lift = Vector3.new(0, golden and 4 or 3, 0)
 	for _, d in ipairs(token:GetDescendants()) do
 		if d:IsA("BasePart") then
-			Util.Tween(d, COLLECT_FADE, { Transparency = 1 }, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+			local goal = { Transparency = 1 }
+			if d.Anchored then
+				-- the unwelded aura does not follow the coin: lift it by hand
+				goal.CFrame = d.CFrame + lift
+			end
+			Util.Tween(d, COLLECT_FADE, goal, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
 		elseif d:IsA("PointLight") then
 			Util.Tween(d, COLLECT_FADE, { Brightness = 0 }, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
 		elseif d:IsA("ParticleEmitter") then
@@ -448,7 +499,7 @@ local function playCollectEffect(token, effectParent, golden)
 	end
 	Util.Tween(token, COLLECT_FADE, {
 		Transparency = 1,
-		CFrame = token.CFrame + Vector3.new(0, golden and 4 or 3, 0),
+		CFrame = token.CFrame + lift,
 	}, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 	Debris:AddItem(token, COLLECT_FADE + 0.15)
 end
@@ -613,7 +664,8 @@ function TokenService.Watch(container, matchHandle)
 	end
 end
 
--- Start the shared animation driver (also started lazily by MakeTokenPart). Idempotent.
+-- Start the shared animation driver (also started lazily by MakeTokenPart). Idempotent. Does nothing
+-- when Config.Tokens.ClientAnimated is true (the clients spin and bob the coins).
 function TokenService.Init()
 	ensureDriver()
 end

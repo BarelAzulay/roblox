@@ -9,7 +9,8 @@
 --   FRACTION (a half-health player stays at half health with the new maximum).
 -- * 0.5s lobby loop: players who fall off the lobby are sent back (no damage), the lobby keeps
 --   everybody at full health, and max health self-heals if it ever drifts from the perks.
--- * PlayerRemoving: save + cleanup.
+-- * PlayerRemoving: save + cleanup (DataService decides when the profile cache entry is released:
+--   never while the final save failed).
 --
 -- Public API (ARCHITECTURE.md + v2):
 --   Init(lobbyInfo)  SetSpawnProvider(fn)  SetPerkProvider(fn)  SetHomeProvider(fn)
@@ -353,7 +354,8 @@ local function setupPlayer(player)
 	-- Saved data. DataService.Load never errors; the pcall is belt and braces.
 	pcall(DataService.Load, player)
 	if not player.Parent then
-		-- Left while loading: PlayerRemoving may already have run its save, so free the cache.
+		-- Left while loading: PlayerRemoving may already have run its save, so ask DataService to free
+		-- the cache. Release is conditional (it keeps an entry that still holds unsaved progress).
 		if type(DataService.Release) == "function" then
 			pcall(DataService.Release, player)
 		end
@@ -376,10 +378,9 @@ local function onPlayerRemoving(player)
 			conn:Disconnect()
 		end
 	end
+	-- Save only. Freeing the profile cache entry is DataService's decision (its own PlayerRemoving
+	-- handler releases after ITS save): a failed final save must keep the entry for retries.
 	pcall(DataService.Save, player)
-	if type(DataService.Release) == "function" then
-		pcall(DataService.Release, player)
-	end
 end
 
 ----------------------------------------------------------------------

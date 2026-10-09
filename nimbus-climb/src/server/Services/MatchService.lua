@@ -19,6 +19,10 @@
 --   * MatchResult.Stars
 --   * courses are no longer a line toward +Z: all positions come from CourseInfo (StartCFrame,
 --     Checkpoints[i].SpawnCFrame, Finish part, KillY), so spirals / zigzags / any heading work
+--   * laps are stacked above each other (Spiral, overlapping lanes), so a missed jump often lands on a
+--     LOWER lap long before the KillY plane. Besides the KillY plane there is a per-player fall rule:
+--     a player who lands more than FALL_DROP studs below the last place they stood is treated exactly
+--     like a void fall (VoidDamage + back to the team checkpoint). See landedOnLowerLap().
 --
 -- Plain Lua 5.1-compatible syntax only.
 
@@ -49,6 +53,30 @@ local LAYOUT_ATTEMPTS = 4 -- tries to get a layout that passes ValidateLayout
 local TOKEN_TOAST_WINDOW = 0.6 -- pickups inside this window share one "+n cloud tokens" toast
 local PAD_BELOW = 2 -- studs below a pad's underside that still count as "on" it (poll fallback)
 local DEFAULT_KILL_DROP = 60 -- CourseInfo.KillY fallback: origin.Y - this
+
+-- Fall-to-a-lower-lap rule (stacked laps, see landedOnLowerLap). The numbers come from the layout rules:
+--   * a legitimate link never drops more than 4 studs (CourseLayout: "drop: rise >= -4 always", cannon
+--     landings >= -3 below the pad) and the poll samples every 0.25 s, so two links cannot fit between
+--     two samples: honest play never changes the standing height by more than ~4 per sample;
+--   * hazard geometry (storm cloud, pendulum, lightning rods ...) is at most 12 studs above its step;
+--   * two overlapping steps are always >= Config.Course.Clearance + 2 (step thickness) = 10 studs apart
+--     top to top; over ~5500 stacked step pairs of 300 generated courses the closest was 10.3 and only
+--     6 of them (0.1%) were closer than 12.
+-- So landing more than 12 studs below the last standing height is always a fall, never a link.
+local FALL_DROP = 12
+-- Ground probe: a standing root is ~3 studs over the floor (HipHeight 2 + half the root, up to ~4.5 on
+-- tall avatars). 6 studs reaches the floor under a standing player and the first metres of a jump, but
+-- not from the top of a full jump (~7 studs up, root ~10 over the floor).
+local GROUND_REACH = 6
+-- Vertical speeds (studs/s, downward) used to recognise a fall in progress. A standing player is at 0,
+-- a fall reaches 30 after 0.15 s and 60 after 0.3 s (gravity 196):
+--   * FALLING_SPEED: this fast is a fall even right above a floor (the player is about to land on it)
+--   * DESCENT_SPEED: any clear downward motion; with no floor under the root it also marks a fall.
+-- A poll in the air WITHOUT downward motion (jump apex, rising, or a position that was just moved) is
+-- ignored: it proves nothing about a fall and must not count as one.
+local FALLING_SPEED = 30
+local DESCENT_SPEED = 4
+local groundParams = nil -- RaycastParams, created on first use
 
 -- A player standing on a pad has the root ~3 studs over its top surface. Anything higher than the
 -- course headroom guarantee cannot be a player standing on the pad itself (it would be on a step
@@ -219,6 +247,14 @@ local function teleportTo(player, cf)
 		root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
 		root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
 	end)
+	-- a deliberate move (spawn, revive, void rescue, finish pad): forget where the player last stood, so
+	-- the new height is never mistaken for a fall from the old one (see landedOnLowerLap)
+	local match = playerMatch[player]
+	local rec = match and match.Recs and match.Recs[player]
+	if rec then
+		rec.LastGroundY = nil
+		rec.Airborne = false
+	end
 	return true
 end
 
@@ -665,6 +701,78 @@ local function handleVoid(match, player, wasDowned, finished)
 	end
 end
 
+-- Is the player standing on (or a step above) something solid? Humanoid.FloorMaterial answers that on
+-- the peer that simulates the character; this runs on the server, so a short ray down from the root
+-- backs it up and the rule keeps working even where the server never sees a floor material.
+-- CanCollide = false parts (tokens, storm / wind volumes, faded clouds) are ignored like physics does.
+local function isGrounded(hum, root)
+	local okFloor, floor = pcall(function()
+		return hum.FloorMaterial
+	end)
+	if okFloor and floor ~= nil and floor ~= Enum.Material.Air then
+		return true
+	end
+	local okRay, hit = pcall(function()
+		if not groundParams then
+			groundParams = RaycastParams.new()
+			groundParams.FilterType = Enum.RaycastFilterType.Exclude
+			groundParams.RespectCanCollide = true
+		end
+		groundParams.FilterDescendantsInstances = { root.Parent }
+		return Workspace:Raycast(root.Position, Vector3.new(0, -GROUND_REACH, 0), groundParams)
+	end)
+	return okRay and hit ~= nil
+end
+
+-- Laps are stacked: a missed jump on a Spiral (or any overlapping layout) usually lands on a lower lap
+-- 10-40 studs down, long before KillY, so the plane alone never punishes it and the player is stranded
+-- behind the team. Per player we remember the height they last stood at (rec.LastGroundY) and whether
+-- they have been in the air since (rec.Airborne). Touching ground again more than FALL_DROP studs below
+-- that height is a fall: this returns true ONCE, then the caller rescues the player (handleVoid /
+-- teleport), which also clears the memory.
+--   * only a settled poll (on the ground, not falling fast) is judged and may move the reference, so a
+--     cannon flight, bounce, dash or the last metres of a fall can neither trigger nor corrupt it; the
+--     legitimate landings after a launch are at most 4 studs below the take-off (see FALL_DROP)
+--   * a real fall always has a poll that is moving down in the air before the landing (>= 0.35 s in the
+--     air against a 0.25 s poll), so a position that merely jumps (teleport, respawn, lag) with no such
+--     poll in between is never read as a fall
+--   * the reference is the player's OWN last standing height, not the team checkpoint: stragglers on the
+--     previous stage can be ~15 studs below the new checkpoint and are not falling
+--   * a new character (respawn) and every teleportTo() start with a clean slate
+-- Call it only for live members who are neither downed nor finished.
+local function landedOnLowerLap(match, player, hum, root)
+	local rec = match.Recs[player]
+	if not rec then
+		return false
+	end
+	if rec.GroundRoot ~= root then
+		rec.GroundRoot = root
+		rec.LastGroundY = nil
+		rec.Airborne = false
+	end
+	local vy = numberOr(root.AssemblyLinearVelocity.Y, 0)
+	if vy < -FALLING_SPEED then
+		rec.Airborne = true
+		return false
+	end
+	if not isGrounded(hum, root) then
+		if vy < -DESCENT_SPEED then
+			rec.Airborne = true
+		end
+		return false
+	end
+	local y = root.Position.Y
+	local last = rec.LastGroundY
+	local flew = rec.Airborne == true
+	rec.Airborne = false
+	if flew and last and y < last - FALL_DROP then
+		rec.LastGroundY = nil
+		return true
+	end
+	rec.LastGroundY = y
+	return false
+end
+
 ----------------------------------------------------------------------
 -- Per-player hooks: character respawn + death
 ----------------------------------------------------------------------
@@ -995,6 +1103,12 @@ local function processPlayerPlaying(match, player)
 		return
 	end
 
+	-- missed jump onto a lower lap of a stacked course: same penalty as falling into the void
+	if landedOnLowerLap(match, player, hum, root) then
+		handleVoid(match, player, false, false)
+		return
+	end
+
 	-- checkpoints: highest unreached one the player is standing on
 	local pos = root.Position
 	for index = match.MaxCheckpoint, match.Checkpoint + 1, -1 do
@@ -1068,11 +1182,16 @@ local function tickEnded(match, t)
 		if isMember(match, player) then
 			callDep("DamageService", "GrantInvulnerability", player, 1)
 			local hum, root = getLive(player)
-			if hum and root and root.Position.Y < killY then
+			if hum and root then
 				-- no damage on the results screen, just bring them back
-				if match.Finished[player] then
-					teleportTo(player, finishCFrame(match))
-				else
+				if root.Position.Y < killY then
+					if match.Finished[player] then
+						teleportTo(player, finishCFrame(match))
+					else
+						teleportTo(player, jitterCFrame(teamSpawnCFrame(match), CHECKPOINT_SPREAD))
+					end
+				elseif not match.Finished[player] and not isDowned(player) and landedOnLowerLap(match, player, hum, root) then
+					-- missed jump onto a lower lap: same free rescue
 					teleportTo(player, jitterCFrame(teamSpawnCFrame(match), CHECKPOINT_SPREAD))
 				end
 			end

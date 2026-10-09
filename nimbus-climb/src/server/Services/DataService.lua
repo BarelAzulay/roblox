@@ -15,6 +15,12 @@
 --   * v1 saves ({Tokens = n} in Config.Tokens.LegacyDataStoreName) are migrated once: when the v2
 --     key is empty, the legacy key is read and its tokens become the starting balance. The legacy
 --     store is never written.
+--   * A leaving player's cache entry is only freed once the store holds everything it knows. If the
+--     final save failed (outage, throttling, lock timeout, failed load that cannot be recovered), the
+--     entry is kept as an "orphan": it is retried in the background with backoff, flushed by the
+--     autosave sweep (which walks the cache, not the player list) and by BindToClose, and a quick
+--     rejoin simply picks it up again. It is only dropped after a successful write or after
+--     ORPHAN_TIMEOUT seconds. DataService alone makes this decision (Release); callers just call it.
 --   * Extras beyond the documented API (used by PlayerService / PetService, harmless otherwise):
 --     Release(player), Init(), ComputePerks(equippedIds), signal ProfileRebased(player, profile).
 --
@@ -43,6 +49,9 @@ local RETRY_DELAY = 1.5 -- seconds between the two attempts of a read/write
 local MAX_COUNT = 1000000000 -- sanity cap for tokens and stats
 local MAX_KEY_LENGTH = 48
 local REQUEST_COOLDOWN = 0.5 -- RequestProfile rate limit (seconds per player)
+local ORPHAN_RETRY_FIRST = 10 -- seconds before the first background retry of an unsaved, departed profile
+local ORPHAN_RETRY_MAX = 120 -- the retry delay doubles up to this
+local ORPHAN_TIMEOUT = 1800 -- give up on (and drop) a departed profile that still cannot be saved after this long
 local IS_STUDIO = RunService:IsStudio()
 local STAT_KEYS = { "Matches", "Wins", "TokensEarned", "Spins" }
 
@@ -50,7 +59,9 @@ local STAT_KEYS = { "Matches", "Wins", "TokensEarned", "Spins" }
 --   Profile = live profile table (what every other module reads and mutates),
 --   Base = profile the store is known to contain (delta reference),
 --   Owner = the Player instance the entry was last announced to (a quick rejoin gets a new one),
---   Loaded, Loading, LoadFailed, Saving, Dirty, RecoveryScheduled = bool flags
+--   Loaded, Loading, LoadFailed, Saving, Dirty, RecoveryScheduled = bool flags,
+--   Orphan = true while the player is gone but the entry still holds unsaved progress,
+--   OrphanSince = os.clock() when it became an orphan, OrphanScheduled = a background retry loop runs
 -- }
 local cache = {}
 local store = nil
@@ -658,6 +669,9 @@ local function ensureEntry(userId)
 			Saving = false,
 			Dirty = false,
 			RecoveryScheduled = false,
+			Orphan = false,
+			OrphanSince = 0,
+			OrphanScheduled = false,
 		}
 		cache[userId] = entry
 	end
@@ -869,12 +883,9 @@ local function saveEntry(userId)
 	return result == true
 end
 
--- Saves one player (pcall-safe, retries once, silent when DataStores are unavailable).
-function DataService.Save(player)
-	if not player then
-		return false
-	end
-	local ok, result = pcall(saveEntry, player.UserId)
+-- pcall-safe save by user id (the player may be gone: orphaned entries are saved this way too).
+local function safeSave(userId)
+	local ok, result = pcall(saveEntry, userId)
 	if not ok then
 		if not IS_STUDIO then
 			warn("[DataService] Save errored: " .. tostring(result))
@@ -884,7 +895,67 @@ function DataService.Save(player)
 	return result == true
 end
 
--- Frees the cache entry after the final save. Skipped if the same user already rejoined.
+-- Saves one player (pcall-safe, retries once, silent when DataStores are unavailable).
+function DataService.Save(player)
+	if not player then
+		return false
+	end
+	return safeSave(player.UserId)
+end
+
+-- true when the store already holds everything the entry knows (nothing could be lost by dropping it).
+-- An unreadable comparison counts as "not clean": keeping data is always the safe direction.
+local function entryIsClean(entry)
+	local ok, empty = pcall(function()
+		return isEmptyDelta(diffProfiles(entry.Profile, entry.Base))
+	end)
+	return ok and empty == true
+end
+
+-- After a save attempt on a departed player's entry: drop it once it is safe (clean) or hopeless
+-- (store unusable, or unsaved for ORPHAN_TIMEOUT seconds). A rejoined player owns the entry again.
+local function settleOrphan(userId, entry)
+	if cache[userId] ~= entry or not entry.Orphan or Players:GetPlayerByUserId(userId) then
+		return
+	end
+	if entryIsClean(entry) then
+		cache[userId] = nil
+	elseif storeDisabled or os.clock() - entry.OrphanSince >= ORPHAN_TIMEOUT then
+		warn(string.format("[DataService] giving up on unsaved progress of user %s", tostring(userId)))
+		cache[userId] = nil
+	end
+end
+
+-- Background retry (with backoff) for a departed player's unsaved entry. One loop per entry; it ends
+-- when the entry is saved/dropped, the player rejoined (Load clears Orphan), or the server shuts down
+-- (BindToClose makes the last attempt).
+local function scheduleOrphanFlush(userId, entry)
+	if entry.OrphanScheduled or shuttingDown then
+		return
+	end
+	entry.OrphanScheduled = true
+	task.spawn(function()
+		local delay = ORPHAN_RETRY_FIRST
+		while true do
+			task.wait(delay)
+			delay = math.min(delay * 2, ORPHAN_RETRY_MAX)
+			if shuttingDown or cache[userId] ~= entry or not entry.Orphan then
+				break
+			end
+			safeSave(userId)
+			settleOrphan(userId, entry)
+			if cache[userId] ~= entry or not entry.Orphan then
+				break
+			end
+		end
+		entry.OrphanScheduled = false
+	end)
+end
+
+-- The player left: frees the cache entry, but ONLY when the store holds everything it knows. A failed
+-- final save (outage, throttling, lock timeout, a load that never succeeded) would otherwise throw away
+-- the only copy of the session's progress, so a dirty entry stays behind as an orphan and keeps being
+-- retried (see the header). Skipped if the same user already rejoined.
 function DataService.Release(player)
 	if not player then
 		return
@@ -894,8 +965,20 @@ function DataService.Release(player)
 	if current and current ~= player then
 		return
 	end
-	cache[userId] = nil
 	lastRequest[userId] = nil
+	local entry = cache[userId]
+	if not entry then
+		return
+	end
+	if storeDisabled or entryIsClean(entry) then
+		cache[userId] = nil -- nothing can be (or is left to be) saved
+		return
+	end
+	if not entry.Orphan then
+		entry.Orphan = true
+		entry.OrphanSince = os.clock()
+	end
+	scheduleOrphanFlush(userId, entry)
 end
 
 ----------------------------------------------------------------------
@@ -903,8 +986,9 @@ end
 ----------------------------------------------------------------------
 
 local function onPlayerRemoving(player)
-	-- PlayerService also saves + releases; doing it here as well means a missing call can never
-	-- lose data or leak the cache entry. Saving twice is a no-op (empty delta).
+	-- PlayerService also saves (it does not release: Release is decided here); doing it here as well
+	-- means a missing call can never lose data or leak the cache entry. Saving twice is a no-op
+	-- (empty delta). Release keeps the entry when this save failed, see DataService.Release.
 	task.spawn(function()
 		DataService.Save(player)
 		DataService.Release(player)
@@ -962,6 +1046,7 @@ function DataService.Load(player)
 	-- flight): the profile is current, but the NEW Player instance still needs its attributes.
 	if didLoad or entry.Owner ~= player then
 		entry.Owner = player
+		entry.Orphan = false -- the (re)joined player owns the entry again; the orphan retry loop stands down
 		pushToPlayer(player, entry.Profile.Tokens)
 		if entry.LoadFailed then
 			scheduleRecovery(player.UserId)
@@ -1122,12 +1207,24 @@ function DataService.StartAutosave()
 			if shuttingDown then
 				break
 			end
-			for _, player in ipairs(Players:GetPlayers()) do
+			-- Walk the cache, not Players:GetPlayers(): entries of players who already left but could
+			-- not be saved yet (orphans) must keep being flushed.
+			local userIds = {}
+			for userId in pairs(cache) do
+				table.insert(userIds, userId)
+			end
+			for _, userId in ipairs(userIds) do
 				if shuttingDown then
 					break
 				end
-				DataService.Save(player)
-				task.wait(0.25) -- spread requests out to stay inside the DataStore budget
+				local entry = cache[userId]
+				if entry then
+					safeSave(userId)
+					if entry.Orphan then
+						settleOrphan(userId, entry)
+					end
+					task.wait(0.25) -- spread requests out to stay inside the DataStore budget
+				end
 			end
 		end
 	end)

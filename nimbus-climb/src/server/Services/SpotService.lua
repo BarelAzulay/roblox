@@ -8,7 +8,13 @@
 --   pets / tokens change); unowned spots read "Free spot" / "Step in to claim".
 -- * Showcase podium: a slowly turning + bobbing PetBuilder model of the owner's best (highest
 --   rarity) pet with a small name / rarity tag. It is rebuilt only when that pet changes and is
---   only animated while a player is nearby (server-side animation replicates every part).
+--   only moved while a player is nearby.
+--   Replication cost: a server-moved Anchored part replicates every CFrame change, and a pet has
+--   up to ~70 parts. So the podium pet is ONE Anchored root (the PrimaryPart) with every other
+--   part welded to it and unanchored: a spin / bob step is a single CFrame write on the root (the
+--   welded parts follow on every client by themselves), at most 10 times a second, and only for
+--   showcases with a player within CULL_RADIUS. PetBuilder.Animate is NOT used here (it would
+--   write every part, and it cannot be used on a welded assembly): the pet keeps its rest pose.
 -- * Remotes.GoToSpot -> Teleport (rate limited, refused during a match).
 --
 -- Public API: Init(lobbyInfo, deps)  GetSpot(player) -> SpotInfo|nil  Teleport(player) -> boolean
@@ -40,8 +46,8 @@ local HOVER_HEIGHT = 1.5 -- studs between the podium top and the pet's lowest po
 local BOB_HEIGHT = 0.35 -- studs, +/-
 local BOB_SPEED = 2.2 -- rad/s
 local SPIN_SPEED = 0.55 -- rad/s
-local ANIM_STEP = 0.05 -- seconds between server-side animation updates (20 Hz)
-local CULL_RADIUS = 120 -- animate a showcase only while a player is this close
+local ANIM_STEP = 0.1 -- seconds between server-side motion updates (10 Hz, ONE root CFrame write each)
+local CULL_RADIUS = 55 -- move a showcase only while a player is this close (a bit more than the spot island)
 local CULL_INTERVAL = 0.5 -- seconds between proximity checks
 local REFRESH_INTERVAL = 1 -- seconds between profile signature checks
 local PROFILE_WAIT = 20 -- give up waiting for a profile after this many seconds
@@ -266,11 +272,12 @@ local function makeShow(index)
 		Index = index,
 		PetId = nil,
 		Model = nil,
+		Root = nil, -- the ONLY anchored part of the model (its PrimaryPart); the rest is welded to it
+		RootFromPivot = nil, -- model pivot -> Root offset (identity unless the root has a PivotOffset)
 		Rest = nil, -- pivot position when the pet is at the centre of its bob
 		Rot = nil, -- rotation-only CFrame the spin is applied on top of
 		Phase = (index * 1.37) % (math.pi * 2),
 		Active = false,
-		AnimBroken = false,
 		Tag = nil,
 	}
 	local ok, tag = pcall(buildTag, info)
@@ -289,10 +296,56 @@ local function clearShowModel(show)
 		end)
 		show.Model = nil
 	end
+	show.Root = nil
+	show.RootFromPivot = nil
 	show.Active = false
 	if show.Tag and show.Tag.Gui then
 		show.Tag.Gui.Enabled = false
 	end
+end
+
+-- Makes the model's PrimaryPart (or its "Body", or any part) the only Anchored part: every other part gets
+-- a Weld to it (C0 = the current offset, so nothing shifts) and is unanchored. Returns the root, or nil
+-- when the model has no part at all. Call it with the model already in its final pose.
+local function weldToRoot(model)
+	local root = nil
+	if model:IsA("Model") then
+		root = model.PrimaryPart
+	end
+	if not root or not root:IsA("BasePart") then
+		root = model:FindFirstChild("Body")
+	end
+	if not root or not root:IsA("BasePart") then
+		root = nil
+		for _, inst in ipairs(model:GetDescendants()) do
+			if inst:IsA("BasePart") then
+				root = inst
+				break
+			end
+		end
+	end
+	if not root then
+		return nil
+	end
+	if model:IsA("Model") and model.PrimaryPart ~= root then
+		model.PrimaryPart = root
+	end
+
+	local rootInverse = root.CFrame:Inverse()
+	for _, inst in ipairs(model:GetDescendants()) do
+		if inst:IsA("BasePart") and inst ~= root then
+			local weld = Instance.new("Weld")
+			weld.Name = "ShowcaseWeld"
+			weld.Part0 = root
+			weld.Part1 = inst
+			weld.C0 = rootInverse * inst.CFrame
+			weld.C1 = CFrame.new()
+			weld.Parent = inst
+			inst.Anchored = false
+		end
+	end
+	root.Anchored = true
+	return root
 end
 
 -- Builds + places the podium pet. petId may be nil (podium stays empty).
@@ -359,9 +412,15 @@ local function setShowcasePet(index, petId)
 	show.Rest = podium.Position + Vector3.new(0, HOVER_HEIGHT + bottomOffset, 0)
 	show.Rot = podium - podium.Position
 	show.Model = model
-	show.AnimBroken = false
 	model.Name = "ShowcasePet"
 	model:PivotTo(CFrame.new(show.Rest) * show.Rot)
+
+	-- One anchored root, everything else welded to it (see the header): the spin / bob is one CFrame write.
+	local root = weldToRoot(model)
+	if root then
+		show.Root = root
+		show.RootFromPivot = model:GetPivot():Inverse() * root.CFrame
+	end
 	model.Parent = info.Folder or workspace
 
 	-- Tag: name + rarity, floating above the highest point of the bob.
@@ -377,28 +436,17 @@ local function setShowcasePet(index, petId)
 	end
 end
 
--- One animation update for a showcase at time t.
+-- One motion update for a showcase at time t: exactly ONE CFrame write (the anchored root); the welded
+-- parts follow it. (Never PivotTo / PetBuilder.Animate here: those write every part.)
 local function animateShow(show, t)
-	local model = show.Model
-	if not model or not model.Parent or not show.Rest then
+	local root = show.Root
+	if not root or not root.Parent or not show.Rest then
 		return
 	end
 	local bob = math.sin(t * BOB_SPEED + show.Phase) * BOB_HEIGHT
 	local spin = t * SPIN_SPEED + show.Phase
-	model:PivotTo(CFrame.new(show.Rest + Vector3.new(0, bob, 0)) * show.Rot * CFrame.Angles(0, spin, 0))
-
-	if not show.AnimBroken then
-		local builder = loadShared("PetBuilder")
-		if builder and type(builder.Animate) == "function" then
-			local ok, err = pcall(builder.Animate, model, t, { Flap = 0.8, Excited = 0.15 })
-			if not ok then
-				show.AnimBroken = true
-				warn("[SpotService] PetBuilder.Animate failed: " .. tostring(err))
-			end
-		else
-			show.AnimBroken = true
-		end
-	end
+	root.CFrame = CFrame.new(show.Rest + Vector3.new(0, bob, 0)) * show.Rot * CFrame.Angles(0, spin, 0)
+		* show.RootFromPivot
 end
 
 -- Marks each showcase active when some player is within CULL_RADIUS of its podium.

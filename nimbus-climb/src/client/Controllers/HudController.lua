@@ -12,6 +12,10 @@
 --   bottom-left   Vitals: heart badge + health bar (damage trail, low-health pulse, DOWNED state),
 --                 stamina bar and a dash-ready pip. Raised on touch devices to clear the thumbstick.
 --
+-- The menu column (MenuController, left-centre, drawn above the HUD) is never covered: when the vitals or the
+-- top-left panels would reach it on a short screen they move to its right (applyMargins).
+-- Touch devices get bigger text and hit targets in the match / party panels (panelMetrics).
+--
 -- Every panel is a fixed-size design in "design pixels" with a UIScale (viewport / 1280x720) so the HUD
 -- reads well from phones to 4K. The UIScale sits on the panel, the margins on full-screen holder frames
 -- (UIPadding), so scaling never moves a panel away from its corner.
@@ -25,6 +29,7 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local StarterGui = game:GetService("StarterGui")
+local GuiService = game:GetService("GuiService")
 local UserInputService = game:GetService("UserInputService")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
@@ -57,9 +62,25 @@ local TOUCH_RAISE_SMALL = 150 -- how far the vitals are lifted on phones (thumbs
 local TOUCH_RAISE_LARGE = 220 -- ... and on tablets
 
 local VITALS_W, VITALS_H = 300, 54
+local VITALS_MIN_W = 220 -- narrowest the vitals get squeezed on a small phone (see applyMargins)
+local NOTICE_H = 24 -- the DOWNED notice sits this far above the vitals
 local PILL_W, PILL_H = 214, 44
 local PANEL_W = 270 -- match + party panels
 local TITLE_W, TITLE_H = 236, 58
+local CHIP_H, ROW_PITCH = 22, 24 -- team chip height and the distance between two chip rows
+
+-- KEEP IN SYNC with MenuController.lua (COL_W, BTN, CAPTION_H, COMPACT_BELOW, the 0.72..1.2 column scale, the
+-- 5 buttons, the 6 px gap). The left-centre menu column has display order 20, so it is drawn ABOVE this HUD:
+-- whatever of ours would run into it (vitals, top-left panels) steps aside to its right (see applyMargins).
+local MENU_COL_W, MENU_BTN, MENU_CAPTION_H, MENU_GAP = 68, 56, 18, 6
+local MENU_BUTTONS = 5
+local MENU_COMPACT_BELOW = 560 -- gui height under which the menu captions are hidden
+local MENU_MIN_SCALE, MENU_MAX_SCALE = 0.72, 1.2
+local MENU_CLEARANCE = 8 -- empty strip kept between the column and whatever steps aside for it
+local SPAN_MARGIN = 4 -- two vertical spans closer than this count as touching
+-- KEEP IN SYNC with MovementController.lua: on a small phone its DASH button starts 113 px from the right edge.
+local DASH_CLEAR = 113 + 8
+local SMALL_PHONE = 500 -- Roblox's own touch controls shrink when the smaller screen side is at most this
 
 local LOW_HEALTH = 0.3 -- below this the heart pulses
 local TITLE_CARD_SECONDS = 4
@@ -85,6 +106,9 @@ local warned = {}
 local remoteCache = {}
 local scalers = {} -- UIScale objects driven by the viewport size
 local pads = {} -- UIPadding objects of the corner holders
+local padTweens = {} -- running PaddingLeft tween per holder
+local padGoals = {} -- last PaddingLeft requested per holder
+local M = nil -- layout metrics of the match / party panels, see panelMetrics()
 local movementModule = nil
 local movementNextTry = 0
 
@@ -279,27 +303,126 @@ local function newHolder(gui, name)
 	return holder
 end
 
--- Re-apply the screen margins (touch devices get larger side margins and a raised bottom-left corner).
-local function applyMargins()
+-- The area GUIs with IgnoreGuiInset = false are laid out in (below the top bar). This is the very number
+-- MenuController measures its column against, so the two always agree.
+local function guiAreaSize()
+	local size = UI.Gui and UI.Gui.AbsoluteSize
+	if size and size.X >= 2 and size.Y >= 2 then
+		return size
+	end
+	local vp = viewportSize()
+	local inset = 0
+	pcall(function()
+		inset = GuiService:GetGuiInset().Y
+	end)
+	return Vector2.new(vp.X, math.max(2, vp.Y - inset))
+end
+
+-- Footprint of MenuController's column in gui pixels: it spans y = Top..Bottom against the left edge, and a
+-- panel that has to step aside starts `Clear` pixels (column width + gap + a little air) further right.
+local function menuColumn(area)
+	local scale = Util.Clamp(math.min(area.X / REF_W, area.Y / REF_H), MENU_MIN_SCALE, MENU_MAX_SCALE)
+	local entry = MENU_BTN
+	if area.Y >= MENU_COMPACT_BELOW then
+		entry = entry + MENU_CAPTION_H
+	end
+	local height = (MENU_BUTTONS * entry + (MENU_BUTTONS - 1) * MENU_GAP) * scale
+	return {
+		Top = (area.Y - height) / 2,
+		Bottom = (area.Y + height) / 2,
+		Clear = (MENU_COL_W + MENU_GAP) * scale + MENU_CLEARANCE,
+	}
+end
+
+-- Design height of whatever currently occupies the top-left slot (0 while nothing does).
+local function topLeftHeight()
+	local h = 0
+	if Items.Match and Items.Match.Shown and UI.Match then
+		h = math.max(h, UI.Match.Root.Size.Y.Offset)
+	end
+	if Items.Party and Items.Party.Shown and UI.Party then
+		h = math.max(h, UI.Party.Root.Size.Y.Offset)
+	end
+	if Items.Title and Items.Title.Shown then
+		h = math.max(h, TITLE_H)
+	end
+	return h
+end
+
+-- Sets one corner holder's margins. The left margin eases to its new value when `animate` is set (a panel that
+-- is showing grows a row and must not hop sideways); everything else snaps.
+local function setPadding(name, left, top, right, bottom, animate)
+	local pad = pads[name]
+	if not pad then
+		return
+	end
+	pad.PaddingTop = UDim.new(0, top)
+	pad.PaddingRight = UDim.new(0, right)
+	pad.PaddingBottom = UDim.new(0, bottom)
+	if padGoals[name] == left then
+		return -- already there, or already easing there (MatchState calls this at 2 Hz)
+	end
+	padGoals[name] = left
+	local running = padTweens[name]
+	if running then
+		running:Cancel()
+		padTweens[name] = nil
+	end
+	local goal = UDim.new(0, left)
+	if animate and math.abs(pad.PaddingLeft.Offset - left) > 0.5 then
+		padTweens[name] = tween(pad, 0.25, { PaddingLeft = goal })
+	else
+		pad.PaddingLeft = goal
+	end
+end
+
+-- Re-apply the screen margins. Touch devices get larger side margins and a raised bottom-left corner.
+-- On short screens the menu column (left-centre, drawn above us) reaches into both left corners; the vitals
+-- and the top-left panels then start to its right instead of underneath it:
+--   * phone landscape 844x390: column y 56-276, vitals y 144-182, top-left panels y 10-125;
+--   * tablet 1024x768: column y 197-512, vitals y 447-490;
+--   * small portrait phone 375x667: column y 163-447, vitals y 421-459.
+-- `animate` eases the top-left shift (used when a panel appears or changes height).
+local function applyMargins(animate)
 	local touch = isTouchDevice()
 	local side = touch and TOUCH_EDGE or EDGE
 	local vp = viewportSize()
+	local k = currentScale()
+	local area = guiAreaSize()
+	local column = menuColumn(area)
 	local raise = EDGE
 	if touch then
-		raise = (math.min(vp.X, vp.Y) <= 500) and TOUCH_RAISE_SMALL or TOUCH_RAISE_LARGE
+		raise = (math.min(vp.X, vp.Y) <= SMALL_PHONE) and TOUCH_RAISE_SMALL or TOUCH_RAISE_LARGE
 	end
-	local function set(name, left, top, right, bottom)
-		local pad = pads[name]
-		if pad then
-			pad.PaddingLeft = UDim.new(0, left)
-			pad.PaddingTop = UDim.new(0, top)
-			pad.PaddingRight = UDim.new(0, right)
-			pad.PaddingBottom = UDim.new(0, bottom)
+
+	-- vitals (bottom-left), including the DOWNED notice above them
+	local vitalsLeft = side
+	local vitalsW = VITALS_W
+	local vitalsBottom = area.Y - raise
+	local vitalsTop = vitalsBottom - (VITALS_H + NOTICE_H) * k
+	if vitalsTop < column.Bottom + SPAN_MARGIN and vitalsBottom > column.Top - SPAN_MARGIN then
+		vitalsLeft = side + column.Clear
+		if touch and math.min(vp.X, vp.Y) <= SMALL_PHONE then
+			-- a narrow portrait phone has little room right of the column: shorten the bars so the dash pip
+			-- (their right end) stays left of MovementController's DASH button
+			local room = (vp.X - DASH_CLEAR) - vitalsLeft
+			vitalsW = Util.Clamp(math.floor(room / k), VITALS_MIN_W, VITALS_W)
 		end
 	end
-	set("TopLeft", side, EDGE, 0, 0)
-	set("TopRight", 0, EDGE, side, 0)
-	set("BottomLeft", side, 0, 0, raise)
+	if UI.Vitals then
+		UI.Vitals.Size = UDim2.fromOffset(vitalsW, VITALS_H)
+	end
+
+	-- top-left panels
+	local topLeft = side
+	local topH = topLeftHeight()
+	if topH > 0 and EDGE + topH * k + SPAN_MARGIN > column.Top then
+		topLeft = side + column.Clear
+	end
+
+	setPadding("TopLeft", topLeft, EDGE, 0, 0, animate)
+	setPadding("TopRight", 0, EDGE, side, 0)
+	setPadding("BottomLeft", vitalsLeft, 0, 0, raise)
 end
 
 local function relayout()
@@ -313,6 +436,33 @@ local function relayout()
 		end
 	end
 	applyMargins()
+end
+
+-- Layout numbers of the match / party panels (design px). Touch devices get bigger text and hit targets: the
+-- panels are drawn at no more than 0.7 on a phone, so 14 / 13 px text ends up at about 9 px. Chosen once, when the
+-- HUD is built, because the panels are built from them. The panels may only grow a little: on a 667x375 phone
+-- only ~129 px are left above the raised vitals and a 4-player match panel needs ~125 of them (it needed 120
+-- before the taller checkpoint bar). So the bigger Leave button overlaps the token line's old spot instead of
+-- adding a row: the token line moves left of it.
+local function panelMetrics(touch)
+	local m = {
+		LeaveW = 66, LeaveH = 22, LeaveText = 14, -- "Leave" buttons
+		CpH = 14, CpText = nil, -- checkpoint bar height and label size (nil: the bar picks)
+		NameText = 13, -- team chip names
+		TokensInset = 0, -- how far the "7/24" token line stays clear of the right edge
+		PartyTeamY = 28,
+	}
+	if touch then
+		m.LeaveW, m.LeaveH, m.LeaveText = 72, 32, 16
+		m.CpH, m.CpText = 20, 14
+		m.NameText = 15
+		m.TokensInset = m.LeaveW + 6 -- the taller Leave button owns the top-right corner
+		m.PartyTeamY = 36
+	end
+	m.TeamY = 52 + m.CpH + 4
+	m.MatchBaseH = m.TeamY + 40 -- 34 frame insets + 8 margins + rows
+	m.PartyBaseH = m.PartyTeamY + 68
+	return m
 end
 
 ----------------------------------------------------------------------
@@ -531,13 +681,13 @@ local function newChip(parent, index, withHealth)
 	local frame = newFrame(parent, "Chip" .. tostring(index), {
 		BackgroundTransparency = 0.25,
 		BackgroundColor3 = Colors.Ink,
-		Size = UDim2.fromOffset(100, 22),
+		Size = UDim2.fromOffset(100, CHIP_H),
 		LayoutOrder = index,
 		Visible = false,
 	})
 	Theme.Corner(frame, UDim.new(0, 8))
 	local stroke = Theme.Stroke(frame, Colors.PanelLight, 1.5, 0.35)
-	local name = newText(frame, "Name", "", "Body", 13, WHITE, {
+	local name = newText(frame, "Name", "", "Body", M.NameText, WHITE, {
 		Position = UDim2.new(0, 7, 0, 0),
 		Size = UDim2.new(1, -30, 1, withHealth and -4 or 0),
 		TextTruncate = Enum.TextTruncate.AtEnd,
@@ -546,7 +696,7 @@ local function newChip(parent, index, withHealth)
 	local state = newText(frame, "State", "", "Heading", 13, WHITE, {
 		AnchorPoint = Vector2.new(1, 0),
 		Position = UDim2.new(1, -6, 0, 0),
-		Size = UDim2.fromOffset(20, withHealth and 18 or 22),
+		Size = UDim2.fromOffset(20, withHealth and (CHIP_H - 4) or CHIP_H),
 		TextXAlignment = Enum.TextXAlignment.Right,
 	})
 	local fill = nil
@@ -578,8 +728,8 @@ local function layoutChips(chips, count, width)
 		if i <= count then
 			local col = (i - 1) % cols
 			local row = math.floor((i - 1) / cols)
-			chip.Frame.Position = UDim2.fromOffset(col * (cellW + gap), row * 24)
-			chip.Frame.Size = UDim2.fromOffset(cellW, 22)
+			chip.Frame.Position = UDim2.fromOffset(col * (cellW + gap), row * ROW_PITCH)
+			chip.Frame.Size = UDim2.fromOffset(cellW, CHIP_H)
 			chip.Frame.Visible = true
 		else
 			chip.Frame.Visible = false
@@ -591,13 +741,11 @@ end
 ----------------------------------------------------------------------
 -- Build: match panel (top-left)
 ----------------------------------------------------------------------
-local MATCH_BASE_H = 110 -- panel height without team rows (34 frame insets + 8 margins + 68 rows)
-local PARTY_BASE_H = 96
-
+-- Panel heights without team rows are M.MatchBaseH / M.PartyBaseH (110 / 96 on desktop), see panelMetrics().
 local function buildMatch(holder)
 	local panel = CloudUI.Panel({
 		Name = "MatchPanel",
-		Size = UDim2.fromOffset(PANEL_W, MATCH_BASE_H + 24),
+		Size = UDim2.fromOffset(PANEL_W, M.MatchBaseH + ROW_PITCH),
 		Accent = Colors.Stamina,
 		Parent = holder,
 	})
@@ -614,7 +762,7 @@ local function buildMatch(holder)
 
 	-- row A: difficulty (+ stars) and the Leave button
 	UI.MatchTitle = newText(inner, "Difficulty", "", "Title", 19, WHITE, {
-		Size = UDim2.new(1, -74, 0, 22),
+		Size = UDim2.new(1, -(M.LeaveW + 8), 0, 22),
 		RichText = true,
 		TextTruncate = Enum.TextTruncate.AtEnd,
 		Stroke = 0.2,
@@ -623,10 +771,10 @@ local function buildMatch(holder)
 		Name = "LeaveMatch",
 		Text = "Leave",
 		Style = "Pink",
-		TextSize = 14,
-		Size = UDim2.fromOffset(66, 22),
+		TextSize = M.LeaveText,
+		Size = UDim2.fromOffset(M.LeaveW, M.LeaveH),
 		AnchorPoint = Vector2.new(0.5, 0.5),
-		Position = UDim2.new(1, -33, 0, 11),
+		Position = UDim2.new(1, -M.LeaveW / 2, 0, M.LeaveH / 2),
 		Callback = function(button)
 			HudController._onLeaveMatch(button)
 		end,
@@ -643,7 +791,7 @@ local function buildMatch(holder)
 	UI.TimerScale = newScale(UI.Timer, 1)
 	UI.MatchTokens = newText(inner, "Tokens", "", "Toast", 16, Colors.TokenGlow, {
 		AnchorPoint = Vector2.new(1, 0.5),
-		Position = UDim2.new(1, 0, 0, 36),
+		Position = UDim2.new(1, -M.TokensInset, 0, 36),
 		Size = UDim2.new(0.52, 0, 0, 28),
 		TextXAlignment = Enum.TextXAlignment.Right,
 		Stroke = 0.2,
@@ -653,18 +801,21 @@ local function buildMatch(holder)
 	-- checkpoint progress
 	UI.CpBar = CloudUI.Bar({
 		Name = "CheckpointBar",
-		Height = 14,
+		Height = M.CpH,
 		Color = Colors.Stamina,
 		Label = "Checkpoint 0/0",
 		Position = UDim2.fromOffset(0, 52),
-		Size = UDim2.new(1, 0, 0, 14),
+		Size = UDim2.new(1, 0, 0, M.CpH),
 		Parent = inner,
 	})
+	if M.CpText and UI.CpBar.Label then
+		UI.CpBar.Label.TextSize = M.CpText -- the bar's own pick (height - 8, at least 11) is too small at phone scale
+	end
 
 	-- team chips
 	UI.Team = newFrame(inner, "Team", {
-		Position = UDim2.fromOffset(0, 70),
-		Size = UDim2.new(1, 0, 1, -70),
+		Position = UDim2.fromOffset(0, M.TeamY),
+		Size = UDim2.new(1, 0, 1, -M.TeamY),
 	})
 end
 
@@ -674,7 +825,7 @@ end
 local function buildParty(holder)
 	local panel = CloudUI.Panel({
 		Name = "PartyPanel",
-		Size = UDim2.fromOffset(PANEL_W, PARTY_BASE_H + 24),
+		Size = UDim2.fromOffset(PANEL_W, M.PartyBaseH + ROW_PITCH),
 		Accent = Colors.Good,
 		Parent = holder,
 	})
@@ -690,7 +841,7 @@ local function buildParty(holder)
 	UI.PartyInner = inner
 
 	UI.PartyTitle = newText(inner, "Title", "Party", "Title", 19, WHITE, {
-		Size = UDim2.new(1, -74, 0, 22),
+		Size = UDim2.new(1, -(M.LeaveW + 8), 0, 22),
 		RichText = true,
 		TextTruncate = Enum.TextTruncate.AtEnd,
 		Stroke = 0.2,
@@ -699,18 +850,18 @@ local function buildParty(holder)
 		Name = "LeaveParty",
 		Text = "Leave",
 		Style = "Pink",
-		TextSize = 14,
-		Size = UDim2.fromOffset(66, 22),
+		TextSize = M.LeaveText,
+		Size = UDim2.fromOffset(M.LeaveW, M.LeaveH),
 		AnchorPoint = Vector2.new(0.5, 0.5),
-		Position = UDim2.new(1, -33, 0, 11),
+		Position = UDim2.new(1, -M.LeaveW / 2, 0, M.LeaveH / 2),
 		Callback = function()
 			fireRemote("LeaveParty")
 		end,
 		Parent = inner,
 	})
 	UI.PartyTeam = newFrame(inner, "Players", {
-		Position = UDim2.fromOffset(0, 28),
-		Size = UDim2.new(1, 0, 0, 24),
+		Position = UDim2.fromOffset(0, M.PartyTeamY),
+		Size = UDim2.new(1, 0, 0, ROW_PITCH),
 	})
 	UI.PartyStatus = newText(inner, "Status", "Waiting for players...", "Toast", 16, Colors.TokenGlow, {
 		AnchorPoint = Vector2.new(0, 1),
@@ -780,6 +931,7 @@ local function hideTitleCard()
 		TC.Shown = false
 		TC.Serial = TC.Serial + 1
 		present(Items.Title, false)
+		applyMargins(true)
 	end
 end
 
@@ -792,10 +944,12 @@ local function playTitleCard()
 	local serial = TC.Serial
 	TC.Shown = true
 	present(Items.Title, true)
+	applyMargins(true)
 	task.wait(TITLE_CARD_SECONDS)
 	if TC.Serial == serial and TC.Shown then
 		TC.Shown = false
 		present(Items.Title, false)
+		applyMargins(true)
 	end
 end
 
@@ -1125,8 +1279,10 @@ local function ensureChips(list, parent, count, withHealth)
 end
 
 local function resizePanel(panel, base, rows)
-	local h = base + rows * 24
+	local h = base + rows * ROW_PITCH
 	panel.Root.Size = UDim2.fromOffset(PANEL_W, h)
+	-- a taller panel may now reach the menu column (or a shorter one no longer does)
+	applyMargins(true)
 end
 
 local function updateTeam(members)
@@ -1135,7 +1291,7 @@ local function updateTeam(members)
 	local rows = layoutChips(Mt.Chips, count, PANEL_W - 24 - 16)
 	if rows ~= Mt.Rows then
 		Mt.Rows = rows
-		resizePanel(UI.Match, MATCH_BASE_H, rows)
+		resizePanel(UI.Match, M.MatchBaseH, rows)
 	end
 	local localId = player.UserId
 	for i = 1, count do
@@ -1268,6 +1424,7 @@ local function refreshVisibility()
 	if hasMatch or showParty then
 		hideTitleCard()
 	end
+	applyMargins(true) -- the top-left slot is taken or free: step aside for the menu column only when needed
 	if UI.RunChip then
 		refreshRunChip()
 	end
@@ -1398,9 +1555,9 @@ local function applyPartyState(state)
 	local rows = layoutChips(Pt.Chips, count, PANEL_W - 24 - 16)
 	if rows ~= Pt.Rows then
 		Pt.Rows = rows
-		UI.PartyTeam.Size = UDim2.new(1, 0, 0, rows * 24)
+		UI.PartyTeam.Size = UDim2.new(1, 0, 0, rows * ROW_PITCH)
 		UI.PartyStatus.Position = UDim2.new(0, 0, 1, 0)
-		resizePanel(UI.Party, PARTY_BASE_H, rows)
+		resizePanel(UI.Party, M.PartyBaseH, rows)
 	end
 	for i = 1, count do
 		local entry = type(list[i]) == "table" and list[i] or {}
@@ -1432,6 +1589,7 @@ end
 -- Wiring
 ----------------------------------------------------------------------
 local function buildGui()
+	M = panelMetrics(isTouchDevice())
 	local gui = CloudUI.NewScreenGui("NimbusHud", 10)
 	UI.Gui = gui
 
