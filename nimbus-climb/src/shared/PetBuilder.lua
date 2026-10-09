@@ -55,7 +55,7 @@ PetBuilder.WingStyles = { "Feather", "Bat", "Fairy", "Cloud", "Crystal", "Flame"
 -- Constants
 ----------------------------------------------------------------------
 local VOXEL = 0.1 -- studs per design voxel at Scale 1 (High detail sculpts at exactly this size)
-local LOW_K = 0.55 -- Low detail sculpts the same shapes at this resolution factor
+local LOW_K = 0.5 -- Low detail sculpts the same shapes at this resolution factor
 local FLAP_HZ = 2.0 -- wing beats per second at Flap = 1 (PetController relies on this number)
 local WAG_HZ = 0.9 -- tail wags per second
 local SWAY_HZ = 0.55 -- slow idle motions (halo bob, aura orbit)
