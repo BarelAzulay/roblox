@@ -101,6 +101,7 @@ local K = {
 	MARGIN = 12, -- screen px kept free around a window
 	BUMPS = 28, -- room the panels' cloud bumps need above the top edge
 	NARROW = 1100, -- windows narrower than this (design px) use narrower side cards
+	SHORT = 560, -- windows lower than this (design px) use their compact layout
 	DETAIL_W = 340,
 	DETAIL_W_NARROW = 296,
 	FIRE_GAP = 0.3, -- client-side spacing between two sends of the same remote
@@ -109,19 +110,22 @@ local K = {
 	PETS_PER_FRAME = 3, -- pet viewports the Inventory grid builds per frame
 	BACK_ACTION = "NimbusMenuBack", -- ContextActionService action that owns gamepad B while something is closable
 	CARD_H = 474, -- roulette card
+	CARD_H_SHORT = 216,
 	ITEM_CARD_H = 440,
+	ITEM_CARD_H_SHORT = 214,
+	SHOP_COMPACT = 650, -- Shop windows lower than this (design px) use the compact cards
 }
 
--- Preferred / minimum design sizes of each window (W x H).
-local WIN = {
-	Inventory = { 1180, 740, 900, 420 },
-	Shop = { 1180, 740, 900, 420 },
-	Stats = { 1080, 700, 860, 420 },
-	Odds = { 780, 680, 600, 420 },
+-- Preferred / minimum design sizes of each window (W x H), the reveal card, the spin stage and its strip.
+K.WIN = {
+	Inventory = { 1180, 740, 800, 380 },
+	Shop = { 1180, 740, 800, 380 },
+	Stats = { 1080, 700, 800, 380 },
+	Odds = { 780, 680, 600, 380 },
 }
-local REVEAL = { TallW = 480, TallH = 640, WideW = 790, WideH = 420 }
-local STAGE = { W = 920, H = 380 }
-local STRIP = { Cell = 150, W = 860, H = 190, Target = 34, MinCells = 42, Seconds = 5.6, Curve = 2.8 }
+K.REVEAL = { TallW = 480, TallH = 640, WideW = 790, WideH = 372 }
+K.STAGE = { W = 920, H = 380 }
+K.STRIP = { Cell = 150, W = 860, H = 190, Target = 34, MinCells = 42, Seconds = 5.6, Curve = 2.8 }
 
 local Colors = Theme.Colors
 local WHITE = Colors.White
@@ -165,9 +169,7 @@ local gui = nil
 local U = {} -- shared UI references (backdrop, column, hint ...)
 local windows = {} -- id -> window table (see createWindow)
 local openId = nil -- id of the window that is currently open
-local warned = {}
-local remoteCache = {}
-local lastFire = {}
+local Net = { Warned = {}, Cache = {}, Last = {} } -- warnOnce keys, remote cache, last send per remote
 local touchDevice = false
 
 local Spin = { Waiting = false, WaitToken = 0, Queue = {}, Stage = nil }
@@ -187,8 +189,8 @@ local syncBackBinding, closeIndex, relayoutMenu
 -- Small helpers
 ----------------------------------------------------------------------
 local function warnOnce(key, err)
-	if not warned[key] then
-		warned[key] = true
+	if not Net.Warned[key] then
+		Net.Warned[key] = true
 		warn("[MenuController] " .. tostring(key) .. ": " .. tostring(err))
 	end
 end
@@ -476,6 +478,39 @@ local function elementsOf(def)
 	return out
 end
 
+-- CloudUI slots carry small count / key / marker texts (16-17 design px); at the phone scale (0.8) they
+-- would render under 14 px, so the slots this menu makes get a size that stays readable.
+local function readableSlot(slot)
+	if not slot or not slot.Root then
+		return slot
+	end
+	local count = slot.Root:FindFirstChild("Count", true)
+	if count and count:IsA("TextLabel") and count.TextSize < 19 then
+		count.TextSize = 19
+		count.Size = UDim2.new(count.Size.X.Scale, count.Size.X.Offset, 0, 22)
+	end
+	for _, name in ipairs({ "Key", "Mark" }) do
+		local label = slot.Root:FindFirstChild(name, true)
+		if label and label:IsA("TextLabel") and label.TextSize < 18 then
+			label.TextSize = 18
+			local chip = label.Parent
+			if chip and chip:IsA("GuiObject") and chip.Size.X.Offset < 28 then
+				chip.Size = UDim2.fromOffset(28, 28)
+			end
+		end
+	end
+	return slot
+end
+
+-- CloudUI.Pill with a text size that stays >= 14 px at the phone scale (0.8).
+local function readablePill(text, kind, parent)
+	local pill = CloudUI.Pill(text, kind, parent)
+	if pill then
+		pill.TextSize = math.max(pill.TextSize, 18)
+	end
+	return pill
+end
+
 -- Coloured pill with the element name (no asset ids).
 local function elementPill(parent, element, textSize, layoutOrder)
 	local info = Config.Elements and Config.Elements.Info and Config.Elements.Info[element]
@@ -510,13 +545,13 @@ end
 -- Remotes (sent at most every FIRE_GAP seconds each, the server rate-limits as well)
 ----------------------------------------------------------------------
 local function getRemote(name)
-	local cached = remoteCache[name]
+	local cached = Net.Cache[name]
 	if cached then
 		return cached
 	end
 	local ok, remote = pcall(Remotes.Get, name)
 	if ok and remote then
-		remoteCache[name] = remote
+		Net.Cache[name] = remote
 		return remote
 	end
 	return nil
@@ -524,14 +559,14 @@ end
 
 local function fire(name, a, b)
 	local now = os.clock()
-	if lastFire[name] and now - lastFire[name] < K.FIRE_GAP then
+	if Net.Last[name] and now - Net.Last[name] < K.FIRE_GAP then
 		return false
 	end
 	local remote = getRemote(name)
 	if not remote then
 		return false
 	end
-	lastFire[name] = now
+	Net.Last[name] = now
 	local ok = pcall(function()
 		remote:FireServer(a, b)
 	end)
@@ -612,20 +647,33 @@ end
 -- Size + scale + position for a design-pixel box: { w, h, scale, x, y } (x, y = centre in gui px).
 -- The box gets its preferred size when the screen has room for it at the readability scale, shrinks
 -- towards its minimum size first, and only then is scaled below the screen factor. It is centred on the
--- screen unless that would put it under the menu column.
+-- screen unless that would put it under the menu column; on small screens it may cover the column when
+-- that buys a bigger (more readable) scale.
 local function fitBox(prefW, prefH, minW, minH)
 	local area = guiSize()
 	local factor = screenFactor()
-	local left = columnRight()
-	local freeW = area.X - left - 2 * K.MARGIN
 	local freeH = area.Y - 2 * K.MARGIN
-	local w = Util.Clamp(math.floor(freeW / factor), minW, prefW)
-	local h = Util.Clamp(math.floor(freeH / factor - K.BUMPS), minH, prefH)
-	local scale = Util.Clamp(math.min(factor, freeW / w, freeH / (h + K.BUMPS)), 0.3, 1.25)
+	local function solve(left)
+		local freeW = area.X - left - 2 * K.MARGIN
+		local w = Util.Clamp(math.floor(freeW / factor), minW, prefW)
+		local h = Util.Clamp(math.floor((freeH - K.BUMPS * factor) / factor), minH, prefH)
+		local scale = Util.Clamp(math.min(factor, freeW / w, freeH / h), 0.3, 1.25)
+		return w, h, scale
+	end
+	local left = columnRight()
+	local w, h, scale = solve(left)
+	if left > 0 and scale < factor - 0.001 then
+		local w2, h2, scale2 = solve(0)
+		if scale2 > scale + 0.001 then
+			w, h, scale, left = w2, h2, scale2, 0
+		end
+	end
 	local half = w * scale / 2
 	local x = math.max(area.X / 2, left + K.MARGIN + half)
 	x = math.min(x, area.X - K.MARGIN - half)
-	local y = area.Y / 2 + K.BUMPS * scale / 2
+	local halfH = h * scale / 2
+	local y = math.min(area.Y / 2 + K.BUMPS * scale / 2, area.Y - K.MARGIN / 2 - halfH)
+	y = math.max(y, halfH)
 	return { w = w, h = h, scale = scale, x = math.floor(x + 0.5), y = math.floor(y + 0.5) }
 end
 
@@ -654,7 +702,7 @@ local function buildHint()
 		TextXAlignment = Enum.TextXAlignment.Left,
 		ZIndex = 10,
 	})
-	Util.Create("UISizeConstraint", { MaxSize = Vector2.new(300, 220), Parent = label })
+	Hint.Limit = Util.Create("UISizeConstraint", { MaxSize = Vector2.new(300, 220), Parent = label })
 	Hint.Frame = frame
 	Hint.Label = label
 	Hint.Scale = Util.Create("UIScale", { Name = "ReadScale", Scale = 1, Parent = frame })
@@ -714,7 +762,7 @@ local function hideBackdropNow()
 end
 
 local function layoutWindow(win)
-	local size = WIN[win.Id] or { 1100, 700, 860, 420 }
+	local size = K.WIN[win.Id] or { 1100, 700, 860, 420 }
 	local box = fitBox(size[1], size[2], size[3], size[4])
 	win.Holder.Size = UDim2.fromOffset(box.w, box.h)
 	win.Holder.Position = UDim2.fromOffset(box.x, box.y)
@@ -722,12 +770,12 @@ local function layoutWindow(win)
 	local changed = win.W ~= box.w or win.H ~= box.h
 	win.W, win.H = box.w, box.h
 	if changed and win.Built and win.OnLayout then
-		safe("layout " .. win.Id, win.OnLayout, box.w, box.h, box.w < K.NARROW)
+		safe("layout " .. win.Id, win.OnLayout, box.w, box.h, box.w < K.NARROW, box.h < K.SHORT)
 	end
 end
 
 local function createWindow(spec)
-	local size = WIN[spec.Id] or { 1100, 700, 860, 420 }
+	local size = K.WIN[spec.Id] or { 1100, 700, 860, 420 }
 	local win = { Id = spec.Id, Spec = spec, Shown = false, Built = false, Dirty = true, Token = 0 }
 	win.Holder = makeFrame(gui, "Window_" .. spec.Id, {
 		AnchorPoint = Vector2.new(0.5, 0.5),
@@ -762,7 +810,7 @@ local function ensureBuilt(win)
 	win.Built = true
 	safe("build " .. win.Id, win.Spec.Build, win)
 	if win.OnLayout and win.W then
-		safe("layout " .. win.Id, win.OnLayout, win.W, win.H, win.W < K.NARROW)
+		safe("layout " .. win.Id, win.OnLayout, win.W, win.H, win.W < K.NARROW, win.H < K.SHORT)
 	end
 end
 
@@ -1231,6 +1279,13 @@ local function buildTile(column, spec, index)
 	button.Activated:Connect(function()
 		safe("menu " .. spec.Id, spec.Action)
 	end)
+	-- compact (icon-only) tiles name themselves on hover / long-press
+	CloudUI.Tooltip(button, function()
+		if entry.Label.Visible then
+			return nil
+		end
+		return spec.Label
+	end)
 	function entry.SetBadge(on)
 		entry.Badge.Visible = on and true or false
 	end
@@ -1253,16 +1308,23 @@ local function buildColumn()
 	end
 end
 
--- One column of tiles when it fits at the readability scale, else a 2-wide grid (landscape phones).
-local function setColumnLayout(grid)
-	if U.ColumnGrid == grid and U.ColumnLayout and U.ColumnLayout.Parent then
+-- Column layouts: "Column" (labelled tiles, one column), "Grid" (labelled tiles, 2 x 3, short landscape
+-- screens) or "Compact" (icon-only tiles in one column, narrow portrait screens: a second column would reach
+-- the middle of the screen there, and a labelled column would collide with the HUD corners).
+local function setColumnLayout(mode)
+	if U.ColumnMode == mode and U.ColumnLayout and U.ColumnLayout.Parent then
 		return
 	end
 	if U.ColumnLayout then
 		U.ColumnLayout:Destroy()
 	end
-	U.ColumnGrid = grid
-	if grid then
+	U.ColumnMode = mode
+	local entryH = (mode == "Compact") and K.TILE or K.ENTRY_H
+	for _, entry in pairs(Entries) do
+		entry.Root.Size = UDim2.fromOffset(K.ENTRY_W, entryH)
+		entry.Label.Visible = mode ~= "Compact"
+	end
+	if mode == "Grid" then
 		U.ColumnLayout = Util.Create("UIGridLayout", {
 			CellSize = UDim2.fromOffset(K.ENTRY_W, K.ENTRY_H),
 			CellPadding = UDim2.fromOffset(K.GAP, K.GAP),
@@ -1278,6 +1340,18 @@ local function setColumnLayout(grid)
 	end
 end
 
+-- Top of the HUD's bottom-left block (vitals + currency pill) in gui px; on touch screens it is raised over
+-- the thumbstick. Mirrors HudController's EDGE, TOUCH_RAISE_SMALL / LARGE, VITALS_H, STACK_GAP and CUR_H.
+local function bottomBlockTop(area, factor)
+	local raise = 12
+	if touchDevice then
+		local camera = workspace.CurrentCamera
+		local vp = camera and camera.ViewportSize or area
+		raise = (math.min(vp.X, vp.Y) <= 500) and 150 or 220
+	end
+	return area.Y - raise - (70 + 10 + 46 + 8) * factor
+end
+
 function relayoutMenu()
 	if not gui or not U.Column then
 		return
@@ -1285,25 +1359,48 @@ function relayoutMenu()
 	local area = guiSize()
 	local factor = screenFactor()
 	local margin = screenMargin()
-	local avail = area.Y - 2 * margin
 	local n = #MENU
-	local columnH = n * K.ENTRY_H + (n - 1) * K.GAP
-	local grid = columnH * factor > avail
-	local cols = grid and 2 or 1
+	local mode, cols = "Column", 1
+	local scale = factor
+	local entryH = K.ENTRY_H
+	if area.X >= area.Y then
+		-- landscape: the HUD has room to step aside, the column only has to fit on the screen
+		local avail = area.Y - 2 * margin
+		if (n * K.ENTRY_H + (n - 1) * K.GAP) * factor > avail then
+			mode, cols = "Grid", 2
+		end
+		local rows = math.ceil(n / cols)
+		local h = rows * K.ENTRY_H + (rows - 1) * K.GAP
+		if h * scale > avail then
+			scale = math.max(0.4, avail / h)
+		end
+	else
+		-- portrait: stay between the HUD's top-left panel (the tallest is ~216 design px) and its
+		-- bottom-left block, vertically centred
+		local centre = area.Y / 2
+		local top = margin + 222 * factor
+		local half = math.min(centre - top, bottomBlockTop(area, factor) - 6 - centre)
+		local columnH = n * K.ENTRY_H + (n - 1) * K.GAP
+		if columnH * factor > 2 * half then
+			mode, entryH = "Compact", K.TILE
+			local compactH = n * K.TILE + (n - 1) * K.GAP
+			scale = Util.Clamp(2 * half / compactH, 0.4, factor)
+		end
+	end
 	local rows = math.ceil(n / cols)
 	local w = cols * K.ENTRY_W + (cols - 1) * K.GAP
-	local h = rows * K.ENTRY_H + (rows - 1) * K.GAP
-	local scale = factor
-	if h * scale > avail then
-		scale = math.max(0.4, avail / h)
-	end
-	setColumnLayout(grid)
+	local h = rows * entryH + (rows - 1) * K.GAP
+	setColumnLayout(mode)
 	U.Column.Size = UDim2.fromOffset(w, h)
 	U.ColumnScale.Scale = scale
 	U.Column.Position = UDim2.new(0, margin, 0.5, 0)
 	if Hint.Frame then
+		-- next to the column, and never wide enough to reach the middle of the screen
+		local hintLeft = margin + w * scale + 10
+		local room = math.max(120, area.X * 0.34 - hintLeft - 28 * factor)
 		Hint.Scale.Scale = factor
-		Hint.Frame.Position = UDim2.new(0, margin + w * scale + 10, 0.5, 0)
+		Hint.Frame.Position = UDim2.new(0, hintLeft, 0.5, 0)
+		Hint.Limit.MaxSize = Vector2.new(math.min(300, math.floor(room / factor)), 260)
 	end
 	for _, win in pairs(windows) do
 		if win.Shown then
@@ -1311,7 +1408,7 @@ function relayoutMenu()
 		end
 	end
 	if Odds.Holder and Odds.Fit then
-		local box = fitBox(WIN.Odds[1], WIN.Odds[2], WIN.Odds[3], WIN.Odds[4])
+		local box = fitBox(K.WIN.Odds[1], K.WIN.Odds[2], K.WIN.Odds[3], K.WIN.Odds[4])
 		Odds.Holder.Size = UDim2.fromOffset(box.w, box.h)
 		Odds.Holder.Position = UDim2.fromOffset(box.x, box.y)
 		Odds.Fit.Scale = box.scale
@@ -1431,9 +1528,11 @@ local function buildInventory(win)
 			Position = UDim2.fromOffset(4, 4),
 			Size = UDim2.new(1, -8, 1, -98),
 		})
+		W.InfoScroll = scroll
 		pad(scroll, 10, 6, 14, 8)
 		listLayout(scroll, Enum.FillDirection.Vertical, 6, Enum.HorizontalAlignment.Center)
 		local view = makeFrame(scroll, "View", { Size = UDim2.new(1, 0, 0, 196), LayoutOrder = 1 })
+		W.View = view
 		W.Glow = makeFrame(view, "Glow", {
 			AnchorPoint = Vector2.new(0.5, 0.5),
 			Position = UDim2.new(0.5, 0, 0.5, 0),
@@ -1480,6 +1579,7 @@ local function buildInventory(win)
 			Position = UDim2.new(0, 10, 1, -36),
 			Size = UDim2.new(1, -20, 0, 54),
 		})
+		W.Buttons = buttons
 		W.EquipBtn = CloudUI.Button({
 			Name = "Equip",
 			Text = "Equip",
@@ -1533,9 +1633,11 @@ local function buildInventory(win)
 			Position = UDim2.fromOffset(4, 32),
 			Size = UDim2.new(1, -(equipWidth + 12), 0, 44),
 			TextWrapped = true,
+			TextScaled = true,
 			TextXAlignment = Enum.TextXAlignment.Left,
 			TextYAlignment = Enum.TextYAlignment.Top,
 		})
+		Util.Create("UITextSizeConstraint", { MaxTextSize = 18, MinTextSize = 16, Parent = W.PerksLabel })
 		local equipRow = makeFrame(header, "EquippedSlots", {
 			AnchorPoint = Vector2.new(1, 0),
 			Position = UDim2.new(1, 0, 0, 2),
@@ -1543,7 +1645,7 @@ local function buildInventory(win)
 		})
 		listLayout(equipRow, Enum.FillDirection.Horizontal, 8, Enum.HorizontalAlignment.Right, Enum.VerticalAlignment.Center)
 		for i = 1, maxEquipped do
-			pets.EquipSlots[i] = CloudUI.Slot({
+			pets.EquipSlots[i] = readableSlot(CloudUI.Slot({
 				Name = "Equipped" .. i,
 				Size = UDim2.fromOffset(slotSize, slotSize),
 				LayoutOrder = i,
@@ -1555,7 +1657,7 @@ local function buildInventory(win)
 						refreshInventory()
 					end
 				end,
-			})
+			}))
 		end
 
 		local well = makeInset(left, "GridWell", {
@@ -1631,14 +1733,14 @@ local function buildInventory(win)
 				pill:Destroy()
 			end
 			pets.Pills = {}
-			local rarityPill = CloudUI.Pill(def.Rarity, color, W.MetaRow)
+			local rarityPill = readablePill(def.Rarity, color, W.MetaRow)
 			rarityPill.LayoutOrder = 1
 			table.insert(pets.Pills, rarityPill)
 			for i, element in ipairs(elements) do
-				table.insert(pets.Pills, elementPill(W.MetaRow, element, 17, 1 + i))
+				table.insert(pets.Pills, elementPill(W.MetaRow, element, 18, 1 + i))
 			end
 			if type(def.Role) == "string" then
-				local rolePill = CloudUI.Pill(def.Role, ROLE_COLORS[def.Role] or BUTTONS.Blue, W.RoleRow)
+				local rolePill = readablePill(def.Role, ROLE_COLORS[def.Role] or BUTTONS.Blue, W.RoleRow)
 				rolePill.LayoutOrder = 1
 				table.insert(pets.Pills, rolePill)
 			end
@@ -1767,7 +1869,7 @@ local function buildInventory(win)
 			local def = PetCatalog.Get(id)
 			local slot = pets.Slots[id]
 			if not slot then
-				slot = CloudUI.Slot({
+				slot = readableSlot(CloudUI.Slot({
 					Name = "Pet_" .. id,
 					Size = UDim2.fromOffset(104, 104),
 					Parent = W.Grid,
@@ -1775,7 +1877,7 @@ local function buildInventory(win)
 						pets.Selected = id
 						refreshInventory()
 					end,
-				})
+				}))
 				pets.Slots[id] = slot
 			end
 			slot.Root.LayoutOrder = index
@@ -1856,13 +1958,13 @@ local function buildInventory(win)
 				Size = UDim2.new(1, 0, 0, 124),
 				LayoutOrder = index,
 			})
-			local slot = CloudUI.Slot({
+			local slot = readableSlot(CloudUI.Slot({
 				Name = "Item_" .. def.Id,
 				Size = UDim2.fromOffset(96, 96),
 				Position = UDim2.fromOffset(14, 14),
 				Hotkey = tostring(index),
 				Parent = row,
-			})
+			}))
 			slot.SetContent({
 				Glyph = def.Glyph,
 				Color = def.Color,
@@ -1949,13 +2051,23 @@ local function buildInventory(win)
 			tabs.Select(tab)
 		end
 	end
-	win.OnLayout = function(_w, _h, narrow)
+	win.OnLayout = function(_w, _h, narrow, short)
 		local detailW = narrow and K.DETAIL_W_NARROW or K.DETAIL_W
 		if W.Detail then
 			W.Detail.Size = UDim2.new(0, detailW, 1, 0)
 		end
 		if W.Left then
 			W.Left.Size = UDim2.new(1, -(detailW + 12), 1, 0)
+		end
+		if W.View then
+			-- compact cards (landscape phones): a smaller pet, slimmer buttons and no status line, so the
+			-- name stays in view above the pinned buttons
+			W.View.Size = UDim2.new(1, 0, 0, short and 96 or 196)
+			W.Glow.Size = short and UDim2.fromOffset(86, 86) or UDim2.fromOffset(170, 170)
+			W.Buttons.Size = UDim2.new(1, -20, 0, short and 46 or 54)
+			W.Buttons.Position = UDim2.new(0, 10, 1, short and -8 or -36)
+			W.Status.Visible = not short
+			W.InfoScroll.Size = UDim2.new(1, -8, 1, short and -62 or -98)
 		end
 	end
 end
@@ -2004,7 +2116,7 @@ function openOdds(rouletteId)
 		closeOdds()
 	end)
 
-	local box = fitBox(WIN.Odds[1], WIN.Odds[2], WIN.Odds[3], WIN.Odds[4])
+	local box = fitBox(K.WIN.Odds[1], K.WIN.Odds[2], K.WIN.Odds[3], K.WIN.Odds[4])
 	local holder = makeFrame(root, "Holder", {
 		AnchorPoint = Vector2.new(0.5, 0.5),
 		Position = UDim2.fromOffset(box.x, box.y),
@@ -2113,13 +2225,13 @@ function openOdds(rouletteId)
 				local def = PetCatalog.Get(entry.PetId)
 				local cell = makeFrame(cells, "Cell_" .. tostring(entry.PetId), { LayoutOrder = cellIndex })
 				if def then
-					local slot = CloudUI.Slot({
+					local slot = readableSlot(CloudUI.Slot({
 						Name = "OddsPet",
 						Size = UDim2.fromOffset(88, 88),
 						AnchorPoint = Vector2.new(0.5, 0),
 						Position = UDim2.new(0.5, 0, 0, 2),
 						Parent = cell,
-					})
+					}))
 					slot.SetContent({ Pet = def, RarityColor = color, Name = def.Name, Blurb = def.Blurb })
 					table.insert(Odds.Slots, slot)
 					local elements = elementsOf(def)
@@ -2131,7 +2243,7 @@ function openOdds(rouletteId)
 						})
 						listLayout(row, Enum.FillDirection.Horizontal, 3, Enum.HorizontalAlignment.Center, Enum.VerticalAlignment.Center)
 						for i, element in ipairs(elements) do
-							elementPill(row, element, 15, i)
+							elementPill(row, element, 18, i)
 						end
 					end
 				end
@@ -2237,18 +2349,21 @@ local function buildRouletteCard(shop, parent, roulette, index)
 		)
 	)
 
-	makeText(card, "Price", cloudAmount(roulette.Price), "Display", 34, Colors.Token, {
+	local price = makeText(card, "Price", cloudAmount(roulette.Price), "Display", 34, Colors.Token, {
 		AnchorPoint = Vector2.new(0.5, 0),
 		Position = UDim2.new(0.5, 0, 0, 200),
 		Size = UDim2.new(1, -12, 0, 40),
 	})
 	local best = bestRarityOf(roulette)
+	local bestLabel = nil
 	if best then
-		makeText(card, "Best", "Up to " .. best, "Heading", 19, rarityText({ Rarity = best }), {
+		bestLabel = makeText(card, "Best", "Up to " .. best, "Heading", 19, rarityText({ Rarity = best }), {
 			AnchorPoint = Vector2.new(0.5, 0),
 			Position = UDim2.new(0.5, 0, 0, 242),
 			Size = UDim2.new(1, -12, 0, 24),
+			TextScaled = true,
 		})
+		Util.Create("UITextSizeConstraint", { MaxTextSize = 19, MinTextSize = 15, Parent = bestLabel })
 	end
 	local dots = makeFrame(card, "RarityDots", {
 		AnchorPoint = Vector2.new(0.5, 0),
@@ -2270,7 +2385,7 @@ local function buildRouletteCard(shop, parent, roulette, index)
 		end
 	end
 
-	CloudUI.Button({
+	local oddsButton = CloudUI.Button({
 		Name = "Odds",
 		Text = "Odds",
 		Style = "Blue",
@@ -2304,7 +2419,70 @@ local function buildRouletteCard(shop, parent, roulette, index)
 		TextWrapped = true,
 		TextYAlignment = Enum.TextYAlignment.Top,
 	})
-	return { Roulette = roulette, Root = card, Stroke = cardStroke, Spin = spinButton, Hint = hint }
+	Util.Create("UITextSizeConstraint", { MaxTextSize = 18, MinTextSize = 15, Parent = hint })
+	return {
+		Roulette = roulette,
+		Root = card,
+		Stroke = cardStroke,
+		Spin = spinButton,
+		Hint = hint,
+		Parts = {
+			Banner = banner,
+			Base = base,
+			Dome = dome,
+			Mark = mark,
+			Price = price,
+			Best = bestLabel,
+			Dots = dots,
+			Odds = oddsButton,
+			Spin = spinButton,
+			Hint = hint,
+		},
+	}
+end
+
+-- Sets AnchorPoint / Position / Size (and the optional text alignment) of one card part.
+local function place(inst, anchorX, anchorY, position, size, align)
+	if not inst then
+		return
+	end
+	inst.AnchorPoint = Vector2.new(anchorX, anchorY)
+	inst.Position = position
+	inst.Size = size
+	if align and (inst:IsA("TextLabel") or inst:IsA("TextButton")) then
+		inst.TextXAlignment = align
+	end
+end
+
+-- Roulette card: the tall machine card, or a compact one (short windows: landscape phones) that keeps the
+-- Spin button in view without scrolling.
+local function layoutRouletteCard(card, compact)
+	local P = card.Parts
+	local left, centre = Enum.TextXAlignment.Left, Enum.TextXAlignment.Center
+	if compact then
+		place(P.Banner, 0.5, 0, UDim2.new(0.5, 0, 0, 8), UDim2.new(1, -16, 0, 42))
+		place(P.Dome, 0, 0, UDim2.fromOffset(12, 54), UDim2.fromOffset(66, 66))
+		place(P.Base, 0, 0, UDim2.fromOffset(6, 110), UDim2.fromOffset(78, 12))
+		place(P.Price, 0, 0, UDim2.fromOffset(88, 56), UDim2.new(1, -96, 0, 36), left)
+		place(P.Best, 0, 0, UDim2.fromOffset(88, 94), UDim2.new(1, -96, 0, 22), left)
+		place(P.Odds, 0, 0, UDim2.fromOffset(10, 130), UDim2.fromOffset(92, 48))
+		place(P.Spin, 1, 0, UDim2.new(1, -10, 0, 130), UDim2.new(1, -122, 0, 48))
+		place(P.Hint, 0.5, 0, UDim2.new(0.5, 0, 0, 182), UDim2.new(1, -16, 0, 30))
+		P.Hint.TextScaled = true -- one or two short lines must fit the compact card
+		P.Mark.TextSize = 40
+	else
+		place(P.Banner, 0.5, 0, UDim2.new(0.5, 0, 0, 10), UDim2.new(1, -18, 0, 54))
+		place(P.Dome, 0.5, 0, UDim2.new(0.5, 0, 0, 72), UDim2.fromOffset(120, 120))
+		place(P.Base, 0.5, 0, UDim2.new(0.5, 0, 0, 176), UDim2.fromOffset(150, 18))
+		place(P.Price, 0.5, 0, UDim2.new(0.5, 0, 0, 200), UDim2.new(1, -12, 0, 40), centre)
+		place(P.Best, 0.5, 0, UDim2.new(0.5, 0, 0, 242), UDim2.new(1, -12, 0, 24), centre)
+		place(P.Odds, 0.5, 0, UDim2.new(0.5, 0, 0, 298), UDim2.fromOffset(136, 46))
+		place(P.Spin, 0.5, 0, UDim2.new(0.5, 0, 0, 352), UDim2.new(1, -36, 0, 62))
+		place(P.Hint, 0.5, 0, UDim2.new(0.5, 0, 0, 420), UDim2.new(1, -20, 0, 48))
+		P.Hint.TextScaled = false
+		P.Mark.TextSize = 64
+	end
+	P.Dots.Visible = not compact
 end
 
 local function buildItemCard(parent, def, index, count)
@@ -2318,14 +2496,14 @@ local function buildItemCard(parent, def, index, count)
 	stroke(card, NAVY, 4, 0)
 	Theme.Gradient(card, Theme.Darken(def.Color, 0.28), Theme.Darken(def.Color, 0.7), 90)
 
-	local slot = CloudUI.Slot({
+	local slot = readableSlot(CloudUI.Slot({
 		Name = "ItemSlot",
 		Size = UDim2.fromOffset(104, 104),
 		AnchorPoint = Vector2.new(0.5, 0),
 		Position = UDim2.new(0.5, 0, 0, 16),
 		Hotkey = tostring(index),
 		Parent = card,
-	})
+	}))
 	slot.SetContent({
 		Glyph = def.Glyph,
 		Color = def.Color,
@@ -2333,11 +2511,11 @@ local function buildItemCard(parent, def, index, count)
 		Name = def.Name,
 		Blurb = def.Blurb,
 	})
-	makeText(card, "Name", def.Name, "Title", 26, Theme.Lighten(def.Color, 0.4), {
+	local nameLabel = makeText(card, "Name", def.Name, "Title", 26, Theme.Lighten(def.Color, 0.4), {
 		Position = UDim2.fromOffset(0, 128),
 		Size = UDim2.new(1, 0, 0, 32),
 	})
-	makeText(card, "Blurb", def.Blurb or "", "Body", 18, WHITE, {
+	local blurb = makeText(card, "Blurb", def.Blurb or "", "Body", 18, WHITE, {
 		Position = UDim2.fromOffset(16, 164),
 		Size = UDim2.new(1, -32, 0, 70),
 		TextWrapped = true,
@@ -2347,7 +2525,7 @@ local function buildItemCard(parent, def, index, count)
 		Position = UDim2.fromOffset(0, 238),
 		Size = UDim2.new(1, 0, 0, 24),
 	})
-	makeText(card, "Price", cloudAmount(def.Price), "Display", 32, Colors.Token, {
+	local price = makeText(card, "Price", cloudAmount(def.Price), "Display", 32, Colors.Token, {
 		Position = UDim2.fromOffset(0, 264),
 		Size = UDim2.new(1, 0, 0, 38),
 	})
@@ -2376,7 +2554,36 @@ local function buildItemCard(parent, def, index, count)
 		TextWrapped = true,
 		TextYAlignment = Enum.TextYAlignment.Top,
 	})
-	return { Def = def, Slot = slot, Owned = owned, Buy = buy, Hint = hint }
+	return {
+		Def = def,
+		Slot = slot,
+		Owned = owned,
+		Buy = buy,
+		Hint = hint,
+		Parts = { Slot = slot.Root, Name = nameLabel, Blurb = blurb, Owned = owned, Price = price, Buy = buy, Hint = hint },
+	}
+end
+
+-- Item card: tall, or compact for short windows (the Buy button stays in view).
+local function layoutItemCard(card, compact)
+	local P = card.Parts
+	local left, centre = Enum.TextXAlignment.Left, Enum.TextXAlignment.Center
+	if compact then
+		place(P.Slot, 0, 0, UDim2.fromOffset(12, 12), UDim2.fromOffset(78, 78))
+		place(P.Name, 0, 0, UDim2.fromOffset(100, 10), UDim2.new(1, -108, 0, 30), left)
+		place(P.Owned, 0, 0, UDim2.fromOffset(100, 42), UDim2.new(1, -108, 0, 22), left)
+		place(P.Price, 0, 0, UDim2.fromOffset(100, 64), UDim2.new(1, -108, 0, 30), left)
+		place(P.Buy, 0.5, 0, UDim2.new(0.5, 0, 0, 102), UDim2.new(1, -24, 0, 50))
+		place(P.Hint, 0.5, 0, UDim2.new(0.5, 0, 0, 158), UDim2.new(1, -16, 0, 48))
+	else
+		place(P.Slot, 0.5, 0, UDim2.new(0.5, 0, 0, 16), UDim2.fromOffset(104, 104))
+		place(P.Name, 0, 0, UDim2.fromOffset(0, 128), UDim2.new(1, 0, 0, 32), centre)
+		place(P.Owned, 0, 0, UDim2.fromOffset(0, 238), UDim2.new(1, 0, 0, 24), centre)
+		place(P.Price, 0, 0, UDim2.fromOffset(0, 264), UDim2.new(1, 0, 0, 38), centre)
+		place(P.Buy, 0.5, 0, UDim2.new(0.5, 0, 0, 310), UDim2.new(1, -40, 0, 58))
+		place(P.Hint, 0.5, 0, UDim2.new(0.5, 0, 0, 376), UDim2.new(1, -20, 0, 48))
+	end
+	P.Blurb.Visible = not compact
 end
 
 local function buildShop(win)
@@ -2421,6 +2628,7 @@ local function buildShop(win)
 		local scroll = scroller(page, "Cards", { Size = UDim2.new(1, 0, 1, 0) })
 		pad(scroll, 2, 2, 12, 6)
 		local row = makeFrame(scroll, "Row", { Size = UDim2.new(1, 0, 0, K.CARD_H) })
+		W.RouletteRow = row
 		listLayout(row, Enum.FillDirection.Horizontal, 12, Enum.HorizontalAlignment.Center, Enum.VerticalAlignment.Top)
 		for index, roulette in ipairs(Config.Roulettes) do
 			shop.Cards[roulette.Id] = buildRouletteCard(shop, row, roulette, index)
@@ -2462,6 +2670,7 @@ local function buildShop(win)
 		listLayout(scroll, Enum.FillDirection.Vertical, 10)
 		local list = itemList()
 		local row = makeFrame(scroll, "Row", { Size = UDim2.new(1, 0, 0, K.ITEM_CARD_H), LayoutOrder = 1 })
+		W.ItemRow = row
 		listLayout(row, Enum.FillDirection.Horizontal, 12, Enum.HorizontalAlignment.Center, Enum.VerticalAlignment.Top)
 		for index, def in ipairs(list) do
 			shop.ItemCards[def.Id] = buildItemCard(row, def, index, math.max(3, #list))
@@ -2527,6 +2736,22 @@ local function buildShop(win)
 		W.Balance.Text = cloudAmount(State.Tokens())
 		refreshRouletteCards()
 		refreshItemCards()
+	end
+	-- compact cards when the tall ones would not fit the page (landscape phones)
+	win.OnLayout = function(_w, h)
+		local compact = h < K.SHOP_COMPACT
+		for _, card in pairs(shop.Cards) do
+			layoutRouletteCard(card, compact)
+		end
+		for _, card in pairs(shop.ItemCards) do
+			layoutItemCard(card, compact)
+		end
+		if W.RouletteRow then
+			W.RouletteRow.Size = UDim2.new(1, 0, 0, compact and K.CARD_H_SHORT or K.CARD_H)
+		end
+		if W.ItemRow then
+			W.ItemRow.Size = UDim2.new(1, 0, 0, compact and K.ITEM_CARD_H_SHORT or K.ITEM_CARD_H)
+		end
 	end
 	win.OnOpen = function(args)
 		local tab = normalizeTab("Shop", args.Tab)
@@ -2847,12 +3072,12 @@ end
 local function revealLayout()
 	local factor = screenFactor()
 	local area = guiSize()
-	local tall = (area.Y - 2 * K.MARGIN) / factor >= REVEAL.TallH + K.BUMPS
+	local tall = (area.Y - 2 * K.MARGIN) / factor >= K.REVEAL.TallH + K.BUMPS
 	if tall then
 		return {
 			Wide = false,
-			W = REVEAL.TallW,
-			H = REVEAL.TallH,
+			W = K.REVEAL.TallW,
+			H = K.REVEAL.TallH,
 			View = UDim2.new(0.5, 0, 0, 150),
 			ViewSize = 260,
 			Name = { UDim2.fromOffset(0, 292), UDim2.new(1, 0, 0, 40), Enum.TextXAlignment.Center },
@@ -2863,21 +3088,21 @@ local function revealLayout()
 	end
 	return {
 		Wide = true,
-		W = REVEAL.WideW,
-		H = REVEAL.WideH,
-		View = UDim2.new(0, 178, 0.5, 0),
-		ViewSize = 270,
-		Name = { UDim2.fromOffset(350, 22), UDim2.new(1, -366, 0, 42), Enum.TextXAlignment.Left },
-		Meta = { UDim2.fromOffset(350, 70), UDim2.new(1, -366, 0, 30), Enum.HorizontalAlignment.Left },
-		Perks = { UDim2.fromOffset(350, 110), UDim2.new(1, -366, 0, 92), Enum.TextXAlignment.Left },
-		Buttons = { UDim2.fromOffset(350, 222), UDim2.new(1, -366, 0, 60), Enum.HorizontalAlignment.Left },
+		W = K.REVEAL.WideW,
+		H = K.REVEAL.WideH,
+		View = UDim2.new(0, 170, 0.5, 0),
+		ViewSize = 240,
+		Name = { UDim2.fromOffset(340, 14), UDim2.new(1, -356, 0, 42), Enum.TextXAlignment.Left },
+		Meta = { UDim2.fromOffset(340, 62), UDim2.new(1, -356, 0, 30), Enum.HorizontalAlignment.Left },
+		Perks = { UDim2.fromOffset(340, 100), UDim2.new(1, -356, 0, 84), Enum.TextXAlignment.Left },
+		Buttons = { UDim2.fromOffset(340, 196), UDim2.new(1, -356, 0, 60), Enum.HorizontalAlignment.Left },
 	}
 end
 
 local function fitStage(w, h)
 	local area = guiSize()
 	local factor = screenFactor()
-	return Util.Clamp(math.min(factor, (area.X - 2 * K.MARGIN) / w, (area.Y - 2 * K.MARGIN) / (h + K.BUMPS)), 0.3, 1.25)
+	return Util.Clamp(math.min(factor, (area.X - 2 * K.MARGIN) / w, (area.Y - 2 * K.MARGIN) / h), 0.3, 1.25)
 end
 
 function beginStage(result)
@@ -2912,7 +3137,7 @@ function beginStage(result)
 
 	stage.Relayout = function()
 		if stage.StripFit then
-			stage.StripFit.Scale = fitStage(STAGE.W, STAGE.H)
+			stage.StripFit.Scale = fitStage(K.STAGE.W, K.STAGE.H)
 		end
 		if stage.RevealFit and stage.RevealSize then
 			stage.RevealFit.Scale = fitStage(stage.RevealSize[1], stage.RevealSize[2])
@@ -2920,7 +3145,7 @@ function beginStage(result)
 	end
 
 	------------------------------------------------------------------
-	-- the strip: server-provided list, repaired where it is invalid, with the winner at STRIP.Target
+	-- the strip: server-provided list, repaired where it is invalid, with the winner at K.STRIP.Target
 	------------------------------------------------------------------
 	local pool = {}
 	if roulette and PetCatalog.PossiblePets then
@@ -2938,26 +3163,26 @@ function beginStage(result)
 	end
 	local raw = type(result.Strip) == "table" and result.Strip or {}
 	local strip = {}
-	for i = 1, math.max(#raw, STRIP.MinCells) do
+	for i = 1, math.max(#raw, K.STRIP.MinCells) do
 		local id = raw[i]
 		if type(id) ~= "string" or not PetCatalog.Get(id) then
 			id = randomPetId()
 		end
 		strip[i] = id
 	end
-	local target = STRIP.Target
+	local target = K.STRIP.Target
 	strip[target] = def.Id
-	local cellW = STRIP.Cell
+	local cellW = K.STRIP.Cell
 	local startX = 0
-	local endX = (target - 1) * cellW + cellW / 2 - STRIP.W / 2 + rng:NextNumber(-cellW * 0.26, cellW * 0.26)
+	local endX = (target - 1) * cellW + cellW / 2 - K.STRIP.W / 2 + rng:NextNumber(-cellW * 0.26, cellW * 0.26)
 
 	local stripHolder = makeFrame(root, "StripHolder", {
 		AnchorPoint = Vector2.new(0.5, 0.5),
-		Position = UDim2.new(0.5, 0, 0.5, 14),
-		Size = UDim2.fromOffset(STAGE.W, STAGE.H),
+		Position = UDim2.new(0.5, 0, 0.5, 6),
+		Size = UDim2.fromOffset(K.STAGE.W, K.STAGE.H),
 		ZIndex = 2,
 	})
-	stage.StripFit = Util.Create("UIScale", { Name = "Fit", Scale = fitStage(STAGE.W, STAGE.H), Parent = stripHolder })
+	stage.StripFit = Util.Create("UIScale", { Name = "Fit", Scale = fitStage(K.STAGE.W, K.STAGE.H), Parent = stripHolder })
 	local stripPanel = CloudUI.Panel({
 		Name = "StripPanel",
 		Title = roulette and roulette.DisplayName or "Roulette",
@@ -2981,7 +3206,7 @@ function beginStage(result)
 	local clip = makeFrame(sc, "StripClip", {
 		AnchorPoint = Vector2.new(0.5, 0),
 		Position = UDim2.new(0.5, 0, 0, 40),
-		Size = UDim2.fromOffset(STRIP.W, STRIP.H),
+		Size = UDim2.fromOffset(K.STRIP.W, K.STRIP.H),
 		BackgroundTransparency = 0.35,
 		BackgroundColor3 = Color3.fromRGB(14, 22, 58),
 		ClipsDescendants = true,
@@ -2992,7 +3217,7 @@ function beginStage(result)
 	local band = makeFrame(clip, "Band", {
 		AnchorPoint = Vector2.new(0.5, 0.5),
 		Position = UDim2.new(0.5, 0, 0.5, 0),
-		Size = UDim2.fromOffset(cellW, STRIP.H - 6),
+		Size = UDim2.fromOffset(cellW, K.STRIP.H - 6),
 		BackgroundTransparency = 0.88,
 		BackgroundColor3 = GOLD,
 		ZIndex = 5,
@@ -3049,7 +3274,7 @@ function beginStage(result)
 		local cellDef = PetCatalog.Get(strip[index])
 		local color = rarityOf(cellDef)
 		local frame = makeFrame(clip, "Cell" .. index, {
-			Size = UDim2.fromOffset(cellW - 10, STRIP.H - 18),
+			Size = UDim2.fromOffset(cellW - 10, K.STRIP.H - 18),
 			BackgroundTransparency = 0,
 			BackgroundColor3 = WHITE,
 			ZIndex = 2,
@@ -3078,7 +3303,7 @@ function beginStage(result)
 	end
 	local function layoutCells(x)
 		local first = math.max(1, math.floor(x / cellW))
-		local last = math.min(#strip, math.floor((x + STRIP.W) / cellW) + 2)
+		local last = math.min(#strip, math.floor((x + K.STRIP.W) / cellW) + 2)
 		for index = first, last do
 			local cell = cells[index] or makeCell(index)
 			cell.Frame.Position = UDim2.fromOffset(math.floor((index - 1) * cellW - x + 5 + 0.5), 9)
@@ -3139,7 +3364,7 @@ function beginStage(result)
 		stage.RevealSize = { L.W, L.H }
 		local holder = makeFrame(root, "RevealHolder", {
 			AnchorPoint = Vector2.new(0.5, 0.5),
-			Position = UDim2.new(0.5, 0, 0.5, 14),
+			Position = UDim2.new(0.5, 0, 0.5, 6),
 			Size = UDim2.fromOffset(L.W, L.H),
 			ZIndex = 2,
 		})
@@ -3163,9 +3388,14 @@ function beginStage(result)
 		local order = rarityOrder(def.Rarity)
 		local glowColor = def.Rarity == "Secret" and PURPLE or rarityColor
 
-		-- slowly turning rays + soft glow discs behind the pet (stronger for rarer pets)
+		-- slowly turning rays + soft glow discs behind the pet (stronger for rarer pets), clipped to the card
+		local fxLayer = makeFrame(c, "RevealFx", {
+			Size = UDim2.new(1, 0, 1, 0),
+			ClipsDescendants = true,
+			ZIndex = 1,
+		})
 		local raySize = L.ViewSize + 80
-		local rays = makeFrame(c, "Rays", {
+		local rays = makeFrame(fxLayer, "Rays", {
 			AnchorPoint = Vector2.new(0.5, 0.5),
 			Position = L.View,
 			Size = UDim2.fromOffset(raySize, raySize),
@@ -3194,7 +3424,7 @@ function beginStage(result)
 			})
 		end
 		for i, disc in ipairs({ { 1.0, 0.86 }, { 0.78, 0.8 }, { 0.58, 0.72 } }) do
-			local glow = makeFrame(c, "Glow" .. i, {
+			local glow = makeFrame(fxLayer, "Glow" .. i, {
 				AnchorPoint = Vector2.new(0.5, 0.5),
 				Position = L.View,
 				Size = UDim2.fromOffset(L.ViewSize * disc[1], L.ViewSize * disc[1]),
@@ -3246,10 +3476,10 @@ function beginStage(result)
 		Util.Create("UITextSizeConstraint", { MaxTextSize = 34, MinTextSize = 20, Parent = nameLabel })
 		local meta = makeFrame(c, "Meta", { Position = L.Meta[1], Size = L.Meta[2], ZIndex = 4 })
 		listLayout(meta, Enum.FillDirection.Horizontal, 8, L.Meta[3], Enum.VerticalAlignment.Center)
-		local pill = CloudUI.Pill(def.Rarity, rarityColor, meta)
+		local pill = readablePill(def.Rarity, rarityColor, meta)
 		pill.LayoutOrder = 1
 		for i, element in ipairs(elementsOf(def)) do
-			elementPill(meta, element, 17, 1 + i)
+			elementPill(meta, element, 18, 1 + i)
 		end
 		makeText(meta, "Owned", "You own x" .. tostring(math.floor(tonumber(result.Count) or State.OwnedCount(def.Id))), "Heading", 19, MUTED, {
 			AutomaticSize = Enum.AutomaticSize.X,
@@ -3345,14 +3575,14 @@ function beginStage(result)
 	local function step(dt)
 		if stage.Phase == "spin" then
 			if stage.Skip then
-				stage.Elapsed = STRIP.Seconds
+				stage.Elapsed = K.STRIP.Seconds
 			end
 			stage.Elapsed = stage.Elapsed + dt
-			local t = Util.Clamp(stage.Elapsed / STRIP.Seconds, 0, 1)
-			local p = 1 - (1 - t) ^ STRIP.Curve
+			local t = Util.Clamp(stage.Elapsed / K.STRIP.Seconds, 0, 1)
+			local p = 1 - (1 - t) ^ K.STRIP.Curve
 			stage.X = startX + (endX - startX) * p
 			layoutCells(stage.X)
-			local tick = math.floor((stage.X + STRIP.W / 2) / cellW)
+			local tick = math.floor((stage.X + K.STRIP.W / 2) / cellW)
 			if tick ~= stage.Tick then
 				stage.Tick = tick
 				pointer.Rotation = 16

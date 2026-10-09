@@ -227,7 +227,7 @@ local function buildHint()
 		Position = UDim2.new(0.5, 0, 0, -12),
 		Size = UDim2.fromOffset(0, 0),
 		AutomaticSize = Enum.AutomaticSize.XY,
-		BackgroundColor3 = Colors.Panel,
+		BackgroundColor3 = Colors.White, -- the gradient below multiplies this base colour
 		BackgroundTransparency = 0.04,
 		BorderSizePixel = 0,
 		Visible = false,

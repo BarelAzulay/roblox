@@ -56,7 +56,7 @@ TutorialSteps.Steps = {
 	{
 		Id = "shop",
 		Title = "The Cloud Shop",
-		Text = "Next stop: the Cloud Shop! Follow the arrow to the roulette machines and walk up to one. The Shop button works too.",
+		Text = "Next stop: the Cloud Shop! Follow the arrow to the roulette machines and open one. The Shop button works too!",
 		Target = { Kind = "Shop", Label = "Cloud Shop" },
 		CompleteOn = "ShopOpened",
 		Hint = "Open the shop",

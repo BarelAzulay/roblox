@@ -388,10 +388,11 @@ end
 ----------------------------------------------------------------------
 
 -- Called whenever a player arrives on a step (also on load): baselines + the one-time gift.
+-- Returns true when it already stored the progress (the gift step does).
 local function enterStep(player, track)
 	local step = currentStep(track)
 	if not step then
-		return
+		return false
 	end
 	track.SpinsBase = spinsOf(player)
 	track.LastEquipped = equippedCsv(player)
@@ -404,10 +405,11 @@ local function enterStep(player, track)
 			if amount > 0 and addTokens(player, amount) then
 				notify(player, "Nimbus gave you " .. amount .. " " .. TOKEN_GLYPH .. " Cloud Tokens!", "token", 5)
 			end
-		else
-			track.Gifted = false -- not stored: try again on the next load
+			return true
 		end
+		track.Gifted = false -- not stored: try again on the next load
 	end
+	return false
 end
 
 local function finish(player, track, skipped)
@@ -448,8 +450,9 @@ local function advance(player, track)
 		return
 	end
 	track.Step = index + 1
-	persist(player, track)
-	enterStep(player, track)
+	if not enterStep(player, track) then
+		persist(player, track)
+	end
 	sendState(player, track)
 end
 

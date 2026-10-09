@@ -71,31 +71,39 @@ IndexController.Closed = Util.Signal()
 local K = {
 	PREF_W = 1240,
 	PREF_H = 760,
-	MIN_W = 900,
-	MIN_H = 420,
-	BUMPS = 28, -- room the panel's cloud bumps need above its top edge
+	MIN_W = 800,
+	MIN_H = 380,
+	BUMPS = 28, -- room the panel's cloud bumps like to have above its top edge
 	MARGIN = 12, -- screen px kept free around the window
 	NARROW = 1100, -- below this design width the side columns get narrower
+	SHORT = 560, -- below this design height the compact layout is used (landscape phones)
 	GROUP_W = 236,
-	GROUP_W_NARROW = 198,
+	GROUP_W_NARROW = 184,
 	DETAIL_W = 336,
-	DETAIL_W_NARROW = 288,
+	DETAIL_W_NARROW = 264,
 	GAP = 12,
 	TILE_W = 126,
 	TILE_H = 154,
 	TILE_W_NARROW = 114,
 	TILE_H_NARROW = 142,
+	TILE_H_SHORT = 132,
 	TILE_GAP = 10,
 	HEADER_H = 58,
+	HEADER_H_SHORT = 48,
 	REWARD_H = 96,
+	REWARD_H_SHORT = 62,
 	FOOTER_H = 46,
-	GROUP_TILE_H = 90,
+	VIEW_H = 180,
+	VIEW_H_SHORT = 140,
+	GROUP_TILE_H = 72,
+	GROUP_TILE_H_SHORT = 60,
 	ELEMENTS_BTN_H = 52,
+	ELEMENTS_BTN_H_SHORT = 44,
 	TILES_PER_FRAME = 2, -- pet viewports attached per frame (a High-detail pet is up to ~350 parts)
 	CLAIM_GAP = 0.6, -- seconds between two IndexClaim sends
 	CLAIM_TIMEOUT = 5, -- seconds the CLAIM button waits for the server before it resets
 	BACK_ACTION = "NimbusIndexBack",
-	DISPLAY_ORDER = 19, -- just below NimbusMenu (20): the menu column stays visible and clickable
+	DISPLAY_ORDER = 21, -- above NimbusMenu (20): on small screens the window may cover the menu column
 }
 
 local Colors = Theme.Colors
@@ -142,6 +150,7 @@ local S = {
 	DetailKey = nil, -- "<petId>|<discovered>" of the detail viewport
 	DetailViewport = nil,
 	DetailPills = {},
+	PillKey = nil,
 	Narrow = false,
 	ClaimPending = nil, -- groupId while a claim waits for the server
 	ClaimToken = 0,
@@ -514,6 +523,15 @@ end
 ----------------------------------------------------------------------
 -- Visual helpers
 ----------------------------------------------------------------------
+-- CloudUI.Pill with a text size that stays >= 14 px at the phone scale (0.8).
+local function readablePill(text, kind, parent)
+	local pill = CloudUI.Pill(text, kind, parent)
+	if pill then
+		pill.TextSize = math.max(pill.TextSize, 18)
+	end
+	return pill
+end
+
 -- Small coloured pill with the element name (no asset ids).
 local function elementPill(parent, element, textSize, layoutOrder)
 	local color = elementColor(element)
@@ -613,40 +631,124 @@ local function menuColumnRight()
 	return 0
 end
 
+local function renderFooter()
+	local total = totalPets()
+	local unlocked = unlockedCount()
+	if U.FooterText then
+		U.FooterText.Text = string.format("Unlocked: %d/%d", unlocked, total)
+		U.FooterFill.Size = UDim2.new(total > 0 and unlocked / total or 0, 0, 1, 0)
+		U.FooterPercent.Text = string.format("%d%%", total > 0 and math.floor(unlocked / total * 100) or 0)
+	end
+	-- the compact layout has no footer: the title carries the count
+	if U.Panel then
+		if S.Short then
+			U.Panel.SetTitle(string.format("%s Pet Index   Unlocked: %d/%d", G.Book, unlocked, total))
+		else
+			U.Panel.SetTitle(G.Book .. " Pet Index")
+		end
+	end
+end
+
+-- Design size + scale + centre of the window. The window gets its preferred size when the screen has room
+-- at the readability scale, shrinks towards its minimum size first and only then is scaled below the screen
+-- factor; it keeps clear of the menu column unless covering the column buys a bigger (more readable) scale.
+local function fitWindow()
+	local area = guiSize()
+	local factor = Theme.ScreenFactor(viewportHeight())
+	local freeH = area.Y - 2 * K.MARGIN
+	local function solve(left)
+		local freeW = area.X - left - 2 * K.MARGIN
+		local w = Util.Clamp(math.floor(freeW / factor), K.MIN_W, K.PREF_W)
+		local h = Util.Clamp(math.floor((freeH - K.BUMPS * factor) / factor), K.MIN_H, K.PREF_H)
+		local scale = Util.Clamp(math.min(factor, freeW / w, freeH / h), 0.3, 1.25)
+		return w, h, scale
+	end
+	local left = menuColumnRight()
+	local w, h, scale = solve(left)
+	if left > 0 and scale < factor - 0.001 then
+		local w2, h2, scale2 = solve(0)
+		if scale2 > scale + 0.001 then
+			w, h, scale, left = w2, h2, scale2, 0
+		end
+	end
+	local half = w * scale / 2
+	local x = math.max(area.X / 2, left + K.MARGIN + half)
+	x = math.min(x, area.X - K.MARGIN - half)
+	local halfH = h * scale / 2
+	local y = math.min(area.Y / 2 + K.BUMPS * scale / 2, area.Y - K.MARGIN / 2 - halfH)
+	y = math.max(y, halfH)
+	return w, h, scale, x, y
+end
+
 local function relayout()
 	if not S.Built then
 		return
 	end
-	local area = guiSize()
-	local factor = Theme.ScreenFactor(viewportHeight())
-	local left = menuColumnRight()
-	local freeW = area.X - left - 2 * K.MARGIN
-	local freeH = area.Y - 2 * K.MARGIN
-	local w = Util.Clamp(math.floor(freeW / factor), K.MIN_W, K.PREF_W)
-	local h = Util.Clamp(math.floor(freeH / factor - K.BUMPS), K.MIN_H, K.PREF_H)
-	local scale = math.min(factor, freeW / w, freeH / (h + K.BUMPS))
-	scale = Util.Clamp(scale, 0.3, 1.25)
+	local w, h, scale, x, y = fitWindow()
 	U.Holder.Size = UDim2.fromOffset(w, h)
 	U.Fit.Scale = scale
-	-- centred on the screen unless that would run under the menu column: then centred in the free area
-	local half = w * scale / 2
-	local cx = math.max(area.X / 2, left + K.MARGIN + half)
-	cx = math.min(cx, area.X - K.MARGIN - half)
-	local cy = area.Y / 2 + K.BUMPS * scale / 2
-	U.Holder.Position = UDim2.fromOffset(math.floor(cx + 0.5), math.floor(cy + 0.5))
+	U.Holder.Position = UDim2.fromOffset(math.floor(x + 0.5), math.floor(y + 0.5))
 
-	-- narrow windows get narrower side columns and smaller tiles
+	-- narrow windows get narrower side columns, short ones the compact layout
 	local narrow = w < K.NARROW
-	S.Narrow = narrow
+	local short = h < K.SHORT
+	S.Narrow, S.Short = narrow, short
 	local groupW = narrow and K.GROUP_W_NARROW or K.GROUP_W
 	local detailW = narrow and K.DETAIL_W_NARROW or K.DETAIL_W
+	local headerH = short and K.HEADER_H_SHORT or K.HEADER_H
+	local rewardH = short and K.REWARD_H_SHORT or K.REWARD_H
+	local footerH = short and 0 or K.FOOTER_H
+	U.Main.Size = UDim2.new(1, -20, 1, -(20 + footerH))
+	U.Footer.Visible = not short
 	U.Groups.Size = UDim2.new(0, groupW, 1, 0)
 	U.Detail.Size = UDim2.new(0, detailW, 1, 0)
 	U.Centre.Position = UDim2.new(0, groupW + K.GAP, 0, 0)
 	U.Centre.Size = UDim2.new(1, -(groupW + detailW + 2 * K.GAP), 1, 0)
-	local tileW = narrow and K.TILE_W_NARROW or K.TILE_W
-	local tileH = narrow and K.TILE_H_NARROW or K.TILE_H
-	U.GridLayout.CellSize = UDim2.fromOffset(tileW, tileH)
+	U.Header.Size = UDim2.new(1, 0, 0, headerH)
+	U.GridWell.Position = UDim2.fromOffset(0, headerH + 8)
+	U.GridWell.Size = UDim2.new(1, 0, 1, -(headerH + 8 + rewardH + 8))
+	U.Rewards.Size = UDim2.new(1, 0, 0, rewardH)
+	U.RewardSub.Visible = not short
+	U.RewardLabel.Visible = not (short and narrow)
+	if short then
+		U.RewardLabel.AnchorPoint = Vector2.new(0, 0.5)
+		U.RewardLabel.Position = UDim2.new(0, 14, 0.5, 0)
+		U.RewardAmount.AnchorPoint = Vector2.new(0, 0.5)
+		U.RewardAmount.Position = UDim2.new(0, narrow and 14 or 128, 0.5, 0)
+		U.RewardAmount.Size = UDim2.new(1, -(narrow and 180 or 294), 0, 34)
+		U.ClaimButton.Size = UDim2.fromOffset(150, 52)
+		U.ClaimGlow.Size = UDim2.fromOffset(150 + 14, 52 + 10)
+		U.ClaimGlow.Position = UDim2.new(1, -14 - 75, 0.5, 0)
+	else
+		U.RewardLabel.AnchorPoint = Vector2.new(0, 0)
+		U.RewardLabel.Position = UDim2.fromOffset(16, 8)
+		U.RewardAmount.AnchorPoint = Vector2.new(0, 0)
+		U.RewardAmount.Position = UDim2.fromOffset(140, 6)
+		U.RewardAmount.Size = UDim2.new(1, -350, 0, 32)
+		U.ClaimButton.Size = UDim2.fromOffset(184, 60)
+		U.ClaimGlow.Size = UDim2.fromOffset(184 + 16, 60 + 16)
+		U.ClaimGlow.Position = UDim2.new(1, -14 - 92, 0.5, 0)
+	end
+	if U.ElementsCard then
+		U.ElementsCard.Size = UDim2.new(1, 0, 1, -(rewardH + 8))
+	end
+	U.View.Size = UDim2.new(1, 0, 0, short and K.VIEW_H_SHORT or K.VIEW_H)
+	local tileH = short and K.GROUP_TILE_H_SHORT or K.GROUP_TILE_H
+	for _, tile in pairs(S.GroupTiles) do
+		tile.Button.Size = UDim2.new(1, -10, 0, tileH)
+	end
+	if U.ElementsButton then
+		local buttonH = short and K.ELEMENTS_BTN_H_SHORT or K.ELEMENTS_BTN_H
+		U.ElementsButton.Size = UDim2.new(1, -10, 0, buttonH)
+		U.GroupList.Size = UDim2.new(1, 0, 1, -(buttonH + 8))
+	end
+	local petW = narrow and K.TILE_W_NARROW or K.TILE_W
+	local petH = narrow and K.TILE_H_NARROW or K.TILE_H
+	if short then
+		petH = math.min(petH, K.TILE_H_SHORT)
+	end
+	U.GridLayout.CellSize = UDim2.fromOffset(petW, petH)
+	renderFooter()
 end
 
 ----------------------------------------------------------------------
@@ -718,36 +820,38 @@ local function buildGroupTile(group, index)
 	local gloss = makeFrame(button, "Gloss", {
 		BackgroundTransparency = 0.8,
 		BackgroundColor3 = WHITE,
-		Position = UDim2.fromOffset(8, 5),
-		Size = UDim2.new(1, -16, 0, 12),
+		Position = UDim2.fromOffset(8, 4),
+		Size = UDim2.new(1, -16, 0, 10),
 	})
 	round(gloss)
-	makeText(button, "Art", G.Star, "Title", 64, Theme.Lighten(accent, 0.5), {
-		AnchorPoint = Vector2.new(1, 0.5),
-		Position = UDim2.new(1, -6, 0.5, 4),
-		Size = UDim2.fromOffset(70, 70),
-		TextTransparency = 0.55,
+	makeText(button, "Art", G.Star, "Title", 38, Theme.Lighten(accent, 0.5), {
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, -8, 0, 0),
+		Size = UDim2.fromOffset(40, 40),
+		TextTransparency = 0.45,
 		TextStrokeTransparency = 1,
 		Rotation = 12,
 	})
-	tile.Name = makeText(button, "GroupName", group.Rarity, "Title", 25, WHITE, {
-		Position = UDim2.fromOffset(14, 8),
-		Size = UDim2.new(1, -60, 0, 30),
+	-- name on top, then a slim progress bar with the "3/6" count at its right end
+	tile.Name = makeText(button, "GroupName", group.Rarity, "Title", 24, WHITE, {
+		Position = UDim2.fromOffset(12, 4),
+		Size = UDim2.new(1, -52, 0, 30),
 		TextXAlignment = Enum.TextXAlignment.Left,
 		TextScaled = true,
 		ZIndex = 2,
 	})
-	Util.Create("UITextSizeConstraint", { MaxTextSize = 25, MinTextSize = 16, Parent = tile.Name })
-	-- progress: "3/6" + a slim bar
-	tile.Progress = makeText(button, "Progress", "0/0", "Heading", 20, WHITE, {
-		Position = UDim2.fromOffset(14, 40),
-		Size = UDim2.new(0, 70, 0, 24),
-		TextXAlignment = Enum.TextXAlignment.Left,
+	Util.Create("UITextSizeConstraint", { MaxTextSize = 24, MinTextSize = 17, Parent = tile.Name })
+	tile.Progress = makeText(button, "Progress", "0/0", "Heading", 19, WHITE, {
+		AnchorPoint = Vector2.new(1, 1),
+		Position = UDim2.new(1, -10, 1, -4),
+		Size = UDim2.fromOffset(58, 24),
+		TextXAlignment = Enum.TextXAlignment.Right,
 		ZIndex = 2,
 	})
 	local track = makeFrame(button, "Track", {
-		Position = UDim2.fromOffset(14, 68),
-		Size = UDim2.new(1, -28, 0, 10),
+		AnchorPoint = Vector2.new(0, 1),
+		Position = UDim2.new(0, 12, 1, -11),
+		Size = UDim2.new(1, -80, 0, 10),
 		BackgroundTransparency = 0.2,
 		BackgroundColor3 = Color3.fromRGB(14, 20, 52),
 		ZIndex = 2,
@@ -764,7 +868,7 @@ local function buildGroupTile(group, index)
 	-- top-right corner: a check when claimed, a red "!" when the reward waits
 	tile.Badge = makeFrame(button, "Badge", {
 		AnchorPoint = Vector2.new(0.5, 0.5),
-		Position = UDim2.new(1, -18, 0, 18),
+		Position = UDim2.new(1, -8, 0, 8),
 		Size = UDim2.fromOffset(28, 28),
 		BackgroundTransparency = 0,
 		BackgroundColor3 = BUTTONS.Red or BAD,
@@ -821,10 +925,6 @@ end
 ----------------------------------------------------------------------
 -- Pet grid (centre)
 ----------------------------------------------------------------------
-local function tileTextColor(def)
-	return Theme.Lighten(rarityAccent(def.Rarity), 0.55)
-end
-
 local function destroyTileViewport(tile)
 	if tile.Viewport then
 		pcall(tile.Viewport.Destroy)
@@ -860,8 +960,11 @@ local function paintTile(tile)
 			tile.Viewport.SetAnimated(selected or tile.Hover)
 		end
 	end
-	-- element badge, only once discovered
+	-- element badge, only once discovered (the tile has room for one; the detail card lists them all)
 	local elements = discovered and elementsOf(def) or {}
+	if #elements > 1 then
+		elements = { elements[1] }
+	end
 	local key = table.concat(elements, ",")
 	if tile.ElementKey ~= key then
 		tile.ElementKey = key
@@ -871,7 +974,7 @@ local function paintTile(tile)
 			end
 		end
 		for i, element in ipairs(elements) do
-			elementPill(tile.Elements, element, 15, i)
+			elementPill(tile.Elements, element, 18, i)
 		end
 	end
 end
@@ -1068,29 +1171,25 @@ local function renderRewards()
 		CloudUI.SetDisabled(button, true)
 	end
 	U.RewardSub.TextColor3 = claimable and Theme.Lighten(GOOD, 0.45) or MUTED
-	-- a gentle pulse while the reward waits
+	-- a soft glow pulses behind the button while the reward waits
 	if claimable and not pending then
+		U.ClaimGlow.Visible = true
 		if not U.ClaimPulse then
+			U.ClaimGlow.BackgroundTransparency = 0.75
 			U.ClaimPulse = TweenService:Create(
-				U.ClaimScale,
+				U.ClaimGlow,
 				TweenInfo.new(0.7, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
-				{ Scale = 1.07 }
+				{ BackgroundTransparency = 0.2 }
 			)
 			U.ClaimPulse:Play()
 		end
-	elseif U.ClaimPulse then
-		U.ClaimPulse:Cancel()
-		U.ClaimPulse = nil
-		U.ClaimScale.Scale = 1
+	else
+		if U.ClaimPulse then
+			U.ClaimPulse:Cancel()
+			U.ClaimPulse = nil
+		end
+		U.ClaimGlow.Visible = false
 	end
-end
-
-local function renderFooter()
-	local total = totalPets()
-	local unlocked = unlockedCount()
-	U.FooterText.Text = string.format("Unlocked: %d/%d", unlocked, total)
-	U.FooterFill.Size = UDim2.new(total > 0 and unlocked / total or 0, 0, 1, 0)
-	U.FooterPercent.Text = string.format("%d%%", total > 0 and math.floor(unlocked / total * 100) or 0)
 end
 
 ----------------------------------------------------------------------
@@ -1159,24 +1258,27 @@ function renderDetail()
 	U.Name.Text = discovered and def.Name or "???"
 	U.Name.TextColor3 = discovered and Theme.Lighten(accent, 0.45) or MUTED
 
-	-- meta: rarity + element pills
-	clearDetailPills()
-	local rarityPill = CloudUI.Pill(def.Rarity, rarityColor(def.Rarity), U.Meta)
-	rarityPill.LayoutOrder = 1
-	table.insert(S.DetailPills, rarityPill)
+	-- meta: rarity, element and role pills (rebuilt only when they change)
 	local elements = discovered and elementsOf(def) or {}
-	for i, element in ipairs(elements) do
-		table.insert(S.DetailPills, elementPill(U.Meta, element, 17, 1 + i))
-	end
-
-	-- role
 	local role = discovered and def.Role or nil
-	U.RoleRow.Visible = role ~= nil
+	local pillKey = tostring(def.Rarity) .. "|" .. table.concat(elements, ",") .. "|" .. tostring(role)
+	if S.PillKey ~= pillKey then
+		S.PillKey = pillKey
+		clearDetailPills()
+		local rarityPill = readablePill(def.Rarity, rarityColor(def.Rarity), U.Meta)
+		rarityPill.LayoutOrder = 1
+		table.insert(S.DetailPills, rarityPill)
+		for i, element in ipairs(elements) do
+			table.insert(S.DetailPills, elementPill(U.Meta, element, 18, 1 + i))
+		end
+		if role then
+			local rolePill = readablePill(role, ROLE_COLORS[role] or BUTTONS.Blue, U.Meta)
+			rolePill.LayoutOrder = 50
+			table.insert(S.DetailPills, rolePill)
+		end
+	end
 	U.RoleBlurb.Visible = role ~= nil
 	if role then
-		local rolePill = CloudUI.Pill(role, ROLE_COLORS[role] or BUTTONS.Blue, U.RoleRow)
-		rolePill.LayoutOrder = 1
-		table.insert(S.DetailPills, rolePill)
 		local blurbs = PetCatalog.RoleBlurbs or {}
 		U.RoleBlurb.Text = blurbs[role] or ""
 	end
@@ -1530,6 +1632,7 @@ end
 local function buildCentre(centre)
 	-- header: group name + progress bar "x/N"
 	local header = inset(centre, "GroupHeader", { Size = UDim2.new(1, 0, 0, K.HEADER_H) })
+	U.Header = header
 	U.GroupTitle = makeText(header, "GroupTitle", "", "Title", 28, WHITE, {
 		Position = UDim2.fromOffset(16, 0),
 		Size = UDim2.new(0.5, -16, 1, 0),
@@ -1563,6 +1666,7 @@ local function buildCentre(centre)
 		Position = UDim2.fromOffset(0, K.HEADER_H + 8),
 		Size = UDim2.new(1, 0, 1, -(K.HEADER_H + 8 + K.REWARD_H + 8)),
 	})
+	U.GridWell = well
 	U.Grid = scroller(well, "PetGrid", {
 		Position = UDim2.fromOffset(4, 4),
 		Size = UDim2.new(1, -8, 1, -8),
@@ -1583,7 +1687,7 @@ local function buildCentre(centre)
 		Size = UDim2.new(1, 0, 0, K.REWARD_H),
 	})
 	U.Rewards = rewards
-	makeText(rewards, "Label", "Rewards:", "Heading", 22, WHITE, {
+	U.RewardLabel = makeText(rewards, "Label", "Rewards:", "Heading", 22, WHITE, {
 		Position = UDim2.fromOffset(16, 8),
 		Size = UDim2.fromOffset(120, 28),
 		TextXAlignment = Enum.TextXAlignment.Left,
@@ -1600,6 +1704,15 @@ local function buildCentre(centre)
 		TextXAlignment = Enum.TextXAlignment.Left,
 		TextYAlignment = Enum.TextYAlignment.Top,
 	})
+	-- the glow is a sibling behind the button (the button's own UIScale is its hover effect)
+	U.ClaimGlow = makeFrame(rewards, "ClaimGlow", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		BackgroundTransparency = 0.6,
+		BackgroundColor3 = Theme.Lighten(BUTTONS.Green or GOOD, 0.35),
+		Visible = false,
+		ZIndex = 1,
+	})
+	corner(U.ClaimGlow, 18)
 	U.ClaimButton = CloudUI.Button({
 		Name = "Claim",
 		Text = "CLAIM",
@@ -1608,12 +1721,12 @@ local function buildCentre(centre)
 		AnchorPoint = Vector2.new(1, 0.5),
 		Position = UDim2.new(1, -14, 0.5, 0),
 		TextSize = 26,
+		ZIndex = 2,
 		Callback = function()
 			safe("claim", requestClaim)
 		end,
 		Parent = rewards,
 	})
-	U.ClaimScale = Util.Create("UIScale", { Name = "Pulse", Scale = 1, Parent = U.ClaimButton })
 end
 
 local function buildDetail(detail)
@@ -1630,26 +1743,29 @@ local function buildDetail(detail)
 	})
 	U.DetailBody = body
 	pad(body, 10, 8, 14, 12)
-	listLayout(body, Enum.FillDirection.Vertical, 8, Enum.HorizontalAlignment.Center)
+	listLayout(body, Enum.FillDirection.Vertical, 6, Enum.HorizontalAlignment.Center)
 
 	-- big viewport with a soft rarity glow and a "?" behind silhouettes
-	local view = makeFrame(body, "View", { Size = UDim2.new(1, 0, 0, 220), LayoutOrder = 1 })
+	local view = makeFrame(body, "View", { Size = UDim2.new(1, 0, 0, K.VIEW_H), LayoutOrder = 1 })
+	U.View = view
 	U.Glows = {}
-	for i, disc in ipairs({ { 210, 0.84 }, { 160, 0.76 } }) do
+	for i, disc in ipairs({ { 0.96, 0.84 }, { 0.72, 0.76 } }) do
+		-- square discs sized by the view's height (the view is shorter in the compact layout)
 		local glow = makeFrame(view, "Glow" .. i, {
 			AnchorPoint = Vector2.new(0.5, 0.5),
 			Position = UDim2.new(0.5, 0, 0.5, 0),
-			Size = UDim2.fromOffset(disc[1], disc[1]),
+			Size = UDim2.fromScale(disc[1], disc[1]),
 			BackgroundTransparency = disc[2],
 			BackgroundColor3 = GOLD,
 		})
+		Util.Create("UIAspectRatioConstraint", { AspectRatio = 1, DominantAxis = Enum.DominantAxis.Height, Parent = glow })
 		round(glow)
 		table.insert(U.Glows, glow)
 	end
-	U.Mystery = makeText(view, "Mystery", "?", "Title", 120, Color3.fromRGB(120, 140, 196), {
+	U.Mystery = makeText(view, "Mystery", "?", "Title", 100, Color3.fromRGB(120, 140, 196), {
 		AnchorPoint = Vector2.new(0.5, 0.5),
 		Position = UDim2.new(0.5, 0, 0.5, 0),
-		Size = UDim2.fromOffset(150, 150),
+		Size = UDim2.fromScale(0.6, 0.6),
 		TextTransparency = 0.6,
 		TextStrokeTransparency = 1,
 		ZIndex = 2,
@@ -1676,10 +1792,14 @@ local function buildDetail(detail)
 		LayoutOrder = 3,
 	})
 	Util.Create("UITextSizeConstraint", { MaxTextSize = 30, MinTextSize = 18, Parent = U.Name })
-	U.Meta = makeFrame(body, "Meta", { Size = UDim2.new(1, 0, 0, 30), LayoutOrder = 4 })
-	listLayout(U.Meta, Enum.FillDirection.Horizontal, 6, Enum.HorizontalAlignment.Center, Enum.VerticalAlignment.Center)
-	U.RoleRow = makeFrame(body, "Role", { Size = UDim2.new(1, 0, 0, 30), LayoutOrder = 5 })
-	listLayout(U.RoleRow, Enum.FillDirection.Horizontal, 6, Enum.HorizontalAlignment.Center, Enum.VerticalAlignment.Center)
+	-- rarity, role and element pills share one row that wraps when the card is narrow
+	U.Meta = makeFrame(body, "Meta", {
+		Size = UDim2.new(1, 0, 0, 30),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		LayoutOrder = 4,
+	})
+	local metaLayout = listLayout(U.Meta, Enum.FillDirection.Horizontal, 6, Enum.HorizontalAlignment.Center, Enum.VerticalAlignment.Center)
+	metaLayout.Wraps = true
 	U.RoleBlurb = makeText(body, "RoleBlurb", "", "Body", 18, MUTED, {
 		Size = UDim2.new(1, 0, 0, 0),
 		AutomaticSize = Enum.AutomaticSize.Y,
@@ -1693,8 +1813,8 @@ local function buildDetail(detail)
 		AutomaticSize = Enum.AutomaticSize.Y,
 		LayoutOrder = 7,
 	})
-	pad(statsBox, 10, 8, 10, 8)
-	listLayout(statsBox, Enum.FillDirection.Vertical, 6)
+	pad(statsBox, 10, 6, 10, 6)
+	listLayout(statsBox, Enum.FillDirection.Vertical, 4)
 	U.StatRows = {}
 	local statKeys = PetCatalog.StatOrder or { "Income", "Power", "Health", "Speed" }
 	local statNames = PetCatalog.StatNames or {}
@@ -1705,7 +1825,7 @@ local function buildDetail(detail)
 		Speed = Color3.fromRGB(98, 172, 232),
 	}
 	for i, statKey in ipairs(statKeys) do
-		local row = makeFrame(statsBox, "Stat_" .. statKey, { Size = UDim2.new(1, 0, 0, 26), LayoutOrder = i })
+		local row = makeFrame(statsBox, "Stat_" .. statKey, { Size = UDim2.new(1, 0, 0, 24), LayoutOrder = i })
 		makeText(row, "Label", statNames[statKey] or statKey, "Heading", 18, WHITE, {
 			Size = UDim2.new(0, 86, 1, 0),
 			TextXAlignment = Enum.TextXAlignment.Left,
@@ -1735,7 +1855,7 @@ local function buildDetail(detail)
 
 	-- special attack
 	local special = inset(body, "Special", {
-		Size = UDim2.new(1, 0, 0, 62),
+		Size = UDim2.new(1, 0, 0, 58),
 		LayoutOrder = 8,
 	})
 	U.Special = special
@@ -1745,7 +1865,7 @@ local function buildDetail(detail)
 		TextXAlignment = Enum.TextXAlignment.Left,
 	})
 	U.SpecialName = makeText(special, "SpecialName", "", "Title", 22, WHITE, {
-		Position = UDim2.fromOffset(10, 28),
+		Position = UDim2.fromOffset(10, 26),
 		Size = UDim2.new(1, -110, 0, 28),
 		TextXAlignment = Enum.TextXAlignment.Left,
 		TextScaled = true,
@@ -1753,7 +1873,7 @@ local function buildDetail(detail)
 	Util.Create("UITextSizeConstraint", { MaxTextSize = 22, MinTextSize = 16, Parent = U.SpecialName })
 	U.SpecialKind = makeText(special, "Kind", "", "Heading", 18, MUTED, {
 		AnchorPoint = Vector2.new(1, 0),
-		Position = UDim2.new(1, -10, 0, 30),
+		Position = UDim2.new(1, -10, 0, 28),
 		Size = UDim2.fromOffset(90, 24),
 		TextXAlignment = Enum.TextXAlignment.Right,
 	})
@@ -1816,6 +1936,7 @@ local function buildWindow()
 		Position = UDim2.fromOffset(10, 10),
 		Size = UDim2.new(1, -20, 1, -(20 + K.FOOTER_H)),
 	})
+	U.Main = main
 
 	-- left: group list + Elements button
 	local hasElements = type(Config.Elements) == "table" and type(Config.Elements.Order) == "table"
@@ -1823,7 +1944,7 @@ local function buildWindow()
 	local listHeight = hasElements and -(K.ELEMENTS_BTN_H + 8) or 0
 	U.GroupList = scroller(U.Groups, "GroupList", { Size = UDim2.new(1, 0, 1, listHeight) })
 	pad(U.GroupList, 4, 6, 10, 6)
-	listLayout(U.GroupList, Enum.FillDirection.Vertical, 8, Enum.HorizontalAlignment.Center)
+	listLayout(U.GroupList, Enum.FillDirection.Vertical, 6, Enum.HorizontalAlignment.Center)
 	for index, group in ipairs(S.Groups) do
 		buildGroupTile(group, index)
 	end
@@ -1864,6 +1985,7 @@ local function buildWindow()
 		Position = UDim2.new(0, 10, 1, -6),
 		Size = UDim2.new(1, -20, 0, K.FOOTER_H - 6),
 	})
+	U.Footer = footer
 	U.FooterText = makeText(footer, "Unlocked", "Unlocked: 0/0", "Title", 26, WHITE, {
 		Size = UDim2.new(0, 260, 1, 0),
 		TextXAlignment = Enum.TextXAlignment.Left,
@@ -1956,6 +2078,15 @@ function IndexController.Open(groupId)
 				if id:lower() == groupId:lower() then
 					target = id
 				end
+			end
+		end
+	end
+	if not target and not S.Open then
+		-- no group asked for: a waiting reward first, else where the player left off
+		for _, group in ipairs(S.Groups) do
+			local _, _, _, _, claimable = groupStatus(group)
+			if claimable and not target then
+				target = group.Id
 			end
 		end
 	end
