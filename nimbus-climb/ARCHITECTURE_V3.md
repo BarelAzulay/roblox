@@ -268,6 +268,39 @@ loop, no per-frame allocation, frozen when far from the lobby (player in a match
 
 ---
 
+## 10. The player's own creature: Stormfang + the Storm Altar (added after the player shared their art)
+The player designed this creature themselves and wants it in the game. Reference art (READ these images before
+building): `branding/stormfang-concept.webp` (original sheet: three poses of the creature on dark storm clouds plus a
+crystal altar ring), `branding/stormfang-art.png` (same, transparent background) and `branding/stormfang-portrait.png`
+(close-up of the head). The player uploaded the sheet to Roblox as asset 129423539279679 -> `Config.Art.StormfangImage`.
+
+* **Pet (catalog agent + pets agent):** `Id = "stormfang"`, `Name = "Stormfang"`, `Rarity = "Secret"` (the 4th Secret pet,
+  listed first among the Secrets: it is the player's signature creature), `Role = "Combat"`, Special "Storm Pounce"
+  (kind `Pounce`, electric blue), stats/perks at the top of the Secret tier (must pass the Secret > best Mythic check).
+  New species `"Stormfang"` (added to `PetCatalog.Species` and built by PetBuilder, NOT a recoloured Fox/Cat).
+  Look, faithful to the art in the detailed voxel style: a lean, fierce but cute storm lynx; body of layered charcoal
+  armour plates (3-4 greys: ~#2a2c33 base, #4b4d57, #70737e, light bevelled edges ~#a3a6ae) with ridge spikes sweeping
+  back over the head, shoulders and spine; a white fluffy face mask and cheek ruff (white/very light grey shading);
+  tall pointed lynx ears with NEON violet (~#7a3cff) and electric-blue (~#2fb4ff) inner stripes; fierce glowing blue
+  eyes with a violet rim (Neon); a cyan diamond gem (~#3fc8ff, Neon core + Glass rim) on the forehead and smaller
+  gems on the shoulder and chest plates; big armoured paws with glowing cyan claws (Neon); a fluffy armoured tail
+  with neon stripes. Instead of feathered wings it rides a small dark storm cloud (navy #2e3a66 / #44507f / lighter
+  #6b77a8 tops with a few white puffs): `WingStyle = "StormCloud"` (new style, added to `PetCatalog.WingStyles`;
+  PetBuilder still returns the cloud halves as WingL/WingR so Animate can sway them gently). Animate: hover, the
+  cloud drifts, neon parts pulse softly (client only). Budgets: High <= ~350 parts, Low <= ~120.
+* **Storm Altar (world agent, lobby landmark), from the ring in the art:** a dark navy storm-cloud island (contrast
+  landmark among the white clouds) at the lobby edge, facing the plaza, with a circular dais: a ring of charcoal stone
+  blocks (radius ~12 studs) with bevelled tops, 6-8 tall cyan crystal shards (Neon core + Glass) around it (the front
+  one biggest), a dark navy portal disc in the middle with a faint glow, and soft electric-blue PointLights.
+  A big Stormfang showcase (PetBuilder High, Scale ~3, named `StormfangShowcase`) prowls on the altar; the NPC
+  controller-style client animation (hover/pulse) applies to it. A poster/billboard `StormAltarSign` shows
+  "STORM ALTAR" and the art (`Config.Art.StormfangImage`). ProximityPrompt "Storm Altar": Phase 1 -> side toast
+  "The Storm Altar awakens soon: summon Secret pets with Gems!"; Phase 2 turns it into the gems-only Secret roulette.
+  Model name `StormAltar`, part budget <= ~450 (excluding the showcase pet).
+* **Pet Index (menu agent):** Stormfang's card is a ??? silhouette until discovered, like every pet; once discovered,
+  its detail view also shows the 2D art (`Config.Art.StormfangImage`) as a banner.
+* **Tutorial/NPCs:** one NPC tip mentions the Storm Altar and Secret pets.
+
 ## Phase 2 outline (tycoon) — design only, do not build yet
 Home on each plot: rooms **Kitchen** (makes pet food + cash), **Garden** (economy pets work here: cash/s =
 sum(Income * RarityScale * level factor)), **Gym** (combat pets gain XP over time), **Vault** (cash cap, offline

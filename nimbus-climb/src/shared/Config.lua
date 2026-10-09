@@ -366,6 +366,12 @@ Config.PetStats = {
 	RarityScale = { Common = 1, Uncommon = 1.5, Rare = 2.3, Epic = 3.5, Legendary = 5.5, Mythic = 8.5, Secret = 13 },
 }
 
+-- v3: 2D artwork the player uploaded to Roblox (decal/image ids). Used for Stormfang's Pet Index banner and the
+-- Storm Altar poster. The source files live in branding/ (stormfang-art.png has a transparent background).
+Config.Art = {
+	StormfangImage = "rbxassetid://129423539279679",
+}
+
 Config.Items = {
 	MaxCarry = 5, -- per item type
 	HotbarSlots = 4, -- keys 1-4
