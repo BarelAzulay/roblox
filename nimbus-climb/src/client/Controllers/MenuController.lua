@@ -701,6 +701,18 @@ local function setBackdrop(on)
 	end
 end
 
+-- The Pet Index (its own gui) replaced our window: drop our backdrop at once.
+local function hideBackdropNow()
+	if openId then
+		return
+	end
+	U.BackdropOn = false
+	if U.Backdrop then
+		U.Backdrop.Visible = false
+		U.Backdrop.BackgroundTransparency = 1
+	end
+end
+
 local function layoutWindow(win)
 	local size = WIN[win.Id] or { 1100, 700, 860, 420 }
 	local box = fitBox(size[1], size[2], size[3], size[4])
@@ -843,14 +855,8 @@ function closeWindow(id, instant)
 		closeOdds()
 	end
 	if instant then
+		-- another window takes over right away (it keeps the backdrop; see hideBackdropNow)
 		win.Holder.Visible = false
-		if not openId then
-			U.BackdropOn = false
-			if U.Backdrop then
-				U.Backdrop.Visible = false
-				U.Backdrop.BackgroundTransparency = 1
-			end
-		end
 	else
 		tween(win.Pop, 0.12, { Scale = 0.9 }, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
 		task.delay(0.13, function()
@@ -1102,11 +1108,11 @@ local function buildTile(column, spec, index)
 		Parent = entry.Root,
 	})
 	entry.Button = button
-	-- soft gold glow behind the tile of the open window
-	entry.Glow = makeFrame(button, "ActiveGlow", {
+	-- soft gold glow behind the tile of the open window (a sibling: children always draw above a parent)
+	entry.Glow = makeFrame(entry.Root, "ActiveGlow", {
 		AnchorPoint = Vector2.new(0.5, 0.5),
-		Position = UDim2.new(0.5, 0, 0.5, 0),
-		Size = UDim2.new(1, 14, 1, 14),
+		Position = UDim2.new(0.5, 0, 0, K.TILE / 2),
+		Size = UDim2.fromOffset(K.TILE + 14, K.TILE + 14),
 		BackgroundTransparency = 0.3,
 		BackgroundColor3 = GOLD,
 		Visible = false,
