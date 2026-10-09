@@ -62,10 +62,10 @@ local SWAY_HZ = 0.55 -- slow idle motions (halo bob, aura orbit)
 local BLINK_TIME = 0.16
 local FLAP_AMP = math.rad(35)
 
--- part budgets per group (High totals ~340, Low ~118 with lids, root and aura)
+-- part budgets per group (with 6 lid parts, the root and the Secret aura: High <= ~330, Low <= ~115)
 local BUDGET = {
-	High = { Body = 220, Wing = 34, Tail = 22, Halo = 12 },
-	Low = { Body = 70, Wing = 11, Tail = 8, Halo = 4 },
+	High = { Body = 210, Wing = 32, Tail = 20, Halo = 10 },
+	Low = { Body = 68, Wing = 11, Tail = 7, Halo = 4 },
 }
 
 local TAU = math.pi * 2
@@ -808,7 +808,7 @@ SPECIES.Fox = function(ctx)
 	paint(g, "Fur", { Kind = "Ellipsoid", Center = { 0, 5.8, -8 }, Radius = { 2, 1.6, 3 } }, "Belly")
 	-- big ears with dark backs and tips
 	pair(function(s)
-		triEar(ctx, s, { 4.6, 10.4, -0.4 }, { 7.4, 19.2, 0.4 }, 3.7, "Inner", "Patch")
+		triEar(ctx, s, { 4.6, 10.4, -0.4 }, { 7.2, 18.2, 0.4 }, 3.6, "Inner", "Patch")
 	end)
 	sitBody(ctx, { LegKey = "Patch", PawKey = "Patch", ToeKey = "Fur" })
 	paint(g, "Belly", { Kind = "Ellipsoid", Center = { 0, -3, -4.4 }, Radius = { 3.6, 5, 2.8 } }, "Fur")
@@ -837,12 +837,12 @@ SPECIES.Bunny = function(ctx)
 		ell(g, "Muzzle", { s * 1.3, 2.7, -6.7 }, { 1.9, 1.6, 1.3 })
 		-- long ears, slightly apart, pink inside
 		local base = { s * 3.2, 11.5, 0.3 }
-		local tip = { s * 4.6, 23.5, 1.4 }
+		local tip = { s * 4.8, 20.6, 1.4 }
 		cap(g, "Fur", base, tip, 2.2, 1.7)
-		ell(g, "Fur", { s * 4.2, 20, 1.2 }, { 2.3, 3.6, 1.6 })
-		paint(g, "Inner", { Kind = "Capsule", A = { s * 3.3, 13, -1 }, B = { s * 4.5, 22.5, 0.2 }, Radius = 1.25, RadiusB = 1.05 }, "Fur")
+		ell(g, "Fur", { s * 4.3, 17.8, 1.2 }, { 2.3, 3.4, 1.6 })
+		paint(g, "Inner", { Kind = "Capsule", A = { s * 3.3, 13, -1 }, B = { s * 4.7, 19.8, 0.2 }, Radius = 1.25, RadiusB = 1.05 }, "Fur")
 		if H then
-			carve(g, { Kind = "Capsule", A = { s * 3.3, 13.5, -2.1 }, B = { s * 4.5, 22, -0.9 }, Radius = 0.9, RadiusB = 0.7 }, { Fur = true, Inner = true })
+			carve(g, { Kind = "Capsule", A = { s * 3.3, 13.5, -2.1 }, B = { s * 4.7, 19.4, -0.9 }, Radius = 0.9, RadiusB = 0.7 }, { Fur = true, Inner = true })
 		end
 	end)
 	sitBody(ctx, { BodyC = { 0, -4.8, 1.6 }, BodyR = { 5.8, 5.8, 5.8 }, PawKey = "Belly", HindX = 4.6 })
@@ -1104,10 +1104,10 @@ SPECIES.Unicorn = function(ctx)
 		face(ctx, "Mouth", { { -1, 1.6 }, { 0, 1.4 }, { 1, 1.6 } })
 	end
 	-- spiral golden horn
-	cone(g, "Gold", { 0, 12.2, -2.6 }, { 0, 21.2, -4.4 }, 1.9, 0.3)
+	cone(g, "Gold", { 0, 12.2, -2.8 }, { 0, 19.4, -4.6 }, 1.9, 0.3)
 	if H then
-		for i = 0, 3 do
-			box(g, "GoldDeep", { 0, 13.4 + i * 2, -3 - i * 0.4 }, { 5, 0.7, 5 }, { Op = "Paint", OnlyKeys = "Gold" })
+		for i = 0, 2 do
+			box(g, "GoldDeep", { 0, 13.6 + i * 2, -3.2 - i * 0.45 }, { 5, 0.7, 5 }, { Op = "Paint", OnlyKeys = "Gold" })
 		end
 	end
 	-- flowing mane down the back of the head and neck, with a forelock
@@ -1337,30 +1337,19 @@ WINGS.Bat = function(ctx, w)
 end
 
 WINGS.Fairy = function(ctx, w)
-	local H = ctx.High
-	-- upper and lower translucent lobes with a darker outline and bright spots
-	ell(w, "Wing", { -6.4, 4.6, 0 }, { 6, 4.6, 0.6 }, { Rotation = CFrame.Angles(0, 0, -0.35), Pivot = { -6.4, 4.6, 0 } })
-	ell(w, "Wing", { -4.8, -2.6, 0 }, { 4, 3, 0.6 }, { Rotation = CFrame.Angles(0, 0, 0.45), Pivot = { -4.8, -2.6, 0 } })
-	if H then
-		-- outlines: a slightly larger ring painted on the rim
-		paint(w, "WingVein", { Kind = "Ellipsoid", Center = { -6.4, 4.6, 0 }, Radius = { 6.3, 4.9, 2 }, Rotation = CFrame.Angles(0, 0, -0.35), Pattern = function(x, y)
-			local dx, dy = x + 6.4, y - 4.6
-			local c, s = math.cos(0.35), math.sin(0.35)
-			local u, v = dx * c - dy * s, dx * s + dy * c
-			if (u / 5) ^ 2 + (v / 3.7) ^ 2 > 1 then
-				return "WingVein"
-			end
-			return false
-		end }, "Wing")
-		cap(w, "WingVein", { -1, 1.2, 0 }, { -9.6, 6.6, 0 }, 0.4, 0.3, { Op = "Paint", OnlyKeys = "Wing" })
+	-- upper and lower translucent lobes (1 voxel thin) with darker veins and bright spots
+	ell(w, "Wing", { -6.4, 4.6, 0 }, { 6, 4.4, 0.5 }, { Rotation = CFrame.Angles(0, 0, -0.35), Pivot = { -6.4, 4.6, 0 } })
+	ell(w, "Wing", { -4.8, -2.6, 0 }, { 3.8, 2.8, 0.5 }, { Rotation = CFrame.Angles(0, 0, 0.45), Pivot = { -4.8, -2.6, 0 } })
+	if ctx.High then
+		cap(w, "WingVein", { -1, 1.2, 0 }, { -9.8, 6.8, 0 }, 0.4, 0.3, { Op = "Paint", OnlyKeys = "Wing" })
 		cap(w, "WingVein", { -1, 0, 0 }, { -6.6, -3.4, 0 }, 0.4, 0.3, { Op = "Paint", OnlyKeys = "Wing" })
-		ell(w, "WingEdge", { -9, 5.6, 0 }, { 1.2, 1.2, 1 }, { Op = "Paint", OnlyKeys = "Wing" })
-		ell(w, "WingEdge", { -6, -3.6, 0 }, { 1, 1, 1 }, { Op = "Paint", OnlyKeys = "Wing" })
+		ell(w, "WingEdge", { -9.6, 5, 0 }, { 1.4, 1.4, 1 }, { Op = "Paint", OnlyKeys = "Wing" })
+		ell(w, "WingEdge", { -6.4, -3.4, 0 }, { 1, 1, 1 }, { Op = "Paint", OnlyKeys = "Wing" })
 	end
 	ctx.Pal.Wing = { Color = ctx.Look.WingColor, Transparency = 0.3 }
-	ctx.Pal.WingVein = { Color = darken(ctx.Look.WingColor, 0.2), Transparency = 0.1 }
+	ctx.Pal.WingVein = { Color = darken(ctx.Look.WingColor, 0.22), Transparency = 0.1 }
 	if not ctx.Look.Glow then
-		ctx.Pal.WingEdge = { Color = lighten(ctx.Look.WingColor, 0.5), Transparency = 0.1 }
+		ctx.Pal.WingEdge = { Color = lighten(ctx.Look.WingColor, 0.55), Transparency = 0.1 }
 	end
 	ctx.WingNoShade = true
 end
@@ -1382,12 +1371,13 @@ WINGS.Cloud = function(ctx, w)
 end
 
 WINGS.Crystal = function(ctx, w)
-	-- three translucent shards fanning out, with glowing edges
-	local shards = { { -12.6, 7.4, 1.8 }, { -13.6, 1.8, 1.6 }, { -9.4, -3.4, 1.4 } }
-	for i, s in ipairs(shards) do
-		cone(w, "Wing", { -1, 1.4, 0 }, { s[1], s[2], 0.6 }, s[3] + 0.6, 0.2)
+	-- three thin translucent shards fanning out (lens shaped, 1-2 voxels thick), each with a glowing spine
+	local shards = { { -7.6, 6.4, 6.4, 1.8, 0.75 }, { -9, 1.6, 6.8, 1.7, 0.15 }, { -6.4, -2.6, 4.8, 1.5, -0.5 } }
+	for _, sh in ipairs(shards) do
+		local rot = CFrame.Angles(0, 0, sh[5])
+		ell(w, "Wing", { sh[1], sh[2], 0.4 }, { sh[3], sh[4], 0.7 }, { Rotation = rot, Pivot = { sh[1], sh[2], 0.4 } })
 		if ctx.High then
-			cap(w, "WingEdge", { -2 - i * 0.2, 2 + (s[2] - 1.4) * 0.12, 0 }, { s[1] * 0.92, s[2] * 0.92, 0.6 }, 0.4, 0.3, { Op = "Paint", OnlyKeys = "Wing" })
+			box(w, "WingEdge", { sh[1], sh[2], 0.4 }, { sh[3] * 1.6, 0.8, 3 }, { Op = "Paint", OnlyKeys = "Wing", Rotation = rot, Pivot = { sh[1], sh[2], 0.4 } })
 		end
 	end
 	ctx.Pal.Wing = { Color = ctx.Look.WingColor, Transparency = 0.25, Material = Enum.Material.Glass }
@@ -1515,11 +1505,11 @@ ACCESSORIES.Antlers = function(ctx)
 	local g = ctx.Body
 	local top = ctx.HeadTop
 	pair(function(s)
-		curve(g, "Antler", { { s * 3, top - 2, 0 }, { s * 4.4, top + 2, 0.6 }, { s * 6.6, top + 5, 1.2 }, { s * 7.6, top + 8, 1.6 } }, 1, 0.6)
-		curve(g, "Antler", { { s * 4.6, top + 2.4, 0.6 }, { s * 2.6, top + 5.4, 0.4 }, { s * 2.4, top + 7, 0.4 } }, 0.7, 0.5)
-		curve(g, "Antler", { { s * 6.4, top + 5, 1.2 }, { s * 8.8, top + 6, 1.4 }, { s * 9.6, top + 7.6, 1.6 } }, 0.65, 0.5)
-		ell(g, "AntlerTip", { s * 7.6, top + 8.2, 1.6 }, { 0.6, 0.7, 0.6 })
-		ell(g, "AntlerTip", { s * 2.4, top + 7.2, 0.4 }, { 0.6, 0.6, 0.6 })
+		curve(g, "Antler", { { s * 3, top - 2, 0 }, { s * 4.4, top + 1.6, 0.6 }, { s * 6.6, top + 4, 1.2 }, { s * 7.8, top + 6.4, 1.6 } }, 1, 0.6)
+		curve(g, "Antler", { { s * 4.6, top + 2, 0.6 }, { s * 2.8, top + 4.4, 0.4 }, { s * 2.6, top + 5.8, 0.4 } }, 0.7, 0.5)
+		curve(g, "Antler", { { s * 6.4, top + 4, 1.2 }, { s * 8.8, top + 4.8, 1.4 }, { s * 9.8, top + 6.2, 1.6 } }, 0.65, 0.5)
+		ell(g, "AntlerTip", { s * 7.8, top + 6.6, 1.6 }, { 0.6, 0.7, 0.6 })
+		ell(g, "AntlerTip", { s * 2.6, top + 6, 0.4 }, { 0.6, 0.6, 0.6 })
 	end)
 	if ctx.Look.Glow then
 		ctx.Pal.AntlerTip = { Color = lighten(ctx.Look.Secondary, 0.4), Material = NEON }
@@ -1565,6 +1555,7 @@ end
 -- Blueprint: sculpt -> shade -> merge (cached per look + detail)
 ----------------------------------------------------------------------
 local blueprints = {}
+local lidBoxes -- defined below
 
 local function mergeGroup(ctx, grid, budget)
 	return Voxel.Merge(grid, { Palette = ctx.Pal, MaxParts = budget, Keep = ctx.Keep })
@@ -1619,13 +1610,10 @@ local function buildBlueprint(look, detail)
 				Hinge = CFrame.new(0, 1, 0), Kind = "orbit", Amp = 0.8,
 			}
 		end
-		-- blink lids: one small group per eye, hidden until a blink
+		-- blink lids: per eye an upper lid, a dark lash line and a lower lid, flat boxes in front of the carved
+		-- eye (hidden until a blink)
 		for i, cells in ipairs(ctx.LidCells or {}) do
-			local lg = Voxel.NewGrid(30)
-			for _, c in ipairs(cells) do
-				set(lg, c[1], c[2], c[3], c[4])
-			end
-			bp.Groups[#bp.Groups + 1] = { Name = "EyeLid", Boxes = Voxel.Merge(lg, { Palette = ctx.Pal }), Kind = "lid", Index = i }
+			bp.Groups[#bp.Groups + 1] = { Name = "EyeLid", Boxes = lidBoxes(cells), Kind = "lid", Index = i }
 		end
 		return bp
 	end)
@@ -1634,6 +1622,42 @@ local function buildBlueprint(look, detail)
 		error(result, 0)
 	end
 	return result
+end
+
+-- flat lid boxes covering one carved eye: rows above the lash line, the lash line, rows below it
+lidBoxes = function(cells)
+	local x0, x1, y0, y1, z = math.huge, -math.huge, math.huge, -math.huge, math.huge
+	local counts = {}
+	local lineY = nil
+	for _, c in ipairs(cells) do
+		x0, x1 = min(x0, c[1]), max(x1, c[1])
+		y0, y1 = min(y0, c[2]), max(y1, c[2])
+		z = min(z, c[3])
+		if c[4] == "LidLine" then
+			lineY = c[2]
+		else
+			counts[c[4]] = (counts[c[4]] or 0) + 1
+		end
+	end
+	if x0 > x1 then
+		return {}
+	end
+	local key, best = "Lid", -1
+	for k, n in pairs(counts) do
+		if n > best or (n == best and k < key) then
+			key, best = k, n
+		end
+	end
+	lineY = lineY or floor((y0 + y1) / 2)
+	local out = {}
+	if y1 > lineY then
+		out[#out + 1] = { X0 = x0, X1 = x1, Y0 = lineY + 1, Y1 = y1, Z0 = z, Z1 = z, Key = key }
+	end
+	out[#out + 1] = { X0 = x0, X1 = x1, Y0 = lineY, Y1 = lineY, Z0 = z, Z1 = z, Key = "LidLine" }
+	if y0 < lineY then
+		out[#out + 1] = { X0 = x0, X1 = x1, Y0 = y0, Y1 = lineY - 1, Z0 = z, Z1 = z, Key = key }
+	end
+	return out
 end
 
 local function getBlueprint(look, detail)
