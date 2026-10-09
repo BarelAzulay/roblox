@@ -1004,6 +1004,7 @@ local function openIndex(groupId)
 	if openId then
 		closeWindow(openId, true)
 	end
+	hideBackdropNow()
 	safe("Index.Open", index.Open, groupId)
 end
 
@@ -3516,6 +3517,7 @@ local function connectIndex()
 			if openId then
 				closeWindow(openId, true)
 			end
+			hideBackdropNow()
 			closeOdds()
 			updateMenuActive()
 			MenuController.WindowOpened:Fire("Index")
