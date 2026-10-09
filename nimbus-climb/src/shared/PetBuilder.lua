@@ -2,7 +2,7 @@
 -- asset ids). Usable on the server, on the client and inside ViewportFrames.
 -- Plain Lua 5.1-compatible syntax only.
 --
--- API (contract: ARCHITECTURE_V2.md section 2)
+-- API (contract: ARCHITECTURE_V2.md section 2, polished in ARCHITECTURE_V3.md section 8)
 --   PetBuilder.Build(petDef, opts)   -> Model   opts: { Scale = 1 }
 --   PetBuilder.Animate(model, t, opts)           opts: { Flap = 1 (speed multiplier), Excited = 0..1 }
 --   PetBuilder.GetHeight(petDef)     -> studs at Scale 1 (bounding box of the resting pose)
@@ -16,12 +16,21 @@
 --     PrimaryPart (string attribute PB_Base) and Animate recomputes its CFrame from the PrimaryPart's
 --     CURRENT CFrame, so the same code works in the workspace and in a ViewportFrame. Animated parts are
 --     grouped in small joint trees ("nodes"): wing flap + feather fan, tail chain, ears, gills, halo,
---     orbiting rarity gems... A Clone() of a pet rebuilds its rig from those attributes on first Animate.
---   * Eyes blink every few seconds (Animate squashes the eyeball parts for a moment).
---   * Round things are Ball parts. Squashed round things (eyes, belly, ears...) are a Block with a
---     SpecialMesh of MeshType.Sphere (a built-in shape, no asset id), so every ellipsoid is exact.
---   * Part budget: roughly 35 to 66 parts per pet (the contract limit is ~70).
+--     orbiting rarity sparkles... A Clone() of a pet rebuilds its rig from those attributes on first Animate.
+--   * Faces are built ON the head instead of stuck to it:
+--       - every eye is a full ellipsoid whose centre sits INSIDE the head, so only a lens-shaped front shows;
+--       - irises, highlights, cheeks, bellies, inner ears, mouths, nostrils and patches are "overlays":
+--         flat ellipsoids whose centre is sunk by exactly the surface's sag under them, so their rim meets
+--         the curved surface and their front rises only a hair (Lift) above it (no floating dots);
+--       - snouts, noses, ears, horns and limbs are "bumps": ellipsoids partly buried in the surface they
+--         grow from, so every join is a clean intersection line.
+--   * Eyes blink every few seconds (Animate squashes the eyeballs and hides their highlights for a moment).
+--   * Round things are Ball parts. Squashed round things are a Block with a SpecialMesh of MeshType.Sphere
+--     (a built-in shape, no asset id); very thin ones keep a legal part size and shrink through Mesh.Scale.
+--   * Part budget: roughly 35 to 70 parts per pet (the contract limit is ~70).
 --   * Unknown Species / WingStyle / Accessory values fall back to Cat / Feather / none.
+--   * Rarity flair: Legendary / Mythic pets get orbiting glints + a low-rate sparkle emitter; Secret pets get
+--     orbiting four-point sparkle stars, an iridescent sheen on the wings and an iridescent sparkle emitter.
 
 local PetBuilder = {}
 
@@ -37,8 +46,9 @@ PetBuilder.WingStyles = { "Feather", "Bat", "Fairy", "Cloud", "Crystal", "Flame"
 ----------------------------------------------------------------------
 local PI = math.pi
 local TAU = PI * 2
-local MIN_SIZE = 0.05 -- smallest part dimension we ask the engine for (studs)
+local MIN_SIZE = 0.05 -- smallest part dimension we ask the engine for (studs); thinner ellipsoids use Mesh.Scale
 local BASE_SCALE = 0.88 -- all geometry below is authored a little large; this brings a pet to ~2.2-3.1 studs
+local PART_BUDGET = 70 -- optional details (lash flicks, extra puffs) are skipped once a pet gets this big
 
 local FLAP_HZ = 2.0 -- wing beats per second at Flap = 1
 local WAG_HZ = 0.9 -- tail wags per second
@@ -50,6 +60,8 @@ local CF = CFrame.new
 local A = CFrame.Angles
 local IDENT = CFrame.new()
 local ZERO = Vector3.new(0, 0, 0)
+local UP = Vector3.new(0, 1, 0)
+local FORWARD = Vector3.new(0, 0, -1)
 
 local NEON = Enum.Material.Neon
 local SMOOTH = Enum.Material.SmoothPlastic
@@ -71,17 +83,18 @@ local WHITE = rgb(255, 255, 255)
 local BLACK = rgb(0, 0, 0)
 
 -- Fixed little palette for things that should not depend on the pet's own colours.
-local GOLD = rgb(244, 196, 78)
-local GOLD_LIGHT = rgb(255, 226, 140)
+local GOLD = rgb(244, 192, 72)
+local GOLD_LIGHT = rgb(255, 224, 138)
 local CREAM = rgb(255, 240, 214)
 local PINK = rgb(246, 156, 174)
-local BEAK = rgb(240, 178, 80)
-local LEAF = rgb(108, 184, 112)
+local BEAK = rgb(242, 176, 76)
+local LEAF = rgb(104, 182, 108)
 local LEAF_LIGHT = rgb(150, 210, 128)
-local CAP = rgb(214, 92, 102)
+local CAP = rgb(214, 88, 98)
 local SCARF = rgb(206, 84, 98)
-local SCARF_STRIPE = rgb(246, 220, 196)
+local SCARF_STRIPE = rgb(248, 222, 196)
 local NOSE = rgb(58, 44, 52)
+local SHINE = rgb(255, 255, 255)
 
 local function lighten(c, t)
 	return c:Lerp(WHITE, t)
@@ -100,6 +113,10 @@ local function asColor(v, fallback)
 		return v
 	end
 	return fallback
+end
+
+local function luminance(c)
+	return 0.299 * c.R + 0.587 * c.G + 0.114 * c.B
 end
 
 local function rgbToHsv(c)
@@ -128,7 +145,13 @@ end
 -- A brighter, slightly more saturated version of the eye colour (the glossy iris under the highlights).
 local function irisColor(c)
 	local h, s, v = rgbToHsv(c)
-	return Color3.fromHSV(h, clamp(s * 1.05, 0, 1), clamp(v * 1.7 + 0.1, 0, 1))
+	return Color3.fromHSV(h, clamp(s * 1.05, 0, 1), clamp(v * 1.75 + 0.12, 0, 1))
+end
+
+-- The same colour with its hue turned by dh (0..1): used for the iridescent sheen of Secret pets.
+local function hueShift(c, dh, satMin, valMin)
+	local h, s, v = rgbToHsv(c)
+	return Color3.fromHSV((h + dh) % 1, clamp(math.max(s, satMin or 0), 0, 1), clamp(math.max(v, valMin or 0), 0, 1))
 end
 
 -- Mirror a CFrame across the pet's YZ plane (x -> -x). Used for everything on the left side.
@@ -172,7 +195,7 @@ end
 
 -- Rotation (no translation) whose -Z axis points along dir; segments are long along their local Z.
 local function aim(dir, upHint)
-	local up = upHint or V3(0, 1, 0)
+	local up = upHint or UP
 	if math.abs(dir.Unit:Dot(up.Unit)) > 0.98 then
 		up = V3(1, 0, 0)
 	end
@@ -218,6 +241,7 @@ local rigs = setmetatable({}, { __mode = "k" })
 ----------------------------------------------------------------------
 local function newContext(look, scale, seed)
 	local P, S, E, W = look.Primary, look.Secondary, look.Eye, look.WingColor
+	local dark = luminance(P) < 0.34
 	local ctx = {
 		Scale = scale * BASE_SCALE,
 		Look = look,
@@ -227,19 +251,27 @@ local function newContext(look, scale, seed)
 		Count = 0,
 		EyeList = {},
 		Glow = look.Glow == true,
+		Dark = dark,
 		Primary = nil,
 		C = {
 			P = P,
 			S = S,
 			E = E,
 			W = W,
-			Belly = S,
+			Belly = mix(S, WHITE, 0.12),
 			Iris = irisColor(E),
-			Blush = mix(P, rgb(255, 118, 150), 0.55),
-			Mouth = darken(mix(P, rgb(120, 60, 70), 0.5), 0.5),
-			Pink = mix(PINK, P, 0.15),
+			Blush = mix(P, rgb(255, 112, 146), 0.58),
+			Pink = mix(PINK, P, 0.12),
+			Mouth = darken(mix(P, rgb(120, 56, 70), 0.55), 0.55),
+			Lash = darken(mix(P, E, 0.6), 0.5),
 		},
 	}
+	if dark then
+		-- dark pets: features are drawn in light accents instead of disappearing into the fur
+		ctx.C.Mouth = mix(S, P, 0.25)
+		ctx.C.Lash = mix(S, WHITE, 0.2)
+		ctx.C.Blush = mix(S, rgb(255, 120, 170), 0.5)
+	end
 	return ctx
 end
 
@@ -277,8 +309,8 @@ local function parseSpec(str)
 end
 
 -- A node is a joint: parts attached to it are rotated about `Hinge` (a CFrame in PrimaryPart space) by
--- an angle that depends on the node's Kind (wing / tail / ear / sway / bob). Nodes may have a parent
--- node; parents must be created first.
+-- an angle that depends on the node's Kind (wing / tail / ear / sway / bob / orbit). Nodes may have a
+-- parent node; parents must be created first.
 --   spec: Kind, Parent, Hinge (CFrame, unscaled), Axis ("x"|"y"|"z"), Amp, Lag, Axis2, Amp2, Lag2,
 --         Side (+1/-1: mirrored nodes), Bias, Rate, Phase
 local function newNode(ctx, spec)
@@ -310,12 +342,14 @@ end
 
 -- Core part constructor. kind: "Ball" | "Ellipsoid" | "Block" | "Cylinder".
 -- size is unscaled; rel is the unscaled CFrame relative to the PrimaryPart (the pet's rest pose).
+-- o: Material, Transparency, Shadow, Node (joint id), Blink ("squash" | "hide": eye parts)
 local function makePart(ctx, name, kind, size, rel, color, o)
 	o = o or {}
 	local k = ctx.Scale
-	local sx = math.max(size.X * k, MIN_SIZE)
-	local sy = math.max(size.Y * k, MIN_SIZE)
-	local sz = math.max(size.Z * k, MIN_SIZE)
+	local rx, ry, rz = size.X * k, size.Y * k, size.Z * k
+	local sx = math.max(rx, MIN_SIZE)
+	local sy = math.max(ry, MIN_SIZE)
+	local sz = math.max(rz, MIN_SIZE)
 	local part = Instance.new("Part")
 	part.Name = name
 	part.Anchored = true
@@ -342,6 +376,10 @@ local function makePart(ctx, name, kind, size, rel, color, o)
 			local mesh = Instance.new("SpecialMesh")
 			mesh.Name = "Round"
 			mesh.MeshType = Enum.MeshType.Sphere
+			-- thinner than a legal part: keep the part legal and shrink the drawn sphere instead
+			if rx < MIN_SIZE or ry < MIN_SIZE or rz < MIN_SIZE then
+				mesh.Scale = V3(math.max(rx, 0.001) / sx, math.max(ry, 0.001) / sy, math.max(rz, 0.001) / sz)
+			end
 			mesh.Parent = part
 		end
 	end
@@ -358,6 +396,11 @@ local function makePart(ctx, name, kind, size, rel, color, o)
 			part:SetAttribute("PB_Hinge", cfToString(n.Hinge))
 			part:SetAttribute("PB_Spec", specString(n))
 		end
+	end
+	if o.Blink then
+		part:SetAttribute("PB_Blink", o.Blink)
+		local list = ctx.EyeList
+		list[#list + 1] = { Part = part, Size = part.Size, Hide = o.Blink == "hide", T0 = part.Transparency }
 	end
 	part.Parent = ctx.Model
 	ctx.Count = ctx.Count + 1
@@ -394,10 +437,10 @@ local function cylCF(ctx, name, rel, dia, height, color, o)
 end
 
 -- Chain of ellipsoid segments along a polyline: node i is parented to node i-1 and hinged at pts[i].
--- Used for tails, plumes, scarf ends, manes. widths[i] = segment diameter, colors[i] = its colour.
+-- Used for tails, plumes and fins. widths[i] = segment diameter, colors[i] = its colour.
 local function chain(ctx, name, pts, widths, colors, o)
 	o = o or {}
-	local parent = nil
+	local parent = o.Parent
 	local ids = {}
 	local parts = {}
 	for i = 1, #pts - 1 do
@@ -422,9 +465,9 @@ local function chain(ctx, name, pts, widths, colors, o)
 			ctx,
 			name .. i,
 			CF((a + b) * 0.5) * aim(d),
-			V3(w, w * (o.Flat or 1), len * (o.Stretch or 1.25)),
+			V3(w, w * (o.Flat or 1), len * (o.Stretch or 1.3)),
 			colors[i],
-			{ Node = id }
+			{ Node = id, Mesh = true }
 		)
 		ids[i] = id
 		parts[i] = seg
@@ -434,105 +477,252 @@ local function chain(ctx, name, pts, widths, colors, o)
 end
 
 ----------------------------------------------------------------------
--- Face helpers: points on the head ellipsoid
+-- Surfaces: ellipsoids other features sit on
 ----------------------------------------------------------------------
--- theta: sideways angle from straight ahead (+ = pet's right), phi: elevation (+ = up).
-local function headPoint(ctx, theta, phi)
-	local hc, ha = ctx.HC, ctx.HA
-	local ct, st = math.cos(theta), math.sin(theta)
-	local cp, sp = math.cos(phi), math.sin(phi)
-	local pos = V3(hc.X + ha.X * st * cp, hc.Y + ha.Y * sp, hc.Z - ha.Z * ct * cp)
-	local nrm = V3(st * cp / ha.X, sp / ha.Y, -ct * cp / ha.Z).Unit
-	return pos, nrm
+-- An ellipsoid surface descriptor in (unscaled) pet space: centre frame (its front is local -Z) + semi-axes.
+local function ell(cf, size)
+	return { CF = cf, A = V3(size.X / 2, size.Y / 2, size.Z / 2) }
 end
 
--- CFrame on the head surface with -Z pointing out of the head (thin parts: depth = local Z).
-local function faceCF(ctx, theta, phi, push, roll)
-	local pos, nrm = headPoint(ctx, theta, phi)
-	pos = pos + nrm * (push or 0)
-	local up = V3(0, 1, 0)
-	if math.abs(nrm.Y) > 0.97 then
-		up = V3(0, 0, -1)
+-- Frame on the FRONT (-Z) half of ellipsoid e at local (x, y): returns (frame, normal, point), all in e's
+-- local space; the frame's -Z points out of the surface (or along `lean`-blended forward), +Y stays "up".
+local function surfaceFrame(e, x, y, roll, lean)
+	local a = e.A
+	local u = (x * x) / (a.X * a.X) + (y * y) / (a.Y * a.Y)
+	if u > 0.995 then
+		local k = math.sqrt(0.995 / u)
+		x, y, u = x * k, y * k, 0.995
 	end
-	local cf = CFrame.lookAt(pos, pos + nrm, up)
+	local z = -a.Z * math.sqrt(1 - u)
+	local p = V3(x, y, z)
+	local n = V3(x / (a.X * a.X), y / (a.Y * a.Y), z / (a.Z * a.Z)).Unit
+	local look = n
+	if lean and lean ~= 0 then
+		look = (n * (1 - lean) + FORWARD * lean).Unit
+	end
+	local up = UP
+	if math.abs(look.Y) > 0.96 then
+		up = FORWARD
+	end
+	local cf = CFrame.lookAt(p, p + look, up)
 	if roll and roll ~= 0 then
 		cf = cf * A(0, 0, roll)
+	end
+	return cf, n, p
+end
+
+-- Distance from q along dir (both in e's local space) to the ellipsoid surface; nil when the ray misses.
+local function rayDepth(e, q, dir)
+	local a = e.A
+	local ox, oy, oz = q.X / a.X, q.Y / a.Y, q.Z / a.Z
+	local dx, dy, dz = dir.X / a.X, dir.Y / a.Y, dir.Z / a.Z
+	local qa = dx * dx + dy * dy + dz * dz
+	local qb = 2 * (ox * dx + oy * dy + oz * dz)
+	local qc = ox * ox + oy * oy + oz * oz - 1
+	local disc = qb * qb - 4 * qa * qc
+	if disc < 0 or qa < 1e-9 then
+		return nil
+	end
+	local t = (-qb - math.sqrt(disc)) / (2 * qa)
+	if t < 0 then
+		return 0
+	end
+	return t
+end
+
+-- OVERLAY: a flat ellipse (radii rx, ry) lying flush on surface e at local (x, y). Its centre is sunk by the
+-- surface's sag under the ellipse, so its rim meets the surface and its front rises only o.Lift above it.
+-- o: Lift, Roll, Side (mirror for the left side), Material, Transparency, Node, Blink
+local function overlay(ctx, name, e, x, y, rx, ry, color, o)
+	o = o or {}
+	local frame, n = surfaceFrame(e, x, y, o.Roll)
+	local p = frame.Position
+	local right, up = frame.RightVector, frame.UpVector
+	local sag = 0
+	for i = 0, 7 do
+		local ang = i * TAU / 8
+		local q = p + right * (rx * math.cos(ang)) + up * (ry * math.sin(ang))
+		local t = rayDepth(e, q, -n)
+		if t == nil then
+			t = math.max(rx, ry) * 0.5
+		end
+		if t > sag then
+			sag = t
+		end
+	end
+	local lift = o.Lift or 0.012
+	local rel = e.CF * (frame * CF(0, 0, sag))
+	if o.Side then
+		rel = sd(o.Side, rel)
+	end
+	return blobCF(ctx, name, rel, V3(rx * 2, ry * 2, (sag + lift) * 2), color, {
+		Mesh = true,
+		Material = o.Material,
+		Transparency = o.Transparency,
+		Node = o.Node,
+		Blink = o.Blink,
+	})
+end
+
+-- BUMP: an ellipsoid of `size` growing out of surface e at local (x, y); `embed` (0..1) of its depth is
+-- buried. Returns the part and the RIGHT-side surface descriptor of the bump (for features on it).
+-- o: Roll, Lean (0..1 blend of the outward axis toward pet forward), Pitch, Side, Material, Node, Shadow
+local function bumpOn(ctx, name, e, x, y, size, embed, color, o)
+	o = o or {}
+	local frame = surfaceFrame(e, x, y, o.Roll, o.Lean)
+	if o.Pitch then
+		frame = frame * A(o.Pitch, 0, 0)
+	end
+	local localCF = frame * CF(0, 0, -(size.Z * 0.5 - embed * size.Z))
+	local right = e.CF * localCF
+	local rel = right
+	if o.Side then
+		rel = sd(o.Side, rel)
+	end
+	local part = blobCF(ctx, name, rel, size, color, {
+		Mesh = o.Mesh ~= false,
+		Material = o.Material,
+		Transparency = o.Transparency,
+		Node = o.Node,
+		Shadow = o.Shadow,
+	})
+	return part, ell(right, size)
+end
+
+-- Head-surface coordinates from angles: theta = sideways from straight ahead (+ = pet's right),
+-- phi = elevation (+ = up). Returns the head-local (x, y) for surfaceFrame / overlay / bumpOn.
+local function headXY(ctx, theta, phi)
+	local ha = ctx.HeadE.A
+	return ha.X * math.sin(theta) * math.cos(phi), ha.Y * math.sin(phi)
+end
+
+-- Pet-space point and outward normal on the head at (theta, phi), for features built by hand.
+local function headPoint(ctx, theta, phi)
+	local x, y = headXY(ctx, theta, phi)
+	local _, n, p = surfaceFrame(ctx.HeadE, x, y)
+	return ctx.HeadE.CF * p, n
+end
+
+-- Frame for an appendage rooted at pet-space point `root` that grows along `dir` (right side): +Y = dir,
+-- -Z faces the pet's front (turned outward by yaw).
+local function growFrame(root, dir, yaw)
+	local up = dir.Unit
+	local back = V3(0, 0, 1) - up * up.Z
+	if back.Magnitude < 0.05 then
+		back = V3(0, -1, 0) - up * up.Y
+	end
+	back = back.Unit
+	local right = up:Cross(back)
+	local cf = CFrame.fromMatrix(root, right, up, back)
+	if yaw and yaw ~= 0 then
+		cf = cf * A(0, -yaw, 0)
 	end
 	return cf
 end
 
--- Big glossy eye: dark (or neon) ball, iris / pupil, two sparkle highlights. ecf = right eye frame.
-local function buildEye(ctx, s, ecf, w, h, d)
+-- Budget guard for optional details.
+local function canAfford(ctx, n)
+	return ctx.Count + n + (ctx.Reserve or 0) <= PART_BUDGET
+end
+
+----------------------------------------------------------------------
+-- Face kit
+----------------------------------------------------------------------
+-- One eye set INTO surface e (the head, or the frog's eye bump) at local (x, y) - given for the RIGHT eye.
+-- The eyeball is a full ellipsoid w x h x d whose centre is sunk so only `out` studs of its front show:
+-- a lens-shaped dome with a crisp rim where it meets the face. Iris + highlights are overlays on the
+-- eyeball's own surface; the highlights sit on the same world side on both eyes (one light source).
+local function buildEye(ctx, s, e, x, y, w, h, d, out)
 	local C = ctx.C
 	local nm = sname(s)
-	local frame = sd(s, ecf)
-	-- offsets are given in "right eye" terms; x is flipped on the left eye so highlights stay on the
-	-- same world side (upper left as seen by someone looking at the pet).
-	local function lp(x, y, z)
-		return frame * CF(x * s, y, z)
-	end
-	local list = ctx.EyeList
-	local base
-	local second
+	local frame = surfaceFrame(e, x, y)
+	local sink = d * 0.5 - out
+	local eyeCF = e.CF * (frame * CF(0, 0, sink)) -- right eye, pet space
+	local eyeE = ell(eyeCF, V3(w, h, d))
+	local ballColor = C.E
 	if ctx.Glow then
-		base = blobCF(ctx, "Eye" .. nm, frame, V3(w, h, d), C.E, { Material = NEON, Mesh = true })
-		second = blobCF(ctx, "Eye" .. nm .. "Pupil", lp(0, -h * 0.02, -d * 0.26), V3(w * 0.52, h * 0.64, d * 0.8), darken(C.E, 0.85), { Mesh = true })
-	else
-		base = blobCF(ctx, "Eye" .. nm, frame, V3(w, h, d), C.E, { Mesh = true })
-		second = blobCF(ctx, "Eye" .. nm .. "Iris", lp(0, -h * 0.12, -d * 0.22), V3(w * 0.8, h * 0.56, d * 0.8), C.Iris, { Mesh = true })
+		ballColor = darken(C.E, 0.78)
 	end
-	local shine1 = blobCF(ctx, "Eye" .. nm .. "Shine", lp(w * 0.2, h * 0.2, -d * 0.56), V3(w * 0.29, w * 0.29, d * 0.3), WHITE, { Material = NEON, Mesh = true })
-	local shine2 = blobCF(ctx, "Eye" .. nm .. "Shine2", lp(-w * 0.18, -h * 0.24, -d * 0.5), V3(w * 0.14, w * 0.14, d * 0.25), WHITE, { Material = NEON, Mesh = true })
-	list[#list + 1] = { Part = base, Size = base.Size, Hide = false }
-	list[#list + 1] = { Part = second, Size = second.Size, Hide = false }
-	list[#list + 1] = { Part = shine1, Size = shine1.Size, Hide = true, T0 = 0 }
-	list[#list + 1] = { Part = shine2, Size = shine2.Size, Hide = true, T0 = 0 }
+	blobCF(ctx, "Eye" .. nm, sd(s, eyeCF), V3(w, h, d), ballColor, { Mesh = true, Blink = "squash" })
+	if ctx.Glow then
+		-- glowing iris filling most of the eye, a darker rim of eyeball around it
+		overlay(ctx, "Eye" .. nm .. "Iris", eyeE, 0, -0.04 * h, 0.4 * w, 0.4 * h, lighten(C.E, 0.08),
+			{ Lift = 0.008, Side = s, Material = NEON, Blink = "hide" })
+	else
+		-- lighter iris glow in the lower half of the dark eye
+		overlay(ctx, "Eye" .. nm .. "Iris", eyeE, 0, -0.17 * h, 0.34 * w, 0.26 * h, C.Iris,
+			{ Lift = 0.008, Side = s, Blink = "hide" })
+	end
+	-- big highlight upper-left (as seen from the front), small one lower-right
+	local r1 = 0.19 * w
+	overlay(ctx, "Eye" .. nm .. "Shine", eyeE, 0.2 * w * s, 0.22 * h, r1, r1 * 1.08, SHINE,
+		{ Lift = 0.018, Side = s, Material = NEON, Blink = "hide" })
+	local r2 = 0.085 * w
+	overlay(ctx, "Eye" .. nm .. "Shine2", eyeE, -0.19 * w * s, -0.25 * h, r2, r2, SHINE,
+		{ Lift = 0.018, Side = s, Material = NEON, Blink = "hide" })
+	-- lash flick along the upper-outer rim: a thin line on the FACE that frames the eye
+	if ctx.Lashes and canAfford(ctx, 1) then
+		local alpha = 1.05 -- radians from the outer corner (+x) toward the top
+		local ax, ay = w * 0.5 * math.cos(alpha), h * 0.5 * math.sin(alpha)
+		local grow = 1.06
+		local pWorld = eyeCF * V3(ax * grow, ay * grow, -sink)
+		local pLocal = e.CF:PointToObjectSpace(pWorld)
+		local tx, ty = -w * 0.5 * math.sin(alpha), h * 0.5 * math.cos(alpha)
+		local beta = math.atan2(ty, tx) + PI
+		overlay(ctx, "Lash" .. nm, e, pLocal.X, pLocal.Y, w * 0.3, 0.032, C.Lash,
+			{ Lift = 0.01, Side = s, Roll = beta })
+	end
 end
 
--- Two little arcs forming a "w" mouth around the point (theta ~ 0, phi).
-local function smileW(ctx, phi, push)
+-- Little "w" mouth (two short arcs) centred at (x, y) on surface e.
+local function mouthW(ctx, e, x, y, size, color)
+	local sz = size or 1
 	pair(function(s)
-		blobCF(ctx, "Mouth" .. sname(s), sd(s, faceCF(ctx, 0.12, phi, push or 0.02, 0.4)), V3(0.17, 0.055, 0.05), ctx.C.Mouth)
+		overlay(ctx, "Mouth" .. sname(s), e, x + 0.072 * sz, y, 0.08 * sz, 0.024, color or ctx.C.Mouth,
+			{ Roll = 0.42, Side = s, Lift = 0.01 })
 	end)
 end
 
--- One wide thin smile.
-local function smileWide(ctx, phi, width, push)
+-- One wide gentle smile made of two arcs.
+local function mouthWide(ctx, e, x, y, width, color)
 	pair(function(s)
-		blobCF(ctx, "Mouth" .. sname(s), sd(s, faceCF(ctx, 0.2, phi, push or 0.02, 0.28)), V3(width, 0.06, 0.05), ctx.C.Mouth)
+		overlay(ctx, "Mouth" .. sname(s), e, x + width * 0.5, y, width * 0.56, 0.026, color or ctx.C.Mouth,
+			{ Roll = 0.22, Side = s, Lift = 0.01 })
 	end)
 end
 
--- Rounded/cuddly muzzle patch on the lower face.
-local function muzzle(ctx, phi, push, size, color)
-	return blobCF(ctx, "Muzzle", faceCF(ctx, 0, phi, push or 0), size, color)
-end
-
-local function nose(ctx, phi, push, size, color)
-	return blobCF(ctx, "Nose", faceCF(ctx, 0, phi, push or 0), size, color or NOSE, { Mesh = true })
-end
-
--- Ears made of one or more ellipsoids per side (+ optional inner ear and tip), twitching on their own node.
--- e: Pos, Size, Roll, Pitch, Color, InColor, InOffset, TipColor, Hinge, Amp
+----------------------------------------------------------------------
+-- Ears
+----------------------------------------------------------------------
+-- Ear growing out of the head at head angles (Theta, Phi) along Dir (right side); the lower Embed
+-- fraction of its height is buried in the head. Optional flush inner ear and a coloured tip.
+-- e: Theta, Phi, Dir, Yaw, Size, Embed, Color, InColor, InScale, TipColor, Amp, Name
 local function earPair(ctx, e)
 	pair(function(s)
+		local root = headPoint(ctx, e.Theta, e.Phi)
+		local size = e.Size
+		local frame = growFrame(root, e.Dir, e.Yaw)
+		local earCF = frame * CF(0, size.Y * (0.5 - (e.Embed or 0.3)), 0)
 		local n = newNode(ctx, {
 			Kind = "ear",
-			Hinge = sd(s, CF(e.Hinge)),
+			Hinge = sd(s, frame),
 			Axis = "z",
 			Amp = e.Amp or 0.05,
 			Side = s,
 			Phase = s * 2.1,
 		})
-		local rot = A(e.Pitch or 0, 0, e.Roll or 0)
-		blobS(ctx, s, "Ear", e.Pos, e.Size, e.Color, rot, { Node = n })
-		if e.InColor then
-			local ip = e.Pos + (e.InOffset or V3(-0.02, -0.04, -0.1))
-			blobS(ctx, s, "EarIn", ip, V3(e.Size.X * 0.56, e.Size.Y * 0.68, e.Size.Z * 0.5), e.InColor, rot, { Node = n })
-		end
+		local name = e.Name or "Ear"
+		blobCF(ctx, name .. sname(s), sd(s, earCF), size, e.Color, { Node = n, Mesh = true })
+		local earE = ell(earCF, size)
 		if e.TipColor then
-			local tp = e.Pos + rot * V3(0, e.Size.Y * 0.36, 0)
-			blobS(ctx, s, "EarTip", tp, V3(e.Size.X * 0.74, e.Size.Y * 0.3, e.Size.Z * 0.92), e.TipColor, rot, { Node = n })
+			local tipCF = earCF * CF(0, size.Y * 0.31, 0)
+			blobCF(ctx, name .. "Tip" .. sname(s), sd(s, tipCF), V3(size.X * 0.62, size.Y * 0.42, size.Z * 1.04), e.TipColor,
+				{ Node = n, Mesh = true })
+		end
+		if e.InColor then
+			local k = e.InScale or 1
+			overlay(ctx, name .. "In" .. sname(s), earE, 0, -size.Y * 0.06, size.X * 0.29 * k, size.Y * 0.31 * k, e.InColor,
+				{ Side = s, Node = n, Lift = 0.01 })
 		end
 	end)
 end
@@ -545,25 +735,27 @@ local DEFAULT_PROFILE = {
 	BodyPos = V3(0, 0, 0),
 	Head = V3(1.95, 1.75, 1.75),
 	HeadPos = V3(0, 0.98, -0.1),
-	EyeTheta = 0.58,
-	EyePhi = -0.08,
-	EyeW = 0.40,
-	EyeH = 0.50,
-	EyeD = 0.20,
-	CheekTheta = 0.98,
-	CheekPhi = -0.34,
-	CheekW = 0.30,
-	CheekH = 0.20,
-	BellyPos = V3(0, -0.05, -0.43),
-	BellySize = V3(0.8, 0.8, 0.42),
-	FeetPos = V3(0.36, -0.55, -0.12),
-	FeetSize = V3(0.46, 0.30, 0.56),
-	ArmPos = V3(0.67, 0.02, -0.18),
-	ArmSize = V3(0.28, 0.46, 0.30),
-	ArmRoll = 0.35,
-	WingAnchor = V3(0.36, 0.28, 0.46),
+	EyeTheta = 0.5,
+	EyePhi = -0.06,
+	EyeW = 0.44,
+	EyeH = 0.54,
+	EyeD = 0.34,
+	EyeOut = 0.07,
+	CheekTheta = 0.9,
+	CheekPhi = -0.3,
+	CheekW = 0.3,
+	CheekH = 0.18,
+	BellyY = -0.08,
+	BellyR = V3(0.36, 0.36, 0),
+	FeetPos = V3(0.34, -0.52, -0.14),
+	FeetSize = V3(0.44, 0.3, 0.54),
+	ArmPos = V3(0.6, 0.0, -0.2),
+	ArmSize = V3(0.27, 0.44, 0.3),
+	ArmRoll = 0.38,
+	WingAnchor = V3(0.34, 0.28, 0.44),
 	WingScale = 1,
 	AccessoryX = 0.5, -- how far from the centre line horns / antlers sit
+	Lashes = true,
 }
 
 local PROFILES = {
@@ -572,22 +764,22 @@ local PROFILES = {
 	Fox = { Head = V3(2.0, 1.7, 1.75), AccessoryX = 0.3 },
 	Bunny = { Head = V3(1.9, 1.72, 1.7) },
 	Bear = { Head = V3(2.0, 1.75, 1.75), Body = V3(1.32, 1.2, 1.15) },
-	Panda = { Head = V3(2.0, 1.75, 1.75), Body = V3(1.32, 1.2, 1.15) },
+	Panda = { Head = V3(2.0, 1.75, 1.75), Body = V3(1.32, 1.2, 1.15), Lashes = false },
 	Dragon = {
 		Body = V3(1.35, 1.25, 1.2),
 		Head = V3(2.05, 1.8, 1.8),
 		HeadPos = V3(0, 1.0, -0.12),
-		EyeTheta = 0.62,
-		EyePhi = 0.0,
-		EyeW = 0.46,
-		EyeH = 0.58,
-		EyeD = 0.24,
-		BellyPos = V3(0, -0.04, -0.45),
-		BellySize = V3(0.92, 0.95, 0.42),
+		EyeTheta = 0.52,
+		EyePhi = 0.02,
+		EyeW = 0.48,
+		EyeH = 0.6,
+		EyeD = 0.36,
+		BellyY = -0.06,
+		BellyR = V3(0.42, 0.44, 0),
 		BellyColor = function(C)
 			return mix(CREAM, C.P, 0.2)
 		end,
-		WingAnchor = V3(0.36, 0.34, 0.5),
+		WingAnchor = V3(0.34, 0.34, 0.48),
 		WingScale = 1.1,
 		AccessoryX = 0.5,
 	},
@@ -595,23 +787,21 @@ local PROFILES = {
 		Body = V3(1.35, 1.25, 1.15),
 		Head = V3(2.0, 1.6, 1.65),
 		HeadPos = V3(0, 0.95, -0.08),
-		EyeTheta = 0.56,
-		EyePhi = 0.0,
-		EyeW = 0.54,
-		EyeH = 0.6,
-		EyeD = 0.22,
-		CheekTheta = 1.1,
-		CheekPhi = -0.4,
-		BellySize = V3(0.95, 0.95, 0.44),
+		EyeTheta = 0.47,
+		EyePhi = 0.02,
+		EyeW = 0.52,
+		EyeH = 0.58,
+		CheekTheta = 1.0,
+		CheekPhi = -0.36,
+		BellyR = V3(0.44, 0.46, 0),
+		Lashes = false,
 	},
 	Slime = {
 		Body = V3(1.75, 0.95, 1.55),
 		Head = V3(1.95, 1.6, 1.75),
 		HeadPos = V3(0, 0.78, -0.05),
-		EyeTheta = 0.6,
+		EyeTheta = 0.5,
 		EyePhi = -0.1,
-		BellyPos = V3(0, 0, -0.5),
-		BellySize = V3(1.0, 0.5, 0.3),
 		NoFeet = true,
 		NoArms = true,
 		NoBelly = true,
@@ -622,290 +812,321 @@ local PROFILES = {
 		Body = V3(1.3, 1.25, 1.2),
 		Head = V3(1.85, 1.7, 1.7),
 		AccessoryX = 0.4,
+		BellyR = V3(0.38, 0.38, 0),
 	},
 	Frog = {
 		Body = V3(1.3, 1.05, 1.15),
 		Head = V3(2.1, 1.5, 1.7),
 		HeadPos = V3(0, 0.85, -0.1),
-		EyeTheta = 0.0, -- overridden: eyes sit on bumps
-		FeetSize = V3(0.56, 0.3, 0.72),
-		FeetPos = V3(0.4, -0.5, -0.1),
+		FeetSize = V3(0.56, 0.26, 0.7),
+		FeetPos = V3(0.4, -0.46, -0.16),
+		EyeW = 0.4,
+		EyeH = 0.46,
+		EyeD = 0.32,
+		CheekTheta = 0.82,
+		CheekPhi = -0.26,
+		Lashes = false,
 	},
 	Penguin = {
 		Body = V3(1.4, 1.35, 1.2),
 		Head = V3(1.85, 1.55, 1.6),
 		HeadPos = V3(0, 0.95, -0.1),
-		BellyPos = V3(0, -0.06, -0.46),
-		BellySize = V3(1.0, 1.05, 0.5),
-		FeetPos = V3(0.36, -0.68, -0.18),
-		FeetSize = V3(0.5, 0.14, 0.62),
-		ArmPos = V3(0.72, 0.0, -0.05),
-		ArmSize = V3(0.2, 0.62, 0.4),
+		BellyY = -0.1,
+		BellyR = V3(0.48, 0.5, 0),
+		FeetPos = V3(0.3, -0.64, -0.24),
+		FeetSize = V3(0.42, 0.16, 0.58),
+		ArmPos = V3(0.68, -0.02, -0.02),
+		ArmSize = V3(0.2, 0.66, 0.42),
+		ArmRoll = 0.3,
 		WingScale = 0.9,
 	},
 	Axolotl = {
 		Body = V3(1.15, 1.05, 1.3),
 		Head = V3(2.1, 1.55, 1.7),
 		HeadPos = V3(0, 0.88, -0.1),
-		EyeTheta = 0.78,
-		EyePhi = 0.02,
+		EyeTheta = 0.68,
+		EyePhi = 0.04,
 		EyeW = 0.4,
 		EyeH = 0.46,
-		EyeD = 0.2,
-		CheekTheta = 1.1,
+		EyeD = 0.32,
+		CheekTheta = 1.0,
 		FeetSize = V3(0.4, 0.26, 0.5),
+		Lashes = false,
 	},
 }
 
 local SPECIES = {}
 
+-- Muzzle bump on the lower face; returns its surface for nose / mouth.
+local function muzzle(ctx, phi, size, color, embed, lean)
+	local x, y = headXY(ctx, 0, phi)
+	local _, e = bumpOn(ctx, "Muzzle", ctx.HeadE, x, y, size, embed or 0.62, color, { Lean = lean or 0.35 })
+	return e
+end
+
+-- Nose bump sitting on the muzzle's upper front.
+local function noseOn(ctx, e, y, size, color, name)
+	local part = bumpOn(ctx, name or "Nose", e, 0, y, size, 0.55, color or NOSE, { Lean = 0.2 })
+	return part
+end
+
 ----- Cat -----
 SPECIES.Cat = function(ctx, p)
 	local C = ctx.C
 	earPair(ctx, {
-		Pos = V3(0.64, 1.82, -0.06), Size = V3(0.52, 0.72, 0.22), Roll = -0.34, Color = C.P,
-		InColor = C.Pink, Hinge = V3(0.58, 1.6, -0.08),
+		Theta = 0.55, Phi = 0.86, Dir = V3(0.42, 1, 0.08), Yaw = 0.25, Size = V3(0.6, 0.74, 0.26), Embed = 0.32,
+		Color = C.P, InColor = C.Pink,
 	})
-	muzzle(ctx, -0.36, 0, V3(0.66, 0.4, 0.34), lighten(C.P, 0.4))
-	nose(ctx, -0.26, 0.07, V3(0.16, 0.11, 0.1), C.Pink)
-	smileW(ctx, -0.47, 0.04)
-	-- whiskers: two thin sticks per side
+	local mz = muzzle(ctx, -0.36, V3(0.66, 0.4, 0.34), lighten(C.P, 0.42))
+	noseOn(ctx, mz, 0.1, V3(0.16, 0.1, 0.1), C.Pink)
+	mouthW(ctx, mz, 0, -0.07, 0.9)
+	-- whiskers: two thin strokes per side fanning out of the muzzle sides
 	pair(function(s)
 		for i = 1, 2 do
-			local roll = 0.2 - (i - 1) * 0.3
-			local cf = faceCF(ctx, 0.74, -0.3 + (i - 1) * -0.06, 0.1, roll)
-			blockCF(ctx, "Whisker" .. sname(s) .. i, sd(s, cf * CF(0.24, 0, 0)), V3(0.5, 0.05, 0.05), lighten(C.P, 0.6))
+			local frame = surfaceFrame(mz, 0.26, 0.03 - (i - 1) * 0.09)
+			local base = mz.CF * frame.Position
+			local dir = V3(1, 0.12 - (i - 1) * 0.2, 0.18).Unit
+			local rel = CF(base + dir * 0.24) * aim(dir)
+			blockCF(ctx, "Whisker" .. sname(s) .. i, sd(s, rel), V3(0.035, 0.035, 0.46), lighten(C.P, 0.62))
 		end
 	end)
 	chain(ctx, "Tail",
-		{ V3(0, -0.15, 0.5), V3(0, -0.08, 0.96), V3(0, 0.26, 1.32), V3(0, 0.7, 1.46) },
-		{ 0.36, 0.34, 0.32 }, { C.P, C.P, mix(C.P, C.S, 0.6) }, { Amp = 0.2 })
+		{ V3(0, -0.2, 0.42), V3(0, -0.12, 0.92), V3(0, 0.22, 1.28), V3(0, 0.68, 1.4) },
+		{ 0.34, 0.32, 0.3 }, { C.P, C.P, mix(C.P, C.S, 0.6) }, { Amp = 0.2 })
 end
 
 ----- Dog -----
 SPECIES.Dog = function(ctx, p)
 	local C = ctx.C
-	local earC = mix(C.P, rgb(60, 40, 30), 0.22)
-	pair(function(s)
-		local n = newNode(ctx, { Kind = "ear", Hinge = sd(s, CF(0.78, 1.5, 0)), Axis = "z", Amp = 0.07, Side = s, Phase = s * 1.9 })
-		blobS(ctx, s, "Ear", V3(0.93, 1.2, 0.02), V3(0.36, 0.7, 0.26), earC, A(0, 0, 0.32), { Node = n })
-	end)
-	muzzle(ctx, -0.3, 0.1, V3(0.8, 0.54, 0.58), C.S)
-	nose(ctx, -0.2, 0.4, V3(0.3, 0.22, 0.2), NOSE)
-	smileW(ctx, -0.5, 0.36)
-	blob(ctx, "Tongue", V3(0, 0.53, -1.18), V3(0.17, 0.09, 0.22), rgb(240, 124, 148), A(0.25, 0, 0))
+	local earC = mix(C.P, rgb(70, 46, 34), 0.24)
+	earPair(ctx, {
+		Theta = 1.02, Phi = 0.5, Dir = V3(0.42, -1, 0.06), Yaw = 0.9, Size = V3(0.42, 0.8, 0.24), Embed = 0.12,
+		Color = earC, Amp = 0.08,
+	})
+	local mz = muzzle(ctx, -0.32, V3(0.8, 0.52, 0.5), C.S, 0.6, 0.45)
+	noseOn(ctx, mz, 0.12, V3(0.3, 0.2, 0.18), NOSE)
+	mouthW(ctx, mz, 0, -0.08, 1.1)
+	overlay(ctx, "Tongue", mz, 0, -0.17, 0.08, 0.06, rgb(240, 120, 146), { Lift = 0.016 })
+	-- a darker patch around one eye: every dog gets a little personality
+	local px, py = headXY(ctx, p.EyeTheta + 0.06, p.EyePhi + 0.04)
+	overlay(ctx, "Patch", ctx.HeadE, px, py, 0.34, 0.38, earC, { Lift = 0.006, Roll = -0.3 })
 	chain(ctx, "Tail",
-		{ V3(0, -0.2, 0.5), V3(0, -0.06, 0.92), V3(0, 0.34, 1.14) },
-		{ 0.34, 0.3 }, { C.P, mix(C.P, C.S, 0.6) }, { Amp = 0.3, Rate = 1.5, Lag = 0.5 })
+		{ V3(0, -0.22, 0.44), V3(0, -0.06, 0.88), V3(0, 0.32, 1.1) },
+		{ 0.32, 0.28 }, { C.P, mix(C.P, C.S, 0.6) }, { Amp = 0.3, Rate = 1.5, Lag = 0.5 })
 end
 
 ----- Fox -----
 SPECIES.Fox = function(ctx, p)
 	local C = ctx.C
 	earPair(ctx, {
-		Pos = V3(0.66, 1.88, -0.04), Size = V3(0.58, 0.82, 0.2), Roll = -0.38, Color = C.P,
-		InColor = lighten(C.S, 0.2), TipColor = darken(C.P, 0.62), Hinge = V3(0.56, 1.6, -0.05),
+		Theta = 0.56, Phi = 0.82, Dir = V3(0.5, 1, 0.06), Yaw = 0.2, Size = V3(0.64, 0.86, 0.24), Embed = 0.3,
+		Color = C.P, InColor = lighten(C.S, 0.15), TipColor = darken(C.P, 0.62),
 	})
-	muzzle(ctx, -0.32, 0.12, V3(0.62, 0.42, 0.6), C.S)
-	nose(ctx, -0.18, 0.5, V3(0.2, 0.15, 0.15), NOSE)
-	smileW(ctx, -0.5, 0.34)
-	-- fluffy cheek tufts
+	-- a narrow cream muzzle that points forward, nose at its tip
+	local mz = muzzle(ctx, -0.32, V3(0.6, 0.4, 0.62), C.S, 0.66, 0.55)
+	noseOn(ctx, mz, 0.08, V3(0.2, 0.13, 0.13), NOSE)
+	mouthW(ctx, mz, 0, -0.1, 0.9)
+	-- cream cheek ruffs that flare out from the lower head
 	pair(function(s)
-		blobS(ctx, s, "CheekTuft", V3(0.8, 0.58, -0.42), V3(0.6, 0.3, 0.3), C.S, A(0, 0.75, -0.1))
+		local x, y = headXY(ctx, 1.12, -0.42)
+		bumpOn(ctx, "Ruff" .. sname(s), ctx.HeadE, x, y, V3(0.62, 0.34, 0.4), 0.55, C.S, { Side = s, Roll = -0.35 })
 	end)
 	chain(ctx, "Tail",
-		{ V3(0, -0.12, 0.5), V3(0, 0.0, 1.05), V3(0, 0.36, 1.55), V3(0, 0.82, 1.84) },
-		{ 0.62, 0.8, 0.66 }, { C.P, C.P, C.S }, { Amp = 0.18, Stretch = 1.3 })
+		{ V3(0, -0.16, 0.42), V3(0, -0.02, 1.0), V3(0, 0.34, 1.5), V3(0, 0.8, 1.76) },
+		{ 0.6, 0.78, 0.62 }, { C.P, C.P, C.S }, { Amp = 0.18, Stretch = 1.32 })
 end
 
 ----- Bunny -----
 SPECIES.Bunny = function(ctx, p)
 	local C = ctx.C
 	earPair(ctx, {
-		Pos = V3(0.36, 2.1, 0.0), Size = V3(0.4, 1.06, 0.2), Roll = -0.12, Color = C.P,
-		InColor = C.Pink, InOffset = V3(0, -0.04, -0.1), Hinge = V3(0.36, 1.6, 0), Amp = 0.07,
+		Theta = 0.26, Phi = 0.92, Dir = V3(0.16, 1, 0.12), Yaw = 0.15, Size = V3(0.42, 1.12, 0.22), Embed = 0.22,
+		Color = C.P, InColor = C.Pink, InScale = 1.05, Amp = 0.07,
 	})
-	muzzle(ctx, -0.38, 0, V3(0.62, 0.36, 0.3), lighten(C.P, 0.45))
-	nose(ctx, -0.27, 0.06, V3(0.14, 0.1, 0.1), C.Pink)
-	smileW(ctx, -0.5, 0.04)
-	blob(ctx, "Teeth", faceCF(ctx, 0, -0.58, 0.0).Position, V3(0.17, 0.15, 0.05), rgb(255, 250, 240))
-	local n = newNode(ctx, { Kind = "tail", Hinge = CF(0, -0.1, 0.55), Axis = "y", Amp = 0.28, Rate = 1.3 })
-	blob(ctx, "Tail", V3(0, -0.15, 0.7), V3(0.56, 0.56, 0.56), C.S, nil, { Node = n })
+	local mz = muzzle(ctx, -0.38, V3(0.62, 0.36, 0.3), lighten(C.P, 0.45))
+	noseOn(ctx, mz, 0.09, V3(0.14, 0.1, 0.1), C.Pink)
+	mouthW(ctx, mz, 0, -0.06, 0.85)
+	overlay(ctx, "Teeth", mz, 0, -0.14, 0.07, 0.055, rgb(255, 250, 240), { Lift = 0.014 })
+	local n = newNode(ctx, { Kind = "tail", Hinge = CF(0, -0.12, 0.5), Axis = "y", Amp = 0.28, Rate = 1.3 })
+	blob(ctx, "Tail", V3(0, -0.16, 0.62), V3(0.5, 0.5, 0.5), lighten(C.S, 0.1), nil, { Node = n })
 end
 
 ----- Bear -----
 SPECIES.Bear = function(ctx, p)
 	local C = ctx.C
-	pair(function(s)
-		local n = newNode(ctx, { Kind = "ear", Hinge = sd(s, CF(0.66, 1.62, -0.05)), Axis = "z", Amp = 0.04, Side = s, Phase = s * 1.6 })
-		blobS(ctx, s, "Ear", V3(0.7, 1.76, -0.05), V3(0.5, 0.5, 0.4), C.P, nil, { Node = n })
-		blobS(ctx, s, "EarIn", V3(0.7, 1.74, -0.2), V3(0.28, 0.28, 0.2), C.S, nil, { Node = n })
-	end)
-	muzzle(ctx, -0.33, 0.1, V3(0.74, 0.52, 0.46), C.S)
-	nose(ctx, -0.2, 0.3, V3(0.28, 0.2, 0.16), NOSE)
-	smileW(ctx, -0.5, 0.3)
+	earPair(ctx, {
+		Theta = 0.62, Phi = 0.74, Dir = V3(0.55, 1, 0.05), Yaw = 0.1, Size = V3(0.5, 0.46, 0.34), Embed = 0.36,
+		Color = C.P, InColor = C.S, InScale = 1.2, Amp = 0.04,
+	})
+	local mz = muzzle(ctx, -0.33, V3(0.74, 0.5, 0.44), C.S)
+	noseOn(ctx, mz, 0.1, V3(0.28, 0.18, 0.15), NOSE)
+	mouthW(ctx, mz, 0, -0.1, 1.0)
 	local n = newNode(ctx, { Kind = "tail", Hinge = CF(0, -0.15, 0.5), Axis = "y", Amp = 0.25 })
-	blob(ctx, "Tail", V3(0, -0.2, 0.62), V3(0.32, 0.32, 0.32), C.P, nil, { Node = n })
+	blob(ctx, "Tail", V3(0, -0.2, 0.6), V3(0.32, 0.32, 0.32), C.P, nil, { Node = n })
 end
 
 ----- Panda -----
 SPECIES.Panda = function(ctx, p)
 	local C = ctx.C
+	earPair(ctx, {
+		Theta = 0.64, Phi = 0.74, Dir = V3(0.55, 1, 0.05), Yaw = 0.1, Size = V3(0.5, 0.48, 0.36), Embed = 0.36,
+		Color = C.S, Amp = 0.04,
+	})
+	-- dark teardrop eye patches lying flush on the face; the eyes sit in them
 	pair(function(s)
-		local n = newNode(ctx, { Kind = "ear", Hinge = sd(s, CF(0.68, 1.62, -0.05)), Axis = "z", Amp = 0.04, Side = s, Phase = s * 1.6 })
-		blobS(ctx, s, "Ear", V3(0.72, 1.76, -0.05), V3(0.5, 0.5, 0.4), C.S, nil, { Node = n })
+		local x, y = headXY(ctx, p.EyeTheta + 0.04, p.EyePhi - 0.03)
+		overlay(ctx, "Patch" .. sname(s), ctx.HeadE, x, y, 0.32, 0.4, C.S, { Lift = 0.006, Roll = -0.42, Side = s })
 	end)
-	-- dark eye patches
-	pair(function(s)
-		local cf = faceCF(ctx, p.EyeTheta + 0.02, p.EyePhi, -0.03, -0.38)
-		blobCF(ctx, "Patch" .. sname(s), sd(s, cf), V3(0.56, 0.66, 0.14), C.S)
-	end)
-	muzzle(ctx, -0.36, 0.08, V3(0.64, 0.44, 0.38), lighten(C.P, 0.3))
-	nose(ctx, -0.24, 0.2, V3(0.25, 0.18, 0.14), C.S)
-	smileW(ctx, -0.5, 0.2)
+	local mz = muzzle(ctx, -0.36, V3(0.64, 0.42, 0.36), lighten(C.P, 0.35))
+	noseOn(ctx, mz, 0.09, V3(0.24, 0.16, 0.13), C.S)
+	mouthW(ctx, mz, 0, -0.08, 0.95)
 	local n = newNode(ctx, { Kind = "tail", Hinge = CF(0, -0.15, 0.5), Axis = "y", Amp = 0.25 })
-	blob(ctx, "Tail", V3(0, -0.2, 0.62), V3(0.32, 0.32, 0.32), lighten(C.P, 0.2), nil, { Node = n })
+	blob(ctx, "Tail", V3(0, -0.2, 0.6), V3(0.3, 0.3, 0.3), lighten(C.P, 0.2), nil, { Node = n })
 end
 
 ----- Dragon (the Cloudy Dragon is the mascot: fluffy, round, gold horns, cloud-puff tail) -----
 SPECIES.Dragon = function(ctx, p)
 	local C = ctx.C
-	local fin = C.S
 	local cream = mix(CREAM, C.P, 0.2)
-	-- stubby snout with two nostril dots and a little smile
-	blobCF(ctx, "Snout", faceCF(ctx, 0, -0.3, 0.16), V3(0.72, 0.5, 0.52), cream)
+	-- stubby rounded snout with two nostrils and a small smile, all flush on it
+	local x, y = headXY(ctx, 0, -0.3)
+	local _, snout = bumpOn(ctx, "Snout", ctx.HeadE, x, y, V3(0.8, 0.5, 0.48), 0.6, cream, { Lean = 0.45 })
 	pair(function(s)
-		blobCF(ctx, "Nostril" .. sname(s), sd(s, faceCF(ctx, 0.14, -0.19, 0.38)), V3(0.1, 0.1, 0.07), darken(C.E, 0.2), { Mesh = true })
+		overlay(ctx, "Nostril" .. sname(s), snout, 0.13, 0.07, 0.045, 0.034, darken(mix(C.E, C.S, 0.4), 0.25),
+			{ Side = s, Lift = 0.008, Roll = 0.35 })
 	end)
-	smileWide(ctx, -0.47, 0.22, 0.3)
-	-- cream belly bands
-	blob(ctx, "BellyBand1", V3(0, 0.2, -0.6), V3(0.8, 0.12, 0.14), mix(cream, C.S, 0.35))
-	blob(ctx, "BellyBand2", V3(0, -0.2, -0.62), V3(0.76, 0.12, 0.14), mix(cream, C.S, 0.35))
-	-- sky-blue ear fins that flare out from the cheeks
-	pair(function(s)
-		local n = newNode(ctx, { Kind = "ear", Hinge = sd(s, CF(0.9, 1.1, 0.0)), Axis = "z", Amp = 0.08, Side = s, Phase = s * 1.3 })
-		blobS(ctx, s, "Fin", V3(1.12, 1.16, 0.12), V3(0.14, 0.7, 0.52), fin, A(0, 0.55, -0.3), { Node = n })
-		blobS(ctx, s, "FinIn", V3(1.12, 1.14, 0.0), V3(0.1, 0.44, 0.32), lighten(fin, 0.4), A(0, 0.55, -0.3), { Node = n })
-	end)
+	mouthWide(ctx, snout, 0, -0.09, 0.15)
+	-- soft fins flaring from the cheeks (like the icon), with a lighter flush inner panel
+	earPair(ctx, {
+		Name = "Fin", Theta = 1.22, Phi = 0.18, Dir = V3(1, 0.62, 0.32), Yaw = 0.7, Size = V3(0.46, 0.72, 0.16),
+		Embed = 0.22, Color = C.S, InColor = lighten(C.S, 0.45), InScale = 1.1, Amp = 0.08,
+	})
 	-- fluffy cloud tuft between the horns
-	blob(ctx, "Tuft1", V3(0, 1.95, -0.12), V3(0.46, 0.4, 0.46), C.P)
-	blob(ctx, "Tuft2", V3(0.24, 1.9, 0.02), V3(0.32, 0.3, 0.32), lighten(C.P, 0.1))
-	blob(ctx, "Tuft3", V3(-0.24, 1.9, 0.02), V3(0.32, 0.3, 0.32), lighten(C.P, 0.1))
-	-- sky-blue puffs down the back
-	blob(ctx, "Puff1", V3(0, 0.46, 0.58), V3(0.42, 0.42, 0.4), C.S)
-	blob(ctx, "Puff2", V3(0, 0.1, 0.66), V3(0.36, 0.36, 0.34), C.S)
-	blob(ctx, "Puff3", V3(0, -0.22, 0.7), V3(0.3, 0.3, 0.3), C.S)
+	local tx, ty = headXY(ctx, 0, 1.05)
+	bumpOn(ctx, "Tuft1", ctx.HeadE, tx, ty, V3(0.5, 0.44, 0.48), 0.55, lighten(C.P, 0.1), { Mesh = false })
+	pair(function(s)
+		local qx, qy = headXY(ctx, 0.3, 1.18)
+		bumpOn(ctx, "Tuft" .. sname(s), ctx.HeadE, qx, qy, V3(0.34, 0.32, 0.34), 0.55, C.P, { Side = s, Mesh = false })
+	end)
+	-- sky-blue cloud puffs down the back
+	local backE = ell(CF(p.BodyPos) * A(0, PI, 0), p.Body) -- the body seen from behind (front = pet back)
+	local puffs = { { 0.36, 0.42 }, { 0.04, 0.36 }, { -0.26, 0.3 } }
+	for i = 1, #puffs do
+		bumpOn(ctx, "Puff" .. i, backE, 0, puffs[i][1], V3(puffs[i][2], puffs[i][2], puffs[i][2]), 0.5, C.S, { Mesh = false })
+	end
 	-- tail ending in a cloud puff
 	local ids = chain(ctx, "Tail",
-		{ V3(0, -0.25, 0.5), V3(0, -0.3, 1.05), V3(0, 0.0, 1.6), V3(0, 0.4, 1.98) },
-		{ 0.5, 0.44, 0.38 }, { C.P, mix(C.P, C.S, 0.35), mix(C.P, C.S, 0.7) },
+		{ V3(0, -0.26, 0.44), V3(0, -0.3, 1.0), V3(0, -0.02, 1.52), V3(0, 0.38, 1.86) },
+		{ 0.5, 0.42, 0.34 }, { C.P, mix(C.P, C.S, 0.35), mix(C.P, C.S, 0.7) },
 		{ Amp = 0.2, Lag = 0.8 })
 	local tipNode = ids[#ids]
-	blob(ctx, "TailPuff1", V3(0, 0.5, 2.06), V3(0.58, 0.54, 0.54), C.P, nil, { Node = tipNode })
-	blob(ctx, "TailPuff2", V3(0.3, 0.42, 2.02), V3(0.36, 0.34, 0.34), C.S, nil, { Node = tipNode })
-	blob(ctx, "TailPuff3", V3(-0.3, 0.42, 2.02), V3(0.36, 0.34, 0.34), C.S, nil, { Node = tipNode })
+	blob(ctx, "TailPuff1", V3(0, 0.5, 1.96), V3(0.56, 0.52, 0.52), C.P, nil, { Node = tipNode })
+	blob(ctx, "TailPuff2", V3(0.26, 0.4, 1.92), V3(0.36, 0.34, 0.34), lighten(C.S, 0.2), nil, { Node = tipNode })
+	blob(ctx, "TailPuff3", V3(-0.26, 0.4, 1.92), V3(0.36, 0.34, 0.34), lighten(C.S, 0.2), nil, { Node = tipNode })
 end
 
 ----- Owl -----
 SPECIES.Owl = function(ctx, p)
 	local C = ctx.C
-	-- facial discs behind the huge eyes
+	-- pale facial discs flush around the huge eyes
 	pair(function(s)
-		blobCF(ctx, "Disc" .. sname(s), sd(s, faceCF(ctx, p.EyeTheta, p.EyePhi, -0.03)), V3(0.92, 0.9, 0.14), C.S)
+		local x, y = headXY(ctx, p.EyeTheta, p.EyePhi - 0.02)
+		overlay(ctx, "Disc" .. sname(s), ctx.HeadE, x, y, 0.44, 0.44, C.S, { Lift = 0.006, Side = s })
 	end)
-	-- ear tufts
 	earPair(ctx, {
-		Pos = V3(0.7, 1.7, -0.02), Size = V3(0.3, 0.6, 0.22), Roll = -0.5, Color = darken(C.P, 0.12),
-		Hinge = V3(0.62, 1.5, 0), Amp = 0.04,
+		Name = "Tuft", Theta = 0.62, Phi = 0.72, Dir = V3(0.75, 1, 0.1), Yaw = 0.2, Size = V3(0.3, 0.56, 0.22), Embed = 0.3,
+		Color = darken(C.P, 0.12), Amp = 0.04,
 	})
-	blobCF(ctx, "Beak", faceCF(ctx, 0, -0.22, 0.1), V3(0.22, 0.28, 0.22), BEAK, { Mesh = true })
-	-- feathery chest scallops
+	local bx, by = headXY(ctx, 0, -0.2)
+	bumpOn(ctx, "Beak", ctx.HeadE, bx, by, V3(0.22, 0.3, 0.24), 0.55, BEAK, { Lean = 0.3, Pitch = -0.25 })
+	-- feathery chest scallops drawn on the belly
 	for i = 1, 3 do
-		blob(ctx, "Ruffle" .. i, V3(0, 0.2 - (i - 1) * 0.2, -0.63 - (i - 1) * 0.005), V3(0.62 - (i - 1) * 0.06, 0.07, 0.1), darken(C.S, 0.1))
+		overlay(ctx, "Ruffle" .. i, ctx.BodyE, 0, 0.14 - (i - 1) * 0.17, 0.26 - (i - 1) * 0.03, 0.03, darken(C.S, 0.14),
+			{ Lift = 0.02, Roll = 0 })
 	end
 	-- short fan tail
-	local n = newNode(ctx, { Kind = "tail", Hinge = CF(0, -0.2, 0.5), Axis = "y", Amp = 0.18 })
-	blob(ctx, "Tail", V3(0, -0.28, 0.82), V3(0.5, 0.18, 0.62), darken(C.P, 0.1), A(0.2, 0, 0), { Node = n })
-	blob(ctx, "TailL", V3(-0.2, -0.26, 0.78), V3(0.3, 0.14, 0.52), C.P, A(0.2, 0.3, 0), { Node = n })
-	blob(ctx, "TailR", V3(0.2, -0.26, 0.78), V3(0.3, 0.14, 0.52), C.P, A(0.2, -0.3, 0), { Node = n })
+	local n = newNode(ctx, { Kind = "tail", Hinge = CF(0, -0.2, 0.46), Axis = "y", Amp = 0.18 })
+	blob(ctx, "Tail", V3(0, -0.3, 0.76), V3(0.46, 0.16, 0.6), darken(C.P, 0.1), A(0.25, 0, 0), { Node = n, Mesh = true })
+	blob(ctx, "TailL", V3(-0.2, -0.28, 0.72), V3(0.28, 0.13, 0.5), C.P, A(0.25, 0.3, 0), { Node = n, Mesh = true })
+	blob(ctx, "TailR", V3(0.2, -0.28, 0.72), V3(0.28, 0.13, 0.5), C.P, A(0.25, -0.3, 0), { Node = n, Mesh = true })
 end
 
 ----- Slime -----
 SPECIES.Slime = function(ctx, p)
 	local C = ctx.C
-	-- glossy highlights
-	blob(ctx, "Gloss1", V3(0.46, 1.34, -0.55), V3(0.4, 0.18, 0.12), lighten(C.P, 0.65), A(0.5, -0.3, 0.6), { Transparency = 0.15 })
-	blob(ctx, "Gloss2", V3(0.74, 1.12, -0.36), V3(0.14, 0.14, 0.1), lighten(C.P, 0.7), nil, { Transparency = 0.15 })
-	-- wobbly base drips
-	blob(ctx, "Drip1", V3(-0.6, -0.4, -0.35), V3(0.4, 0.3, 0.4), C.P)
-	blob(ctx, "Drip2", V3(0.62, -0.38, -0.3), V3(0.36, 0.28, 0.36), C.P)
-	blob(ctx, "Drip3", V3(0.1, -0.42, 0.55), V3(0.4, 0.26, 0.4), C.P)
+	-- glossy highlights lying on the jelly
+	local gx, gy = headXY(ctx, -0.42, 0.42)
+	overlay(ctx, "Gloss1", ctx.HeadE, gx, gy, 0.26, 0.11, lighten(C.P, 0.7), { Lift = 0.012, Roll = 0.5, Transparency = 0.1 })
+	local hx, hy = headXY(ctx, -0.62, 0.22)
+	overlay(ctx, "Gloss2", ctx.HeadE, hx, hy, 0.07, 0.07, lighten(C.P, 0.75), { Lift = 0.012, Transparency = 0.1 })
+	-- wobbly base drips melting into the body
+	blob(ctx, "Drip1", V3(-0.62, -0.32, -0.32), V3(0.46, 0.32, 0.46), C.P, nil, { Mesh = true })
+	blob(ctx, "Drip2", V3(0.64, -0.3, -0.26), V3(0.42, 0.3, 0.42), C.P, nil, { Mesh = true })
+	blob(ctx, "Drip3", V3(0.1, -0.36, 0.5), V3(0.46, 0.28, 0.46), C.P, nil, { Mesh = true })
 	-- peak on top that bobbles
-	local n = newNode(ctx, { Kind = "sway", Hinge = CF(0, 1.5, -0.05), Axis = "z", Amp = 0.18, Axis2 = "x", Amp2 = 0.1, Lag2 = 1.2, Rate = 1.3 })
-	blob(ctx, "Peak", V3(0.03, 1.74, -0.05), V3(0.34, 0.5, 0.34), lighten(C.P, 0.08), A(0, 0, -0.25), { Node = n })
-	smileWide(ctx, -0.38, 0.22, 0.02)
-	-- tiny blob tail
-	local t = newNode(ctx, { Kind = "tail", Hinge = CF(0, -0.1, 0.6), Axis = "y", Amp = 0.3 })
-	blob(ctx, "Tail", V3(0, -0.12, 0.84), V3(0.34, 0.3, 0.4), C.P, nil, { Node = t })
+	local n = newNode(ctx, { Kind = "sway", Hinge = CF(0, 1.46, -0.05), Axis = "z", Amp = 0.18, Axis2 = "x", Amp2 = 0.1, Lag2 = 1.2, Rate = 1.3 })
+	blob(ctx, "Peak", V3(0.03, 1.64, -0.05), V3(0.36, 0.52, 0.36), lighten(C.P, 0.06), A(0, 0, -0.25), { Node = n, Mesh = true })
+	local mx, my = headXY(ctx, 0, -0.36)
+	mouthWide(ctx, ctx.HeadE, mx, my, 0.2)
 end
 
 ----- Unicorn -----
 SPECIES.Unicorn = function(ctx, p)
 	local C = ctx.C
 	earPair(ctx, {
-		Pos = V3(0.58, 1.84, -0.02), Size = V3(0.32, 0.56, 0.18), Roll = -0.22, Color = C.P,
-		InColor = lighten(C.S, 0.25), Hinge = V3(0.54, 1.62, -0.03),
+		Theta = 0.5, Phi = 0.86, Dir = V3(0.42, 1, 0.12), Yaw = 0.3, Size = V3(0.34, 0.58, 0.2), Embed = 0.3,
+		Color = C.P, InColor = lighten(C.S, 0.25),
 	})
-	muzzle(ctx, -0.34, 0.16, V3(0.82, 0.56, 0.58), lighten(C.P, 0.3))
+	local mz = muzzle(ctx, -0.34, V3(0.82, 0.54, 0.54), lighten(C.P, 0.32), 0.6, 0.45)
 	pair(function(s)
-		blobCF(ctx, "Nostril" .. sname(s), sd(s, faceCF(ctx, 0.16, -0.26, 0.45)), V3(0.08, 0.08, 0.06), C.Mouth, { Mesh = true })
+		overlay(ctx, "Nostril" .. sname(s), mz, 0.15, 0.06, 0.04, 0.03, C.Mouth, { Side = s, Lift = 0.008, Roll = 0.3 })
 	end)
-	smileWide(ctx, -0.5, 0.26, 0.3)
-	-- spiral horn: four stacked, shrinking pearls along the forehead axis
-	local hc = ctx.HC
-	local base = V3(0, hc.Y + ctx.HA.Y * 0.8, hc.Z - ctx.HA.Z * 0.55)
-	local dir = V3(0, 0.93, -0.36).Unit
+	mouthWide(ctx, mz, 0, -0.1, 0.16)
+	-- spiral horn: four stacked, shrinking pearls growing out of the forehead
+	local root, nrm = headPoint(ctx, 0, 0.62)
+	local dir = (nrm + V3(0, 0.55, 0)).Unit
 	local hornCols = { GOLD_LIGHT, rgb(250, 238, 200), GOLD_LIGHT, rgb(250, 238, 200) }
-	local hornW = { 0.3, 0.24, 0.17, 0.1 }
-	local hn = newNode(ctx, { Kind = "sway", Hinge = CF(base), Axis = "x", Amp = 0.04, Rate = 0.8 })
+	local hornW = { 0.3, 0.24, 0.17, 0.11 }
+	local hn = newNode(ctx, { Kind = "sway", Hinge = CF(root), Axis = "x", Amp = 0.04, Rate = 0.8 })
 	for i = 1, 4 do
-		local pos = base + dir * (0.1 + (i - 1) * 0.23)
-		blob(ctx, "Horn" .. i, pos, V3(hornW[i], hornW[i], 0.38), hornCols[i], aim(dir), { Node = hn })
+		local pos = root + dir * (0.06 + (i - 1) * 0.21)
+		blob(ctx, "Horn" .. i, pos, V3(hornW[i], hornW[i], 0.36), hornCols[i], aim(dir), { Node = hn, Mesh = true })
 	end
-	-- flowing mane (secondary colour) behind the horn and down the neck
-	local maneC = { C.S, mix(C.S, C.P, 0.4), C.S }
+	-- flowing mane (secondary colour) from the forehead down the back of the neck
+	local maneC = { C.S, mix(C.S, C.P, 0.35), C.S }
 	local m1 = newNode(ctx, { Kind = "sway", Hinge = CF(0, 1.7, 0.3), Axis = "x", Amp = 0.08, Rate = 1.1 })
-	blob(ctx, "Forelock", V3(0.16, 1.82, -0.62), V3(0.32, 0.4, 0.28), maneC[1], A(0, 0, -0.3), { Node = m1 })
-	blob(ctx, "Mane1", V3(0, 1.72, 0.5), V3(0.6, 0.55, 0.5), maneC[2], nil, { Node = m1 })
-	blob(ctx, "Mane2", V3(0, 1.2, 0.78), V3(0.52, 0.62, 0.42), maneC[1], nil, { Node = m1 })
-	blob(ctx, "Mane3", V3(0, 0.62, 0.7), V3(0.46, 0.6, 0.4), maneC[3], nil, { Node = m1 })
+	local fx, fy = headXY(ctx, 0.2, 0.58)
+	bumpOn(ctx, "Forelock", ctx.HeadE, fx, fy, V3(0.4, 0.36, 0.3), 0.55, maneC[1], { Node = m1, Roll = -0.4 })
+	blob(ctx, "Mane1", V3(0, 1.66, 0.52), V3(0.56, 0.56, 0.5), maneC[2], nil, { Node = m1, Mesh = true })
+	blob(ctx, "Mane2", V3(0, 1.18, 0.76), V3(0.5, 0.62, 0.44), maneC[1], nil, { Node = m1, Mesh = true })
+	blob(ctx, "Mane3", V3(0, 0.64, 0.66), V3(0.44, 0.56, 0.4), maneC[3], nil, { Node = m1, Mesh = true })
 	-- swishy tail
 	chain(ctx, "Tail",
-		{ V3(0, -0.15, 0.5), V3(0, -0.2, 1.0), V3(0, 0.1, 1.45), V3(0, 0.55, 1.72) },
-		{ 0.42, 0.44, 0.4 }, { C.S, mix(C.S, C.P, 0.3), mix(C.S, WHITE, 0.4) }, { Amp = 0.22, Lag = 0.8, Stretch = 1.3 })
+		{ V3(0, -0.18, 0.44), V3(0, -0.2, 0.96), V3(0, 0.1, 1.42), V3(0, 0.55, 1.68) },
+		{ 0.42, 0.44, 0.4 }, { C.S, mix(C.S, C.P, 0.3), mix(C.S, WHITE, 0.4) }, { Amp = 0.22, Lag = 0.8, Stretch = 1.32 })
 end
 
 ----- Phoenix -----
 SPECIES.Phoenix = function(ctx, p)
 	local C = ctx.C
-	blobCF(ctx, "Beak", faceCF(ctx, 0, -0.22, 0.1), V3(0.26, 0.2, 0.42), C.S, { Mesh = true })
-	blobCF(ctx, "BeakLow", faceCF(ctx, 0, -0.4, 0.04), V3(0.2, 0.1, 0.3), darken(C.S, 0.12), { Mesh = true })
-	-- flame crest: three flickering plumes
-	local hc = ctx.HC
-	local cn = newNode(ctx, { Kind = "sway", Hinge = CF(0, hc.Y + 0.7, hc.Z + 0.1), Axis = "z", Amp = 0.12, Axis2 = "x", Amp2 = 0.1, Lag2 = 1.5, Rate = 2.4 })
-	blob(ctx, "Crest1", V3(0, 2.15, -0.02), V3(0.22, 0.78, 0.16), C.S, nil, { Node = cn })
-	blob(ctx, "Crest2", V3(0.22, 2.05, 0.02), V3(0.18, 0.62, 0.14), mix(C.S, C.P, 0.5), A(0, 0, -0.4), { Node = cn })
-	blob(ctx, "Crest3", V3(-0.22, 2.05, 0.02), V3(0.18, 0.62, 0.14), mix(C.S, C.P, 0.5), A(0, 0, 0.4), { Node = cn })
-	-- breast feathers
-	blob(ctx, "Breast", V3(0, 0.12, -0.6), V3(0.7, 0.4, 0.14), lighten(C.S, 0.15))
+	local bx, by = headXY(ctx, 0, -0.22)
+	local _, beak = bumpOn(ctx, "Beak", ctx.HeadE, bx, by, V3(0.28, 0.22, 0.42), 0.55, C.S, { Lean = 0.5 })
+	overlay(ctx, "BeakLine", beak, 0, -0.03, 0.12, 0.016, darken(C.S, 0.3), { Lift = 0.008 })
+	-- flame crest: three flickering plumes rooted in the crown
+	local cx, cy = headXY(ctx, 0, 0.9)
+	local crestRoot = ctx.HeadE.CF * surfaceFrame(ctx.HeadE, cx, cy).Position
+	local cn = newNode(ctx, { Kind = "sway", Hinge = CF(crestRoot), Axis = "z", Amp = 0.12, Axis2 = "x", Amp2 = 0.1, Lag2 = 1.5, Rate = 2.4 })
+	blob(ctx, "Crest1", crestRoot + V3(0, 0.3, 0.06), V3(0.22, 0.74, 0.16), C.S, A(-0.25, 0, 0), { Node = cn, Mesh = true })
+	blob(ctx, "Crest2", crestRoot + V3(0.2, 0.22, 0.1), V3(0.18, 0.58, 0.14), mix(C.S, C.P, 0.5), A(-0.25, 0, -0.42), { Node = cn, Mesh = true })
+	blob(ctx, "Crest3", crestRoot + V3(-0.2, 0.22, 0.1), V3(0.18, 0.58, 0.14), mix(C.S, C.P, 0.5), A(-0.25, 0, 0.42), { Node = cn, Mesh = true })
 	-- three long tail plumes, fanned
 	local cols = { C.S, C.P, C.S }
 	local yaws = { -0.38, 0, 0.38 }
 	for i = 1, 3 do
 		local dir = V3(math.sin(yaws[i]), -0.22, math.cos(yaws[i])).Unit
-		local root = V3(0, -0.18, 0.5)
+		local root = V3(0, -0.2, 0.42)
 		local tip = root + dir * 1.5
-		chain(ctx, "Plume" .. i, { root, (root + tip) * 0.5, tip }, { 0.4, 0.34 }, { cols[i], mix(cols[i], C.S, 0.5) },
+		chain(ctx, "Plume" .. i, { root, (root + tip) * 0.5, tip }, { 0.38, 0.32 }, { cols[i], mix(cols[i], C.S, 0.5) },
 			{ Amp = 0.16, Lag = 0.9, Rate = 1.4, Flat = 0.7, Phase = i * 1.1 })
 	end
 end
@@ -913,55 +1134,63 @@ end
 ----- Frog -----
 SPECIES.Frog = function(ctx, p)
 	local C = ctx.C
-	-- eye bumps on top of the head; the eyes themselves are built in the core using ctx.EyeFrame
+	-- eye bumps on top of the head; the eyes are set into them (core reads ctx.EyeHost)
+	local ex, ey = headXY(ctx, 0.42, 0.56)
+	local hostE
 	pair(function(s)
-		blobS(ctx, s, "EyeBump", ctx.BumpPos, V3(0.7, 0.66, 0.66), C.P)
+		local _, e = bumpOn(ctx, "EyeBump" .. sname(s), ctx.HeadE, ex, ey, V3(0.72, 0.68, 0.66), 0.5, C.P,
+			{ Side = s, Lean = 0.25, Mesh = false })
+		hostE = e
 	end)
-	smileWide(ctx, -0.38, 0.62, 0.0)
+	ctx.EyeHost = hostE
+	local mx, my = headXY(ctx, 0, -0.34)
+	mouthWide(ctx, ctx.HeadE, mx, my, 0.56)
 	pair(function(s)
-		blobCF(ctx, "Nostril" .. sname(s), sd(s, faceCF(ctx, 0.1, -0.12, 0.0)), V3(0.07, 0.07, 0.05), C.Mouth, { Mesh = true })
+		local nx, ny = headXY(ctx, 0.1, -0.08)
+		overlay(ctx, "Nostril" .. sname(s), ctx.HeadE, nx, ny, 0.035, 0.03, darken(C.P, 0.45), { Side = s, Lift = 0.008 })
 	end)
-	-- pale throat
-	blobCF(ctx, "Throat", faceCF(ctx, 0, -0.62, -0.02), V3(0.9, 0.34, 0.4), lighten(C.S, 0.1))
-	-- frogs have no real tail: a tiny round bob
-	local n = newNode(ctx, { Kind = "tail", Hinge = CF(0, -0.2, 0.5), Axis = "y", Amp = 0.2 })
-	blob(ctx, "Tail", V3(0, -0.22, 0.6), V3(0.26, 0.26, 0.26), C.P, nil, { Node = n })
+	-- pale throat drawn on the lower head
+	local tx, ty = headXY(ctx, 0, -0.62)
+	overlay(ctx, "Throat", ctx.HeadE, tx, ty, 0.46, 0.2, lighten(C.S, 0.1), { Lift = 0.008 })
 end
 
 ----- Penguin -----
 SPECIES.Penguin = function(ctx, p)
 	local C = ctx.C
-	-- white face mask the eyes sit on
+	-- heart-shaped white face mask: two lobes round the eyes + a chin, flush on the head
 	pair(function(s)
-		blobCF(ctx, "Mask" .. sname(s), sd(s, faceCF(ctx, 0.42, -0.06, -0.04, -0.12)), V3(0.86, 0.9, 0.14), C.S)
+		local x, y = headXY(ctx, 0.36, -0.04)
+		overlay(ctx, "Mask" .. sname(s), ctx.HeadE, x, y, 0.44, 0.46, C.S, { Lift = 0.006, Side = s, Roll = -0.15 })
 	end)
-	blobCF(ctx, "MaskMid", faceCF(ctx, 0, -0.2, -0.04), V3(0.6, 0.6, 0.14), C.S)
-	blobCF(ctx, "Beak", faceCF(ctx, 0, -0.26, 0.08), V3(0.36, 0.2, 0.34), BEAK, { Mesh = true })
-	smileW(ctx, -0.5, 0.0)
-	local n = newNode(ctx, { Kind = "tail", Hinge = CF(0, -0.35, 0.55), Axis = "y", Amp = 0.28 })
-	blob(ctx, "Tail", V3(0, -0.42, 0.7), V3(0.36, 0.2, 0.44), C.P, A(0.3, 0, 0), { Node = n })
+	local cx, cy = headXY(ctx, 0, -0.38)
+	overlay(ctx, "MaskChin", ctx.HeadE, cx, cy, 0.52, 0.34, C.S, { Lift = 0.008 })
+	local bx, by = headXY(ctx, 0, -0.24)
+	bumpOn(ctx, "Beak", ctx.HeadE, bx, by, V3(0.36, 0.2, 0.34), 0.55, BEAK, { Lean = 0.4 })
+	local n = newNode(ctx, { Kind = "tail", Hinge = CF(0, -0.36, 0.5), Axis = "y", Amp = 0.28 })
+	blob(ctx, "Tail", V3(0, -0.44, 0.66), V3(0.36, 0.18, 0.42), C.P, A(0.3, 0, 0), { Node = n, Mesh = true })
 end
 
 ----- Axolotl -----
 SPECIES.Axolotl = function(ctx, p)
 	local C = ctx.C
-	-- three feathery gills per side
-	local gillRoll = { -0.95, -1.4, -1.85 }
-	local gillY = { 1.38, 1.1, 0.82 }
+	-- three feathery gills per side, rooted in the sides of the head
+	local phis = { 0.5, 0.18, -0.14 }
+	local dirs = { V3(0.7, 1, 0.12), V3(1, 0.35, 0.12), V3(1, -0.2, 0.12) }
 	pair(function(s)
 		for i = 1, 3 do
-			local hinge = V3(0.96, gillY[i], 0.0)
-			local n = newNode(ctx, { Kind = "sway", Hinge = sd(s, CF(hinge)), Axis = "z", Amp = 0.18, Lag = i * 0.6, Rate = 1.8, Side = s, Phase = s })
-			local rot = A(0, 0, gillRoll[i])
-			local center = hinge + rot * V3(0, 0.38, 0)
-			blobS(ctx, s, "Gill" .. i, center, V3(0.18, 0.78, 0.14), C.S, rot, { Node = n })
+			local root = headPoint(ctx, 1.32, phis[i])
+			local frame = growFrame(root, dirs[i], 0.6)
+			local n = newNode(ctx, { Kind = "sway", Hinge = sd(s, frame), Axis = "z", Amp = 0.18, Lag = i * 0.6, Rate = 1.8, Side = s, Phase = s })
+			blobCF(ctx, "Gill" .. sname(s) .. i, sd(s, frame * CF(0, 0.3, 0)), V3(0.18, 0.74, 0.14), mix(C.S, WHITE, (i - 1) * 0.08),
+				{ Node = n, Mesh = true })
 		end
 	end)
-	smileWide(ctx, -0.36, 0.5, 0.0)
+	local mx, my = headXY(ctx, 0, -0.32)
+	mouthWide(ctx, ctx.HeadE, mx, my, 0.42)
 	-- flat tail fin
 	chain(ctx, "Tail",
-		{ V3(0, -0.1, 0.55), V3(0, -0.05, 1.1), V3(0, 0.0, 1.6) },
-		{ 0.5, 0.42 }, { mix(C.P, C.S, 0.3), C.S }, { Amp = 0.3, Lag = 0.8, Flat = 1.0 })
+		{ V3(0, -0.1, 0.5), V3(0, -0.04, 1.06), V3(0, 0.02, 1.58) },
+		{ 0.48, 0.4 }, { mix(C.P, C.S, 0.3), C.S }, { Amp = 0.3, Lag = 0.8, Flat = 1.0 })
 end
 
 ----------------------------------------------------------------------
@@ -974,48 +1203,67 @@ local function resolveColor(v, C, default)
 	return v or default
 end
 
-local function buildCore(ctx, p)
-	local C = ctx.C
-	local limb = resolveColor(p.LimbColor, C, C.P)
+local LIMB_COLORS = {
+	-- tidy colour blocking: some species have limbs in their secondary colour
+	Panda = "S",
+	Penguin = "Beak",
+}
 
-	ctx.Primary = blobCF(ctx, "Body", CF(p.BodyPos), p.Body, resolveColor(p.BodyColor, C, C.P), { Shadow = true })
-	if not p.NoBelly then
-		blobCF(ctx, "Belly", CF(p.BellyPos), p.BellySize, resolveColor(p.BellyColor, C, C.Belly))
+local function buildCore(ctx, p, species)
+	local C = ctx.C
+	local limb = C.P
+	local feet = C.P
+	local mode = LIMB_COLORS[species]
+	if mode == "S" then
+		limb, feet = C.S, C.S
+	elseif mode == "Beak" then
+		feet = BEAK
 	end
 
+	ctx.Primary = blobCF(ctx, "Body", CF(p.BodyPos), p.Body, resolveColor(p.BodyColor, C, C.P), { Shadow = true })
+	ctx.BodyE = ell(CF(p.BodyPos), p.Body)
 	ctx.HC = p.HeadPos
 	ctx.HA = V3(p.Head.X / 2, p.Head.Y / 2, p.Head.Z / 2)
+	ctx.HeadE = ell(CF(p.HeadPos), p.Head)
 	ctx.Head = blobCF(ctx, "Head", CF(p.HeadPos), p.Head, resolveColor(p.HeadColor, C, C.P), { Shadow = true })
+
+	-- belly patch lying flush on the body
+	if not p.NoBelly then
+		overlay(ctx, "Belly", ctx.BodyE, 0, p.BellyY, p.BellyR.X, p.BellyR.Y, resolveColor(p.BellyColor, C, C.Belly), { Lift = 0.012 })
+	end
 
 	if not p.NoFeet then
 		pair(function(s)
-			blobS(ctx, s, "Foot", p.FeetPos, p.FeetSize, resolveColor(p.FootColor, C, limb), A(0, -0.14, 0))
+			blobS(ctx, s, "Foot", p.FeetPos, p.FeetSize, feet, A(0, -0.14, 0), { Mesh = true })
 		end)
 	end
 	if not p.NoArms then
 		pair(function(s)
-			blobS(ctx, s, "Arm", p.ArmPos, p.ArmSize, resolveColor(p.ArmColor, C, limb), A(0, 0, p.ArmRoll))
+			blobS(ctx, s, "Arm", p.ArmPos, p.ArmSize, limb, A(0.1, 0, p.ArmRoll), { Mesh = true })
 		end)
 	end
 
-	-- eyes (the frog overrides the frame: its eyes sit on bumps)
-	local ecf
-	if ctx.EyeFrame then
-		ecf = ctx.EyeFrame
-	else
-		ecf = faceCF(ctx, p.EyeTheta, p.EyePhi, 0)
-	end
-	pair(function(s)
-		buildEye(ctx, s, ecf, p.EyeW, p.EyeH, p.EyeD)
-	end)
-
-	-- blush cheeks
+	-- blush cheeks, flush on the face
 	if not p.NoCheeks then
 		pair(function(s)
-			local cf = faceCF(ctx, p.CheekTheta, p.CheekPhi, 0, 0.12)
-			blobCF(ctx, "Cheek" .. sname(s), sd(s, cf), V3(p.CheekW, p.CheekH, 0.09), C.Blush, { Transparency = 0.1 })
+			local x, y = headXY(ctx, p.CheekTheta, p.CheekPhi)
+			overlay(ctx, "Cheek" .. sname(s), ctx.HeadE, x, y, p.CheekW * 0.5, p.CheekH * 0.5, C.Blush,
+				{ Lift = 0.008, Roll = 0.12, Side = s, Transparency = 0.15 })
 		end)
 	end
+end
+
+-- Eyes come after the species extras (the frog builds its eye bumps there).
+local function buildFaceEyes(ctx, p)
+	ctx.Lashes = p.Lashes ~= false
+	pair(function(s)
+		if ctx.EyeHost then
+			buildEye(ctx, s, ctx.EyeHost, 0, 0.02, p.EyeW, p.EyeH, p.EyeD, p.EyeOut)
+		else
+			local x, y = headXY(ctx, p.EyeTheta, p.EyePhi)
+			buildEye(ctx, s, ctx.HeadE, x, y, p.EyeW, p.EyeH, p.EyeD, p.EyeOut)
+		end
+	end)
 end
 
 ----------------------------------------------------------------------
@@ -1039,7 +1287,12 @@ local function wingKit(ctx, p, s, frame, root)
 		end
 		local x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22 = lcf:GetComponents()
 		local scaled = CFrame.new(x * ws, y * ws, z * ws, r00, r01, r02, r10, r11, r12, r20, r21, r22)
-		return blobCF(ctx, name, sd(s, frame * scaled), V3(size.X * ws, size.Y * ws, size.Z * ws), color, o)
+		local col = color
+		if ctx.Sheen then
+			-- Secret pets: an iridescent hue drift from the root to the tip of the wing
+			col = ctx.Sheen(color, x)
+		end
+		return blobCF(ctx, name, sd(s, frame * scaled), V3(size.X * ws, size.Y * ws, size.Z * ws), col, o)
 	end
 	-- joint node inside the wing (rotates about the wing normal at wing-space point (hx, hy))
 	function kit.joint(parent, hx, hy, amp, lag)
@@ -1064,34 +1317,32 @@ local function edgeMat(ctx)
 	return SMOOTH
 end
 
--- Layered feather panels: five long flight feathers fanned out + two shorter coverts over them.
+-- Layered feather panels: five broad flight feathers fanned out + two rows of shorter coverts over them.
 WINGS.Feather = function(ctx, p, s, frame, root)
 	local k = wingKit(ctx, p, s, frame, root)
 	local W = ctx.C.W
-	k.part(CF(0.1, 0, 0), V3(0.38, 0.34, 0.2), darken(W, 0.08), { Node = root })
-	local angles = { 0.98, 0.66, 0.36, 0.08, -0.2 }
-	local lens = { 0.9, 1.2, 1.42, 1.4, 1.1 }
+	k.part(CF(0.14, 0.02, 0), V3(0.5, 0.42, 0.22), darken(W, 0.06), { Node = root, Mesh = true })
+	local angles = { 0.96, 0.64, 0.34, 0.06, -0.22 }
+	local lens = { 0.92, 1.22, 1.42, 1.36, 1.06 }
 	for i = 1, 5 do
 		local a = angles[i]
 		local len = lens[i]
-		local c = 0.16 + len / 2
+		local c = 0.14 + len / 2
 		local n = k.joint(root, 0, 0, 0.09, i * 0.4)
-		local col = W
-		if i % 2 == 0 then
-			col = mix(W, darken(W, 0.2), 0.6)
-		end
-		local o = { Node = n }
+		local col = mix(W, darken(W, 0.16), (i - 1) / 4)
+		local o = { Node = n, Mesh = true }
 		if i == 1 then
 			o.Material = edgeMat(ctx)
 		end
-		k.part(CF(math.cos(a) * c, math.sin(a) * c, 0.03 * i) * A(0, 0, a), V3(len, 0.36, 0.07), col, o)
+		k.part(CF(math.cos(a) * c, math.sin(a) * c, 0.03 * i) * A(0, 0, a), V3(len, 0.44, 0.08), col, o)
 	end
-	local cov = { 0.74, 0.22 }
-	local covLen = { 0.62, 0.7 }
+	local cov = { 0.72, 0.2 }
+	local covLen = { 0.7, 0.76 }
 	for i = 1, 2 do
 		local a = cov[i]
-		local c = 0.14 + covLen[i] / 2
-		k.part(CF(math.cos(a) * c, math.sin(a) * c, -0.06) * A(0, 0, a), V3(covLen[i], 0.32, 0.07), lighten(W, 0.2), { Node = root })
+		local c = 0.12 + covLen[i] / 2
+		k.part(CF(math.cos(a) * c, math.sin(a) * c, -0.07) * A(0, 0, a), V3(covLen[i], 0.42, 0.08), lighten(W, 0.22),
+			{ Node = root, Mesh = true })
 	end
 end
 
@@ -1102,9 +1353,9 @@ WINGS.Bat = function(ctx, p, s, frame, root)
 	local bone = darken(W, 0.34)
 	local skin = lighten(W, 0.06)
 	-- arm (root, named Wing)
-	k.part(CF(0.52, 0.05, 0) * A(0, 0, 0.12), V3(1.0, 0.16, 0.16), bone, { Node = root })
+	k.part(CF(0.52, 0.05, 0) * A(0, 0, 0.12), V3(1.0, 0.16, 0.16), bone, { Node = root, Mesh = true })
 	-- trailing membrane towards the body
-	k.part(CF(0.46, -0.34, -0.01) * A(0, 0, -0.1), V3(1.0, 0.7, 0.05), skin, { Node = root })
+	k.part(CF(0.46, -0.34, -0.01) * A(0, 0, -0.1), V3(1.0, 0.7, 0.05), skin, { Node = root, Mesh = true })
 	-- wrist joint: fingers + their membranes bend a little
 	local wx, wy = 1.0, 0.12
 	local wrist = k.joint(root, wx, wy, 0.14, 0.9)
@@ -1113,7 +1364,7 @@ WINGS.Bat = function(ctx, p, s, frame, root)
 	for i = 1, 3 do
 		local a = ang[i]
 		local c = len[i] / 2
-		local o = { Node = wrist }
+		local o = { Node = wrist, Mesh = true }
 		if i == 1 then
 			o.Material = edgeMat(ctx)
 		end
@@ -1124,7 +1375,8 @@ WINGS.Bat = function(ctx, p, s, frame, root)
 	for i = 1, 3 do
 		local a = memAng[i]
 		local c = memLen[i] * 0.5
-		k.part(CF(wx + math.cos(a) * c, wy + math.sin(a) * c, 0.01 * i) * A(0, 0, a), V3(memLen[i], 0.78, 0.05), skin, { Node = wrist })
+		k.part(CF(wx + math.cos(a) * c, wy + math.sin(a) * c, 0.01 * i) * A(0, 0, a), V3(memLen[i], 0.78, 0.05), skin,
+			{ Node = wrist, Mesh = true })
 	end
 end
 
@@ -1132,32 +1384,43 @@ end
 WINGS.Fairy = function(ctx, p, s, frame, root)
 	local k = wingKit(ctx, p, s, frame, root)
 	local W = ctx.C.W
-	k.part(CF(0.08, 0, 0), V3(0.28, 0.28, 0.16), mix(W, ctx.C.P, 0.3), { Node = root })
+	k.part(CF(0.08, 0, 0), V3(0.28, 0.28, 0.16), mix(W, ctx.C.P, 0.3), { Node = root, Mesh = true })
 	local up = k.joint(root, 0, 0, 0.1, 0.5)
 	local low = k.joint(root, 0, 0, 0.1, 1.5)
-	k.part(CF(0.86, 0.5, 0) * A(0, 0, 0.55), V3(1.5, 0.95, 0.05), W, { Node = up, Transparency = 0.42 })
-	local o = { Node = up, Transparency = 0.36 }
-	o.Material = edgeMat(ctx)
-	k.part(CF(0.76, 0.43, -0.02) * A(0, 0, 0.55), V3(0.95, 0.5, 0.04), lighten(W, 0.5), o)
-	k.part(CF(0.62, -0.38, 0) * A(0, 0, -0.5), V3(1.02, 0.66, 0.05), W, { Node = low, Transparency = 0.42 })
-	k.part(CF(0.56, -0.34, -0.02) * A(0, 0, -0.5), V3(0.62, 0.34, 0.04), lighten(W, 0.5), { Node = low, Transparency = 0.36, Material = edgeMat(ctx) })
+	k.part(CF(0.86, 0.5, 0) * A(0, 0, 0.55), V3(1.5, 0.95, 0.05), W, { Node = up, Transparency = 0.4, Mesh = true })
+	k.part(CF(0.76, 0.43, -0.02) * A(0, 0, 0.55), V3(0.95, 0.5, 0.04), lighten(W, 0.5),
+		{ Node = up, Transparency = 0.34, Material = edgeMat(ctx), Mesh = true })
+	k.part(CF(0.62, -0.38, 0) * A(0, 0, -0.5), V3(1.02, 0.66, 0.05), W, { Node = low, Transparency = 0.4, Mesh = true })
+	k.part(CF(0.56, -0.34, -0.02) * A(0, 0, -0.5), V3(0.62, 0.34, 0.04), lighten(W, 0.5),
+		{ Node = low, Transparency = 0.34, Material = edgeMat(ctx), Mesh = true })
 end
 
--- Cloud wings: three puffy spheres (+ shaded puffs underneath) that bend in a soft wave.
+-- Cloud wings: a fluffy scalloped cloud - a bright row of puffs on top, a softly shaded row underneath,
+-- all overlapping, that rolls in a soft wave as it flaps.
 WINGS.Cloud = function(ctx, p, s, frame, root)
 	local k = wingKit(ctx, p, s, frame, root)
 	local W = ctx.C.W
-	local shade = mix(W, ctx.C.S, 0.5)
-	k.part(CF(0.45, 0.08, 0), V3(0.9, 0.9, 0.9), W, { Node = root })
-	k.part(CF(0.56, -0.34, 0.06), V3(0.6, 0.6, 0.6), shade, { Node = root })
-	local j2 = k.joint(root, 0.45, 0.08, 0.14, 0.8)
-	k.part(CF(1.12, 0.32, 0.02), V3(0.74, 0.74, 0.74), lighten(W, 0.05), { Node = j2 })
-	k.part(CF(1.0, -0.14, 0.06), V3(0.5, 0.5, 0.5), shade, { Node = j2 })
-	local j3 = k.joint(j2, 1.12, 0.32, 0.17, 1.6)
-	k.part(CF(1.66, 0.62, 0.03), V3(0.54, 0.54, 0.54), lighten(W, 0.12), { Node = j3, Material = edgeMat(ctx) })
+	local top = lighten(W, 0.1)
+	local hi = lighten(W, 0.3)
+	local shade = mix(W, ctx.C.S, 0.45)
+	-- shoulder puff (named WingR / WingL) and its shaded underside
+	k.part(CF(0.3, 0.06, 0), V3(0.62, 0.62, 0.62), W, { Node = root })
+	k.part(CF(0.42, -0.26, 0.08), V3(0.46, 0.46, 0.46), shade, { Node = root })
+	-- middle of the wing
+	local j2 = k.joint(root, 0.5, 0.1, 0.12, 0.8)
+	k.part(CF(0.82, 0.3, 0.02), V3(0.76, 0.76, 0.76), top, { Node = j2 })
+	k.part(CF(0.9, -0.12, 0.1), V3(0.54, 0.54, 0.54), shade, { Node = j2 })
+	k.part(CF(0.58, 0.6, 0.08), V3(0.42, 0.42, 0.42), hi, { Node = j2 })
+	-- wing tip curls up
+	local j3 = k.joint(j2, 1.05, 0.3, 0.16, 1.6)
+	k.part(CF(1.32, 0.58, 0.04), V3(0.64, 0.64, 0.64), top, { Node = j3, Material = edgeMat(ctx) })
+	k.part(CF(1.4, 0.18, 0.12), V3(0.44, 0.44, 0.44), shade, { Node = j3 })
+	if canAfford(ctx, 1) then
+		k.part(CF(1.7, 0.86, 0.06), V3(0.4, 0.4, 0.4), hi, { Node = j3 })
+	end
 end
 
--- Crystal wings: angled translucent shards, each a chunky prism rod with a glowing diamond tip.
+-- Crystal wings: angled translucent shards, each a chunky prism rod with a glowing tip.
 WINGS.Crystal = function(ctx, p, s, frame, root)
 	local k = wingKit(ctx, p, s, frame, root)
 	local W = ctx.C.W
@@ -1171,9 +1434,11 @@ WINGS.Crystal = function(ctx, p, s, frame, root)
 		local n = k.joint(root, 0, 0, 0.07, i * 0.5)
 		local rot = A(0, 0, a) * A(PI / 4, 0, 0)
 		k.part(CF(math.cos(a) * c, math.sin(a) * c, 0.02 * i) * rot, V3(l, 0.34, 0.26), W, { Node = n, Transparency = 0.25 })
-		local tip = 0.18 + l + 0.1
-		k.part(CF(math.cos(a) * tip, math.sin(a) * tip, 0.02 * i) * A(0, 0, a + PI / 4), V3(0.46, 0.46, 0.2),
-			lighten(W, 0.4), { Node = n, Material = NEON, Transparency = 0.3 })
+		if i <= 3 then
+			local tip = 0.18 + l + 0.08
+			k.part(CF(math.cos(a) * tip, math.sin(a) * tip, 0.02 * i) * A(0, 0, a + PI / 4), V3(0.42, 0.42, 0.2),
+				lighten(W, 0.4), { Node = n, Material = NEON, Transparency = 0.3 })
+		end
 	end
 end
 
@@ -1181,7 +1446,7 @@ end
 WINGS.Flame = function(ctx, p, s, frame, root)
 	local k = wingKit(ctx, p, s, frame, root)
 	local W = ctx.C.W
-	k.part(CF(0.1, 0, 0), V3(0.38, 0.34, 0.2), W, { Node = root, Material = NEON, Transparency = 0.1 })
+	k.part(CF(0.1, 0, 0), V3(0.38, 0.34, 0.2), W, { Node = root, Material = NEON, Transparency = 0.1, Mesh = true })
 	local ang = { 1.0, 0.6, 0.2, -0.2 }
 	local len = { 0.9, 1.3, 1.45, 1.1 }
 	for i = 1, 4 do
@@ -1189,14 +1454,19 @@ WINGS.Flame = function(ctx, p, s, frame, root)
 		local l = len[i]
 		local c = 0.16 + l / 2
 		local n = k.joint(root, 0, 0, 0.12, i * 0.55)
-		k.part(CF(math.cos(a) * c, math.sin(a) * c, 0.02 * i) * A(0, 0, a), V3(l, 0.44, 0.07), W, { Node = n, Material = NEON, Transparency = 0.3 })
+		k.part(CF(math.cos(a) * c, math.sin(a) * c, 0.02 * i) * A(0, 0, a), V3(l, 0.44, 0.07), W,
+			{ Node = n, Material = NEON, Transparency = 0.3, Mesh = true })
 		if i <= 3 then
 			local cl = l * 0.62
 			local cc = 0.16 + cl / 2
-			k.part(CF(math.cos(a) * cc, math.sin(a) * cc, 0.02 * i - 0.04) * A(0, 0, a), V3(cl, 0.2, 0.06), lighten(W, 0.55), { Node = n, Material = NEON, Transparency = 0.12 })
+			k.part(CF(math.cos(a) * cc, math.sin(a) * cc, 0.02 * i - 0.04) * A(0, 0, a), V3(cl, 0.2, 0.06), lighten(W, 0.55),
+				{ Node = n, Material = NEON, Transparency = 0.12, Mesh = true })
 		end
 	end
 end
+
+-- Parts each wing style needs (both wings), so the builder can reserve room for them before the extras.
+local WING_PARTS = { Feather = 16, Bat = 16, Fairy = 10, Cloud = 16, Crystal = 16, Flame = 16 }
 
 local function buildWings(ctx, p, style)
 	local fn = WINGS[style] or WINGS.Feather
@@ -1222,100 +1492,108 @@ end
 -- Accessories
 ----------------------------------------------------------------------
 local ACCESSORIES = {}
+local ACCESSORY_PARTS = { Horns = 4, Crown = 7, Halo = 8, Leaf = 3, Mushroom = 5, Scarf = 4, Antlers = 8, Flower = 6 }
 
 local function headTop(ctx)
 	return ctx.HC + V3(0, ctx.HA.Y, 0)
 end
 
+-- Two curved gold horns growing out of the top of the head (two segments each: base + lighter tip).
 ACCESSORIES.Horns = function(ctx, p)
-	local hc, ha = ctx.HC, ctx.HA
+	local theta = math.asin(clamp(p.AccessoryX / ctx.HA.X, -0.9, 0.9))
 	pair(function(s)
-		local pos = V3(p.AccessoryX, hc.Y + ha.Y * 0.88, hc.Z - ha.Z * 0.1)
-		local rot = A(0.38, 0, -0.34)
-		blobS(ctx, s, "Horn", pos, V3(0.26, 0.44, 0.26), GOLD, rot)
-		blobS(ctx, s, "HornTip", pos + rot * V3(0, 0.3, 0), V3(0.15, 0.32, 0.15), GOLD_LIGHT, rot)
+		local root = headPoint(ctx, theta, 0.86)
+		local frame = growFrame(root, V3(0.32, 1, 0.34), 0)
+		blobCF(ctx, "Horn" .. sname(s), sd(s, frame * CF(0, 0.16, 0)), V3(0.26, 0.48, 0.26), GOLD, { Mesh = true })
+		local tipFrame = frame * CF(0, 0.36, 0) * A(-0.35, 0, 0.18)
+		blobCF(ctx, "HornTip" .. sname(s), sd(s, tipFrame * CF(0, 0.1, 0)), V3(0.16, 0.34, 0.16), GOLD_LIGHT, { Mesh = true })
 	end)
 end
 
 ACCESSORIES.Crown = function(ctx, p)
 	local top = headTop(ctx)
-	local base = top + V3(0, -0.04, -0.06)
-	local band = cylCF(ctx, "CrownBand", CF(base), 1.0, 0.24, GOLD, { Material = SMOOTH })
+	local base = top + V3(0, -0.06, -0.04)
+	local band = cylCF(ctx, "CrownBand", CF(base), 0.96, 0.24, GOLD, { Material = SMOOTH })
 	for i = 0, 4 do
 		local a = i * TAU / 5
-		blob(ctx, "CrownPoint" .. (i + 1), base + V3(math.sin(a) * 0.43, 0.22, math.cos(a) * 0.43), V3(0.2, 0.36, 0.2), GOLD_LIGHT)
+		blob(ctx, "CrownPoint" .. (i + 1), base + V3(math.sin(a) * 0.4, 0.2, math.cos(a) * 0.4), V3(0.18, 0.34, 0.18), GOLD_LIGHT,
+			nil, { Mesh = true })
 	end
-	blob(ctx, "CrownJewel", base + V3(0, 0.0, -0.5), V3(0.16, 0.16, 0.12), rgb(232, 84, 112), nil, { Material = NEON })
+	blob(ctx, "CrownJewel", base + V3(0, 0.0, -0.48), V3(0.16, 0.16, 0.1), rgb(232, 84, 112), nil, { Material = NEON, Mesh = true })
 	return band
 end
 
 ACCESSORIES.Halo = function(ctx, p)
-	local top = headTop(ctx) + V3(0, 0.5, 0.05)
+	local top = headTop(ctx) + V3(0, 0.48, 0.05)
 	local n = newNode(ctx, { Kind = "bob", Hinge = CF(top), Axis = "z", Amp = 0.07, Amp2 = 0.05, Axis2 = "x", Rate = 1.2 })
-	local r = 0.58
+	local r = 0.56
+	local tilt = A(-0.3, 0, 0.06)
 	for i = 0, 7 do
 		local a = i * TAU / 8
-		local pos = top + A(-0.3, 0, 0.06) * V3(math.sin(a) * r, 0, math.cos(a) * r)
-		-- each segment is tangent to the ring
-		local tang = A(-0.3, 0, 0.06) * V3(math.cos(a), 0, -math.sin(a))
-		blobCF(ctx, "Halo" .. (i + 1), CF(pos) * aim(tang, V3(0, 1, 0)), V3(0.11, 0.1, 0.5), rgb(255, 238, 168), { Node = n, Material = NEON })
+		local pos = top + tilt * V3(math.sin(a) * r, 0, math.cos(a) * r)
+		-- each segment is tangent to the ring and long enough to overlap its neighbours
+		local tang = tilt * V3(math.cos(a), 0, -math.sin(a))
+		blobCF(ctx, "Halo" .. (i + 1), CF(pos) * aim(tang, UP), V3(0.11, 0.1, 0.52), rgb(255, 236, 160), { Node = n, Material = NEON, Mesh = true })
 	end
 end
 
 ACCESSORIES.Leaf = function(ctx, p)
 	local top = headTop(ctx) + V3(0, -0.06, -0.04)
 	local n = newNode(ctx, { Kind = "sway", Hinge = CF(top), Axis = "z", Amp = 0.1, Axis2 = "x", Amp2 = 0.07, Lag2 = 1.0, Rate = 1.2 })
-	blob(ctx, "LeafStem", top + V3(0, 0.14, 0), V3(0.07, 0.34, 0.07), darken(LEAF, 0.25), nil, { Node = n })
-	blob(ctx, "LeafA", top + V3(0.24, 0.32, 0), V3(0.56, 0.12, 0.3), LEAF, A(0, 0, 0.5), { Node = n })
-	blob(ctx, "LeafB", top + V3(-0.2, 0.3, -0.02), V3(0.46, 0.1, 0.26), LEAF_LIGHT, A(0, 0, -0.55), { Node = n })
+	blob(ctx, "LeafStem", top + V3(0, 0.14, 0), V3(0.07, 0.36, 0.07), darken(LEAF, 0.25), nil, { Node = n, Mesh = true })
+	blob(ctx, "LeafA", top + V3(0.24, 0.32, 0), V3(0.56, 0.12, 0.3), LEAF, A(0, 0, 0.5), { Node = n, Mesh = true })
+	blob(ctx, "LeafB", top + V3(-0.2, 0.3, -0.02), V3(0.46, 0.1, 0.26), LEAF_LIGHT, A(0, 0, -0.55), { Node = n, Mesh = true })
 end
 
 ACCESSORIES.Mushroom = function(ctx, p)
-	local top = headTop(ctx) + V3(0.0, -0.06, 0.02)
-	blob(ctx, "ShroomStem", top + V3(0, 0.1, 0), V3(0.3, 0.3, 0.3), CREAM)
-	blob(ctx, "ShroomCap", top + V3(0, 0.3, 0), V3(0.86, 0.46, 0.86), CAP)
-	local dots = { V3(0.22, 0.5, -0.16), V3(-0.2, 0.49, -0.2), V3(0.0, 0.54, 0.18) }
+	local top = headTop(ctx) + V3(0.0, -0.08, 0.02)
+	blob(ctx, "ShroomStem", top + V3(0, 0.12, 0), V3(0.3, 0.34, 0.3), CREAM, nil, { Mesh = true })
+	local capCF = CF(top + V3(0, 0.32, 0))
+	local capSize = V3(0.86, 0.46, 0.86)
+	blobCF(ctx, "ShroomCap", capCF, capSize, CAP, { Mesh = true })
+	-- white dots flush on the cap (the cap seen from above: front = up)
+	local capE = ell(capCF * A(PI / 2, 0, 0), V3(capSize.X, capSize.Z, capSize.Y))
+	local dots = { { 0.2, -0.14, 0.08 }, { -0.2, -0.1, 0.07 }, { 0.02, 0.2, 0.08 } }
 	for i = 1, 3 do
-		blob(ctx, "ShroomDot" .. i, top + dots[i], V3(0.16, 0.08, 0.16), rgb(250, 240, 224))
+		local d = dots[i]
+		overlay(ctx, "ShroomDot" .. i, capE, d[1], d[2], d[3], d[3], rgb(252, 244, 230), { Lift = 0.01 })
 	end
 end
 
 ACCESSORIES.Scarf = function(ctx, p)
 	local hc, ha = ctx.HC, ctx.HA
 	local neck = V3(hc.X, hc.Y - ha.Y * 0.74, hc.Z + 0.06)
-	blob(ctx, "ScarfRing", neck, V3(1.5, 0.3, 1.28), SCARF)
-	blob(ctx, "ScarfStripe", neck + V3(0, -0.02, 0), V3(1.52, 0.07, 1.3), SCARF_STRIPE)
+	blob(ctx, "ScarfRing", neck, V3(1.46, 0.3, 1.26), SCARF, nil, { Mesh = true })
+	blob(ctx, "ScarfStripe", neck + V3(0, -0.02, 0), V3(1.48, 0.07, 1.28), SCARF_STRIPE, nil, { Mesh = true })
 	local n = newNode(ctx, { Kind = "sway", Hinge = CF(0.36, neck.Y - 0.05, -0.5), Axis = "x", Amp = 0.12, Axis2 = "z", Amp2 = 0.08, Lag2 = 1.0, Rate = 1.2 })
-	blob(ctx, "ScarfEnd", V3(0.4, neck.Y - 0.3, -0.52), V3(0.3, 0.62, 0.12), SCARF, A(0.12, 0, 0.12), { Node = n })
-	blob(ctx, "ScarfEndStripe", V3(0.4, neck.Y - 0.44, -0.53), V3(0.31, 0.07, 0.13), SCARF_STRIPE, A(0.12, 0, 0.12), { Node = n })
+	blob(ctx, "ScarfEnd", V3(0.4, neck.Y - 0.3, -0.5), V3(0.3, 0.62, 0.12), SCARF, A(0.12, 0, 0.12), { Node = n, Mesh = true })
+	blob(ctx, "ScarfEndStripe", V3(0.4, neck.Y - 0.44, -0.51), V3(0.31, 0.07, 0.13), SCARF_STRIPE, A(0.12, 0, 0.12), { Node = n, Mesh = true })
 end
 
 ACCESSORIES.Antlers = function(ctx, p)
-	local hc, ha = ctx.HC, ctx.HA
 	local col = rgb(232, 206, 154)
 	local tipMat = SMOOTH
 	if ctx.Glow then
 		tipMat = NEON
 	end
+	local theta = math.asin(clamp(p.AccessoryX / ctx.HA.X, -0.9, 0.9))
 	pair(function(s)
-		local base = V3(p.AccessoryX, hc.Y + ha.Y * 0.84, hc.Z + 0.02)
+		local base = headPoint(ctx, theta, 0.84)
 		local n = newNode(ctx, { Kind = "ear", Hinge = sd(s, CF(base)), Axis = "z", Amp = 0.03, Side = s, Phase = s })
 		local rot = A(0.1, 0, -0.3)
 		local r1 = rot * A(0, 0, -0.85) -- lower prong flares outwards
 		local r2 = rot * A(0.6, 0, 0.5) -- upper prong points forward and in
-		blobS(ctx, s, "Antler", base + rot * V3(0, 0.42, 0), V3(0.16, 0.9, 0.16), col, rot, { Node = n })
-		blobS(ctx, s, "AntlerProng1", base + rot * V3(0, 0.34, 0) + r1 * V3(0, 0.2, 0), V3(0.12, 0.44, 0.12), col, r1, { Node = n })
-		blobS(ctx, s, "AntlerProng2", base + rot * V3(0, 0.62, 0) + r2 * V3(0, 0.17, 0), V3(0.11, 0.36, 0.11), col, r2, { Node = n })
-		blobS(ctx, s, "AntlerTip", base + rot * V3(0, 0.9, 0), V3(0.17, 0.22, 0.17), lighten(col, 0.35), rot, { Node = n, Material = tipMat })
+		blobS(ctx, s, "Antler", base + rot * V3(0, 0.38, 0), V3(0.16, 0.9, 0.16), col, rot, { Node = n, Mesh = true })
+		blobS(ctx, s, "AntlerProng1", base + rot * V3(0, 0.3, 0) + r1 * V3(0, 0.2, 0), V3(0.12, 0.44, 0.12), col, r1, { Node = n, Mesh = true })
+		blobS(ctx, s, "AntlerProng2", base + rot * V3(0, 0.58, 0) + r2 * V3(0, 0.17, 0), V3(0.11, 0.36, 0.11), col, r2, { Node = n, Mesh = true })
+		blobS(ctx, s, "AntlerTip", base + rot * V3(0, 0.86, 0), V3(0.17, 0.22, 0.17), lighten(col, 0.35), rot, { Node = n, Material = tipMat, Mesh = true })
 	end)
 end
 
 ACCESSORIES.Flower = function(ctx, p)
-	local cf = faceCF(ctx, 1.0, 0.72, 0.1)
 	local cols = { ctx.C.W, rgb(250, 208, 224), CREAM, rgb(196, 182, 250) }
-	local petal = cols[1]
 	-- choose the petal colour that stands out most against the head
-	local best, bestD = petal, -1
+	local best, bestD = cols[1], -1
 	for i = 1, #cols do
 		local c = cols[i]
 		local dr, dg, db = c.R - ctx.C.P.R, c.G - ctx.C.P.G, c.B - ctx.C.P.B
@@ -1324,56 +1602,39 @@ ACCESSORIES.Flower = function(ctx, p)
 			best, bestD = c, d
 		end
 	end
-	petal = best
+	-- five petals + a golden heart tucked behind the right ear, flush on the head
+	local x, y = headXY(ctx, 0.95, 0.62)
+	local frame = surfaceFrame(ctx.HeadE, x, y)
+	local centre = ctx.HeadE.CF * frame
 	for i = 0, 4 do
 		local a = i * TAU / 5 + 0.3
-		blobCF(ctx, "Petal" .. (i + 1), cf * CF(math.cos(a) * 0.17, math.sin(a) * 0.17, 0), V3(0.22, 0.22, 0.12), petal)
+		blobCF(ctx, "Petal" .. (i + 1), centre * CF(math.cos(a) * 0.17, math.sin(a) * 0.17, -0.02) * A(0, 0, a),
+			V3(0.24, 0.2, 0.1), best, { Mesh = true })
 	end
-	blobCF(ctx, "FlowerCore", cf * CF(0, 0, -0.04), V3(0.16, 0.16, 0.12), rgb(250, 218, 110))
+	blobCF(ctx, "FlowerCore", centre * CF(0, 0, -0.06), V3(0.16, 0.16, 0.12), rgb(250, 216, 104), { Mesh = true })
 end
 
 ----------------------------------------------------------------------
 -- Rarity flair
 ----------------------------------------------------------------------
--- Legendary and Mythic pets get a soft sparkle emitter (low rate) and a few little gems that orbit them.
--- The gems are real parts so the flair also shows in ViewportFrames, which do not draw particles.
+-- Legendary and Mythic pets get a soft sparkle emitter (low rate) and a few little glints that orbit them;
+-- Secret pets get four-point sparkle stars on a tilted orbit and an iridescent emitter. The orbiting
+-- pieces are real parts so the flair also shows in ViewportFrames, which do not draw particles.
 local FLAIR = {
 	Legendary = { Rate = 3, Gems = 2, A = rgb(255, 226, 140), B = rgb(255, 190, 90) },
 	Mythic = { Rate = 5, Gems = 3, A = rgb(255, 214, 236), B = rgb(190, 226, 255) },
+	Secret = { Rate = 6, Stars = 3 },
 }
+local FLAIR_PARTS = { Legendary = 2, Mythic = 3, Secret = 6 }
 
-local function addFlair(ctx, rarity)
-	local f = FLAIR[rarity]
-	if not f or not ctx.Head then
-		return
-	end
-	local hinge = CF(0, 0.5, 0.1)
-	for i = 1, f.Gems do
-		local phase = (i - 1) * TAU / f.Gems
-		local n = newNode(ctx, {
-			Kind = "orbit",
-			Hinge = hinge,
-			Axis = "y",
-			Phase = phase,
-			Rate = 0.8 + i * 0.13,
-			Amp = 0.12,
-		})
-		local col = f.A
-		if i % 2 == 0 then
-			col = f.B
-		end
-		-- Each gem gets its own height and its orbit phase baked into the rest pose (nodeMotion only adds
-		-- the running angle), so a pet that is never Animated (the lobby mascot statue) still shows the gems
-		-- spread evenly round the body instead of stacked on one side.
-		local y = 0.35 + (i - 1) * 0.5
-		local rest = hinge * A(0, phase, 0) * hinge:Inverse() * CF(1.8, y, 0.1)
-		blockCF(ctx, "Gem" .. i, rest * A(0.6, 0, PI / 4), V3(0.2, 0.2, 0.2), col, { Node = n, Material = NEON, Transparency = 0.1 })
-	end
+local SPARKLE = "rbxasset://textures/particles/sparkles_main.dds"
+
+local function addEmitter(ctx, rate, colors)
 	local k = ctx.Scale
 	local e = Instance.new("ParticleEmitter")
 	e.Name = "RarityGlow"
-	e.Texture = "rbxasset://textures/particles/sparkles_main.dds"
-	e.Rate = f.Rate
+	e.Texture = SPARKLE
+	e.Rate = rate
 	e.Lifetime = NumberRange.new(1.3, 2.3)
 	e.Speed = NumberRange.new(0.2 * k, 0.8 * k)
 	e.SpreadAngle = Vector2.new(180, 180)
@@ -1393,8 +1654,65 @@ local function addFlair(ctx, rarity)
 		NumberSequenceKeypoint.new(0.75, 0.45),
 		NumberSequenceKeypoint.new(1, 1),
 	})
-	e.Color = ColorSequence.new(f.A, f.B)
+	local keys = {}
+	for i = 1, #colors do
+		keys[i] = ColorSequenceKeypoint.new((i - 1) / math.max(#colors - 1, 1), colors[i])
+	end
+	if #keys == 1 then
+		keys[2] = ColorSequenceKeypoint.new(1, colors[1])
+	end
+	e.Color = ColorSequence.new(keys)
 	e.Parent = ctx.Head
+	return e
+end
+
+-- Iridescent trio derived from the pet's own palette (used by Secret pets).
+local function iridescent(ctx)
+	local base = ctx.C.S
+	return {
+		hueShift(base, 0, 0.45, 0.85),
+		hueShift(base, 0.33, 0.45, 0.85),
+		hueShift(base, 0.66, 0.45, 0.85),
+	}
+end
+
+local function addFlair(ctx, rarity)
+	local f = FLAIR[rarity]
+	if not f or not ctx.Head then
+		return
+	end
+	local hinge = CF(0, 0.5, 0.1)
+	if f.Gems then
+		for i = 1, f.Gems do
+			local phase = (i - 1) * TAU / f.Gems
+			local n = newNode(ctx, { Kind = "orbit", Hinge = hinge, Axis = "y", Phase = phase, Rate = 0.8 + i * 0.13, Amp = 0.12 })
+			local col = f.A
+			if i % 2 == 0 then
+				col = f.B
+			end
+			-- Each glint gets its own height and its orbit phase baked into the rest pose (nodeMotion only adds
+			-- the running angle), so a pet that is never Animated (the lobby mascot statue) still shows them
+			-- spread evenly round the body instead of stacked on one side.
+			local y = 0.35 + (i - 1) * 0.5
+			local rest = hinge * A(0, phase, 0) * hinge:Inverse() * CF(1.8, y, 0.1)
+			blobCF(ctx, "Gem" .. i, rest * A(0, 0, 0.35), V3(0.14, 0.3, 0.14), col, { Node = n, Material = NEON, Transparency = 0.05, Mesh = true })
+		end
+		addEmitter(ctx, f.Rate, { f.A, f.B })
+	elseif f.Stars then
+		local cols = iridescent(ctx)
+		local tilt = A(0.32, 0, -0.18)
+		for i = 1, f.Stars do
+			local phase = (i - 1) * TAU / f.Stars
+			local n = newNode(ctx, { Kind = "orbit", Hinge = hinge * tilt, Axis = "y", Phase = phase, Rate = 0.7, Amp = 0.1 })
+			local y = 0.25 + ((i - 1) % 2) * 0.35
+			local rest = hinge * tilt * A(0, phase, 0) * CF(1.75, y, 0) * A(0, -phase, 0) * tilt:Inverse()
+			local col = cols[i] or cols[1]
+			-- a four-point sparkle: two thin crossed glints
+			blobCF(ctx, "Star" .. i, rest * A(0, 0, 0.2), V3(0.08, 0.46, 0.08), col, { Node = n, Material = NEON, Mesh = true })
+			blobCF(ctx, "Star" .. i .. "X", rest * A(0, 0, 0.2 + PI / 2), V3(0.07, 0.3, 0.07), lighten(col, 0.4), { Node = n, Material = NEON, Mesh = true })
+		end
+		addEmitter(ctx, f.Rate, { cols[1], cols[2], cols[3] })
+	end
 end
 
 ----------------------------------------------------------------------
@@ -1441,7 +1759,6 @@ local function makeProfile(species)
 			p[k] = v
 		end
 	end
-	-- species colour decisions that need the palette are made in the species builders
 	return p
 end
 
@@ -1532,6 +1849,7 @@ end
 -- Rebuilds a rig from the attributes stored on a model's parts (used for Clone()d models).
 local function rebuildRig(model)
 	local nodes = {}
+	local eyes = {}
 	local found = false
 	for _, inst in ipairs(model:GetDescendants()) do
 		if inst:IsA("BasePart") then
@@ -1556,6 +1874,10 @@ local function rebuildRig(model)
 					n.Hinge = hinge
 					n.HingeInv = hinge:Inverse()
 				end
+			end
+			local blink = inst:GetAttribute("PB_Blink")
+			if blink == "squash" or blink == "hide" then
+				eyes[#eyes + 1] = { Part = inst, Size = inst.Size, Hide = blink == "hide", T0 = inst.Transparency }
 			end
 		end
 	end
@@ -1582,25 +1904,6 @@ local function rebuildRig(model)
 		end
 		n.Id = i
 		ordered[i] = n
-	end
-	local eyes = {}
-	for _, side in ipairs({ "L", "R" }) do
-		local base = model:FindFirstChild("Eye" .. side)
-		local inner = model:FindFirstChild("Eye" .. side .. "Iris") or model:FindFirstChild("Eye" .. side .. "Pupil")
-		local s1 = model:FindFirstChild("Eye" .. side .. "Shine")
-		local s2 = model:FindFirstChild("Eye" .. side .. "Shine2")
-		if base then
-			eyes[#eyes + 1] = { Part = base, Size = base.Size, Hide = false }
-		end
-		if inner then
-			eyes[#eyes + 1] = { Part = inner, Size = inner.Size, Hide = false }
-		end
-		if s1 then
-			eyes[#eyes + 1] = { Part = s1, Size = s1.Size, Hide = true, T0 = 0 }
-		end
-		if s2 then
-			eyes[#eyes + 1] = { Part = s2, Size = s2.Size, Hide = true, T0 = 0 }
-		end
 	end
 	local seed = model:GetAttribute("PB_Seed")
 	if type(seed) ~= "number" then
@@ -1659,6 +1962,8 @@ local function advance(rig, t, flapMul, excited)
 	st.T = t
 end
 
+-- Blink: the eyeballs squash to a slit (they are sunk in the face, so this reads as closing lids) and the
+-- iris / highlights hide for the middle of the blink.
 local function updateBlink(rig, t)
 	local eyes = rig.Eyes
 	if not eyes or #eyes == 0 then
@@ -1681,13 +1986,13 @@ local function updateBlink(rig, t)
 		local part = e.Part
 		if part and part.Parent then
 			if e.Hide then
-				if k > 0.35 then
+				if k > 0.3 then
 					part.Transparency = 1
 				else
 					part.Transparency = e.T0
 				end
 			else
-				part.Size = V3(e.Size.X, e.Size.Y * (1 - 0.9 * k), e.Size.Z)
+				part.Size = V3(e.Size.X, e.Size.Y * (1 - 0.88 * k), e.Size.Z)
 			end
 		end
 	end
@@ -1706,28 +2011,48 @@ function PetBuilder.Build(petDef, opts)
 		if petDef.Id ~= nil then
 			id = tostring(petDef.Id)
 		end
-		rarity = petDef.Rarity
+		if type(petDef.Rarity) == "string" then
+			rarity = petDef.Rarity
+		end
 	end
 	local seed = hashString(id .. look.Species)
 	local ctx = newContext(look, scale, seed)
 	ctx.Model.Name = "Pet_" .. id
 
-	local profile = makeProfile(look.Species)
-	if look.Species == "Frog" then
-		-- the eyes sit on two bumps on top of the head
-		local bump = V3(0.58, 1.46, -0.3)
-		ctx.BumpPos = bump
-		local n = V3(0.18, 0.5, -0.85).Unit
-		local pos = bump + n * 0.3
-		ctx.EyeFrame = CFrame.lookAt(pos, pos + n, V3(0, 1, 0))
-		profile.EyeW, profile.EyeH, profile.EyeD = 0.42, 0.5, 0.2
+	-- room the always-built pieces still need, so optional details never push a pet over the budget
+	ctx.Reserve = (WING_PARTS[look.WingStyle] or 16) + (FLAIR_PARTS[rarity] or 0) + 10
+	if look.Accessory then
+		ctx.Reserve = ctx.Reserve + (ACCESSORY_PARTS[look.Accessory] or 6)
 	end
-	buildCore(ctx, profile)
+	if rarity == "Secret" then
+		-- iridescent sheen: wing parts drift through the pet's accent hues from root to tip
+		local cols = iridescent(ctx)
+		ctx.Sheen = function(color, x)
+			local t = clamp(x / 1.8, 0, 1)
+			local target = cols[2]
+			if t > 0.5 then
+				target = cols[3]
+			end
+			return mix(color, target, 0.18 + 0.3 * t)
+		end
+	end
+
+	local profile = makeProfile(look.Species)
+	buildCore(ctx, profile, look.Species)
 	SPECIES[look.Species](ctx, profile)
+	ctx.Reserve = ctx.Reserve - 10
+	buildFaceEyes(ctx, profile)
+	ctx.Reserve = (FLAIR_PARTS[rarity] or 0)
+	if look.Accessory then
+		ctx.Reserve = ctx.Reserve + (ACCESSORY_PARTS[look.Accessory] or 6)
+	end
 	buildWings(ctx, profile, look.WingStyle)
+	ctx.Sheen = nil
+	ctx.Reserve = FLAIR_PARTS[rarity] or 0
 	if look.Accessory then
 		ACCESSORIES[look.Accessory](ctx, profile)
 	end
+	ctx.Reserve = 0
 	addFlair(ctx, rarity)
 
 	local model = ctx.Model
