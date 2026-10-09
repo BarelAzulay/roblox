@@ -343,6 +343,12 @@ local function popSize(maxSize)
 	})
 end
 
+-- ParticleEmitter.EmissionDirection that points UP on a part made by disc(): disc() rolls its
+-- cylinder 90 degrees about Z, so the part's local +Y (the default Top face) points along world -X
+-- and the flat top face is the local Right face. Pass it for emitters parented to a disc() part
+-- (not to faceDisc() or to the unrolled gate swirl cylinder, and not needed with a 180 degree spread).
+local DISC_UP = Enum.NormalId.Right
+
 -- Sparkle ParticleEmitter with soft defaults; `props` overrides anything.
 local function emitter(parent, props)
 	local e = Instance.new("ParticleEmitter")
@@ -390,11 +396,13 @@ end
 ----------------------------------------------------------------------
 
 -- World-sized billboard: Size is in studs, so it shrinks with distance like the thing it labels.
+-- The height offset is in WORLD space (StudsOffsetWorldSpace): StudsOffset is camera-relative and
+-- would slide the tag forward / back over its island whenever the camera pitches.
 local function newBillboard(adornee, widthStuds, heightStuds, offsetY, maxDistance)
 	local gui = Instance.new("BillboardGui")
 	gui.Name = "Billboard"
 	gui.Size = UDim2.new(widthStuds, 0, heightStuds, 0)
-	gui.StudsOffset = Vector3.new(0, offsetY or 0, 0)
+	gui.StudsOffsetWorldSpace = Vector3.new(0, offsetY or 0, 0)
 	gui.AlwaysOnTop = false
 	gui.LightInfluence = 0
 	gui.MaxDistance = maxDistance or 120
@@ -825,6 +833,7 @@ local function pond(parent, rng, ground, radius)
 		Lifetime = NumberRange.new(2, 3),
 		Speed = NumberRange.new(0.3, 0.8),
 		Size = popSize(0.5),
+		EmissionDirection = DISC_UP,
 	})
 end
 
@@ -895,6 +904,7 @@ local function tokenShowcase(parent, ground, title, sub)
 		Lifetime = NumberRange.new(2, 3),
 		Speed = NumberRange.new(1.5, 3),
 		Size = popSize(0.6),
+		EmissionDirection = DISC_UP,
 	})
 
 	-- Info card floating over the pedestal.
@@ -1103,6 +1113,7 @@ local function mascotMonument(parent, ground, lookTarget)
 		Lifetime = NumberRange.new(2, 3.5),
 		Speed = NumberRange.new(2, 4),
 		Size = popSize(0.7),
+		EmissionDirection = DISC_UP,
 	})
 
 	local ok, model = pcall(function()
@@ -1123,7 +1134,19 @@ local function mascotMonument(parent, ground, lookTarget)
 			height = PetBuilder.GetHeight(def)
 		end
 		local m = PetBuilder.Build(def, { Scale = scale })
+		-- The PrimaryPart (Body) is not the vertical middle of the pet: the feet hang below it and the head
+		-- and wings rise far above it. Measure the real extents (as SpotService does) so the lowest part
+		-- floats 1.5 studs over the pedestal; fall back to "pivot = middle of the box" if that fails.
 		local y = topY + height * scale * 0.5 + 1.5
+		local bottom = nil
+		local okBox = pcall(function()
+			m:PivotTo(CFrame.new(0, 0, 0))
+			local boxCf, boxSize = m:GetBoundingBox()
+			bottom = m:GetPivot().Position.Y - (boxCf.Position.Y - boxSize.Y * 0.5)
+		end)
+		if okBox and type(bottom) == "number" and bottom == bottom and bottom > -50 and bottom < 100 then
+			y = topY + 1.5 + bottom
+		end
 		m.Name = "CloudyDragonStatue"
 		m:PivotTo(CFrame.lookAt(Vector3.new(ground.X, y, ground.Z), Vector3.new(lookTarget.X, y, lookTarget.Z)))
 		m.Parent = parent
@@ -1146,7 +1169,9 @@ local function mascotMonument(parent, ground, lookTarget)
 	else
 		toward = Vector3.new(0, 0, 1)
 	end
-	local anchor = anchorPart(parent, "MascotPlaqueAnchor", ground + Vector3.new(0, 4.4, 0) + toward * 6.5)
+	-- Centre 2.0 up: the card spans 0.2 .. 3.8, in front of the pedestal and just under the statue's
+	-- feet (they float at 3.6), so it never covers the dragon.
+	local anchor = anchorPart(parent, "MascotPlaqueAnchor", ground + Vector3.new(0, 2.0, 0) + toward * 6.5)
 	local gui = newBillboard(anchor, 11, 3.6, 0, 120)
 	gui.Name = "MascotPlaque"
 	local card = cardPanel(gui, COL.Gold, 0.16)
@@ -1506,6 +1531,7 @@ local function buildArch(root)
 			Lifetime = NumberRange.new(2, 3.5),
 			Speed = NumberRange.new(2, 4),
 			Size = popSize(0.8),
+			EmissionDirection = DISC_UP, -- parts[1] is the disc() CloudBase
 		})
 	end
 
@@ -2019,6 +2045,7 @@ local function buildSpot(parent, index, angle, L)
 		Lifetime = NumberRange.new(2, 3),
 		Speed = NumberRange.new(1, 2),
 		Size = popSize(0.5),
+		EmissionDirection = DISC_UP,
 	})
 
 	-- Nameplate sign: two posts, a beam, an accent banner and the billboard above.
@@ -2178,7 +2205,9 @@ local function buildDecorIsland(parent, spec, angle, seedIndex, L)
 		end
 	end
 
-	nameTag(topPart, spec.Name, 15, 110)
+	-- topPart's centre is 2 below the walking surface, so 22 puts the tag's centre 20 studs above it: its
+	-- bottom edge (18.2) clears the tallest blossom crown (about 14.2) instead of sitting inside the canopy.
+	nameTag(topPart, spec.Name, 22, 110)
 end
 
 ----------------------------------------------------------------------
@@ -2570,7 +2599,9 @@ local function buildShop(root, L)
 	-- Entrance sign facing the plaza.
 	local signPos = shopPoint(entrance, R - 10)
 	local signCF = CFrame.lookAt(signPos, Vector3.new(ORIGIN.X, signPos.Y, ORIGIN.Z))
-	local signBoard = signStructure(f, signCF, 12, 4.6, 12)
+	-- postHeight 15 lifts the collidable frame's underside to 8.3 studs (it was 5.3, head height, right on
+	-- the neck's centre line), so players walk under the gateway instead of bumping into it.
+	local signBoard = signStructure(f, signCF, 12, 4.6, 15)
 	local sgui = surfaceGui(signBoard, 50)
 	local spanel = signPanel(sgui, COL.TextGold)
 	fitLabel(spanel, "CLOUD SHOP", "Title", COL.Gold, "Name", 0.04, 0.08, 0.92, 0.56)

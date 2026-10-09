@@ -99,6 +99,11 @@ local C = {
 	},
 }
 
+-- Bounce pads are safe and helpful, so they only wear the calm half of the rainbow (green / blue / violet).
+-- Red and orange stay reserved for hazards: Rainbow[1] is within dE 3 of HazardGlow (SpinBar caps, danger and
+-- strike rings) and Rainbow[2] within dE 3.3 of the Hard trim and the lava colour.
+local PAD_COLORS = { C.Rainbow[4], C.Rainbow[5], C.Rainbow[6] }
+
 -- per-stage tint index 1..8 (CourseLayout.Stages[k].Tint); trims lean towards it
 local STAGE_TINTS = {
 	rgb(112, 184, 214),
@@ -399,6 +404,20 @@ local function panelFrame(parent, transparency)
 	stroke.Parent = f
 	f.Parent = parent
 	return f
+end
+
+-- Dark rounded chip that backs a hint label floating in the open. Gold or pale text straight on the sky or on
+-- a lit plate is only 1.0 - 2.1 : 1 (gold on the haze is 1.2 : 1); on this panel it is 7 : 1 or better.
+-- Returns the frame the labels go into (a little inner padding keeps the text off the outline).
+local function hintChip(gui)
+	local chip = panelFrame(gui, 0.16)
+	local pad = Instance.new("UIPadding")
+	pad.PaddingLeft = UDim.new(0.05, 0)
+	pad.PaddingRight = UDim.new(0.05, 0)
+	pad.PaddingTop = UDim.new(0.06, 0)
+	pad.PaddingBottom = UDim.new(0.06, 0)
+	pad.Parent = chip
+	return chip
 end
 
 ----------------------------------------------------------------------
@@ -711,7 +730,7 @@ function KB.Bounce(ctx, step, look)
 	local h = step.Hazard or EMPTY
 	local main, F = buildBase(ctx, step, look, { Name = "BounceCloud_" .. step.Index })
 	local padSize = h.PadSize or 4
-	local color = C.Rainbow[(step.Index % #C.Rainbow) + 1]
+	local color = PAD_COLORS[(step.Index % #PAD_COLORS) + 1]
 	local pc = ctx.Origin + (h.Pos or step.Pos)
 	cyl(ctx, "Decor", "PadSkirt", 0.3, padSize + 1.4, CFrame.new(pc + Vector3.new(0, 0.15, 0)), C.Iron, MAT.Metal)
 	local pad = mk(ctx, "Hazards", "BouncePad", "Part", Vector3.new(0.7, padSize, padSize),
@@ -993,9 +1012,10 @@ function KB.CannonPad(ctx, step, look)
 		ball(ctx, "Decor", "ArcDot", 0.75 - 0.035 * k, CFrame.new(p), C.Wind:Lerp(C.Text, 0.3), MAT.Neon, 0.45)
 	end
 	-- label
-	local gui = billboardOn(pad, 8, 3, 6.5, 100)
-	addText(gui, "CANNON", "Accent", C.Gold, 0, 0.58)
-	addText(gui, "step on to launch!", "Body", C.Text, 0.6, 0.34)
+	local gui = billboardOn(pad, 8, 3.4, 6.5, 100)
+	local chip = hintChip(gui)
+	addText(chip, "CANNON", "Accent", C.Gold, 0, 0.58)
+	addText(chip, "step on to launch!", "Body", C.Text, 0.6, 0.34)
 	return main
 end
 
@@ -1047,9 +1067,10 @@ function KB.PlateBridge(ctx, step, look)
 			plate:SetAttribute("BridgeId", bridgeId)
 			addLight(plate, color, 12, 0.9)
 			addSparkles(plate, color, 4, 5, 1.4, 0.7)
+			-- dark ink on the lit plate colour: 5 - 7.7 : 1 (the soft white it used was only 1.8 : 1)
 			local gui = surfaceOn(plate, Enum.NormalId.Top, 60)
-			addText(gui, "HOLD", "Heading", C.Text, 0.22, 0.56)
-			local sign = billboardOn(plate, 9, 3.4, 5.5, 110)
+			addText(gui, "HOLD", "Heading", C.Ink, 0.22, 0.56)
+			local sign = hintChip(billboardOn(plate, 9, 3.6, 5.5, 110))
 			if i == 1 then
 				addText(sign, "HOLD THE PLATE", "Accent", color:Lerp(C.Text, 0.3), 0, 0.58)
 				addText(sign, "so your team can cross", "Body", C.Text, 0.6, 0.34)
@@ -1084,6 +1105,11 @@ local function buildBoard(ctx, F, localPos, face, title, body, accent)
 	addText(panel, body, "Body", C.Text, 0.28, 0.66)
 end
 
+-- Decor heights vs the Headroom CourseLayout reserves (nothing of another step may enter that space, so keep
+-- every arch / flag / sign below it; CourseLayout.DECOR_HEAD must stay >= these tops, measured above the step top):
+--   Start       arch pillars 12.5, StartBeam top 15.9, bunting top 17.0      Headroom 18
+--   Checkpoint  flag poles 9.0, orbs 9.9, label (billboard) top <= Headroom  Headroom >= 13 (Config.Course.Clearance)
+--   Finish      rainbow pillars 14.4, FinishBeam top 17.8                    Headroom 18
 function KB.Start(ctx, step, look)
 	local main, F = buildBase(ctx, step, look, { Name = "StartPlatform", Big = true })
 	local trim = ctx.Trim
@@ -1132,11 +1158,12 @@ function KB.Checkpoint(ctx, step, look)
 	addSparkles(ring, C.Checkpoint:Lerp(C.Text, 0.3), 5, 4, 1.8, 0.8)
 
 	local orb
+	local orbY = 9.3
 	for i, sgn in ipairs({ -1, 1 }) do
 		local px = sgn * (sx / 2 - 1.3)
 		local pz = sz / 2 - 1.3
 		cyl(ctx, "Decor", "FlagPole", 9, 0.5, F * CFrame.new(px, 4.5, pz), C.Top:Lerp(C.Gold, 0.3), MAT.Metal)
-		local ballTop = ball(ctx, "Decor", "FlagTop", 1.2, F * CFrame.new(px, 9.3, pz), C.Token, MAT.Neon, 0.1)
+		local ballTop = ball(ctx, "Decor", "FlagTop", 1.2, F * CFrame.new(px, orbY, pz), C.Token, MAT.Neon, 0.1)
 		addLight(ballTop, C.Token:Lerp(C.Text, 0.3), 14, 0.9)
 		orb = orb or ballTop
 		local banner = blk(ctx, "Signs", "FlagBanner", Vector3.new(4, 2.6, 0.15), F * CFrame.new(px - sgn * 2.2, 7.6, pz), C.Checkpoint)
@@ -1146,7 +1173,12 @@ function KB.Checkpoint(ctx, step, look)
 			addText(gui, tostring(index), "Display", C.Text, 0.05, 0.9)
 		end
 	end
-	local gui = billboardOn(orb, 11, 4.2, 4.2, 170)
+	-- The label sits right on top of the orbs (bottom edge at the orb tops, 10.0) and its top edge stays inside the
+	-- Headroom reserved for this step, so a later platform can never hang through the text.
+	local room = step.Headroom or Config.Course.Clearance
+	local labelBottom = orbY + 0.7
+	local labelH = max(2.4, min(4.2, room - 0.2 - labelBottom))
+	local gui = hintChip(billboardOn(orb, 10, labelH, labelBottom - orbY + labelH / 2, 170))
 	addText(gui, "Checkpoint " .. index .. "/" .. total, "Title", C.Text, 0, 0.55)
 	local nextStage = ctx.Layout.Stages and ctx.Layout.Stages[index + 1]
 	local sub = "Final stretch - the finish is close!"
@@ -1193,7 +1225,7 @@ function KB.Finish(ctx, step, look)
 		addGradient(title, C.Gold:Lerp(C.Text, 0.4), C.Rainbow[1])
 		addText(gui, "you made it - together!", "Script", C.Text, 0.68, 0.28)
 	end
-	local sign = billboardOn(orb, 10, 3.4, 4.6, 170)
+	local sign = hintChip(billboardOn(orb, 10, 3.4, 4.6, 170))
 	addText(sign, "GOAL", "Title", C.Gold:Lerp(C.Text, 0.25), 0, 0.62)
 	addText(sign, "wait here for your team", "Script", C.Text, 0.64, 0.32)
 	return main
@@ -1214,15 +1246,22 @@ local function buildDashHint(ctx, step)
 	end
 	dir = Vector3.new(dir.X, 0, dir.Z).Unit
 	local yaw = yawOf(dir)
+	-- Neon gold straight on the pale platform top is only 1.3 : 1, so the arrows are a deeper gold and sit on a dark
+	-- outline (skipped when the part budget is nearly used up)
+	local arrowColor = C.Gold:Lerp(C.Ink, 0.25)
 	for k = 1, 3 do
 		local tip = pos + dir * (0.4 - (k - 1) * 1.6) + Vector3.new(0, 0.14, 0)
-		chevron(ctx, "Decor", "DashArrow", CFrame.new(tip) * CFrame.Angles(0, yaw, 0), 2.2, 0.55, C.Gold, MAT.Neon, 0.1 + 0.15 * (k - 1))
+		local cf = CFrame.new(tip) * CFrame.Angles(0, yaw, 0)
+		if ctx.Parts <= ctx.UnderCap then
+			chevron(ctx, "Decor", "DashArrowShadow", cf * CFrame.new(0, -0.02, 0), 2.3, 0.9, C.Ink, MAT.SmoothPlastic, 0.35)
+		end
+		chevron(ctx, "Decor", "DashArrow", cf, 2.2, 0.55, arrowColor, MAT.Neon, 0.05 + 0.1 * (k - 1))
 	end
 	local perp = Vector3.new(dir.Z, 0, -dir.X)
 	local pole = pos + perp * 1.8
 	rod(ctx, "Decor", "DashPole", pole, pole + Vector3.new(0, 4.6, 0), 0.25, C.Brass, MAT.Metal)
 	local head = ball(ctx, "Decor", "DashBeacon", 0.9, CFrame.new(pole + Vector3.new(0, 4.8, 0)), C.Gold, MAT.Neon, 0.1)
-	local gui = billboardOn(head, 8, 3.4, 2.4, 130)
+	local gui = hintChip(billboardOn(head, 8, 3.6, 2.6, 130))
 	addText(gui, "DASH!", "Accent", C.Gold, 0, 0.62)
 	if step.Kind == "PlateBridge" then
 		addText(gui, "or hold the plate for a bridge", "Body", C.Text, 0.64, 0.32)

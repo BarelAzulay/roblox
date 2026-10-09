@@ -108,6 +108,13 @@ local FORMATION = {
 	[3] = { { -4.2, 1.9, 0.6, 1.0 }, { 4.2, 2.5, 0.6, 1.0 }, { 0.0, 3.2, 4.0, 0.3 } },
 }
 
+-- Wing speed. PetBuilder.Animate beats the wings at FLAP_HZ * Flap * (1 + 1.25 * Excited) per second, so the
+-- two channels multiply. Running while jumping is the normal state in a parkour game, and an uncapped product
+-- reached 11-15 beats/s (4-5 frames per beat at 60 fps, strobing at 30 fps), so the speed-up is capped here.
+local PB_FLAP_HZ = 2.0 -- PetBuilder's FLAP_HZ (beats per second at Flap = 1, Excited = 0)
+local MAX_BEAT_HZ = 6.0 -- ceiling for the whole product, at the fastest per-pet flapVar
+local FLAP_VAR_MAX = 1.15 -- 0.9 + 0.25, the top of the per-pet flapVar range
+
 local BUILD_OPTS = { Scale = 1 }
 
 ----------------------------------------------------------------------
@@ -617,11 +624,17 @@ local function stepFollower(f, dt, now, viewPos)
 	f.downK = f.downK + (downTarget - f.downK) * (1 - exp(-DOWN_RATE * dt))
 
 	local runK, airK, downK = f.runK, f.airK, f.downK
-	local flapBase = 1 + 0.75 * runK + 0.9 * airK
+	-- Excited does most of the speeding up (and also widens the wing sweep and wags the tail); Flap only adds a
+	-- little on top, and is capped so FLAP_HZ * Flap * (1 + 1.25 * Excited) stays below MAX_BEAT_HZ.
+	local flapBase = 1 + 0.2 * runK + 0.25 * airK
 	local excited = clamp(0.55 * runK + 0.75 * airK, 0, 1)
 	if downK > 0 then
 		flapBase = flapBase * (1 - 0.4 * downK)
 		excited = excited * (1 - downK)
+	end
+	local flapCap = MAX_BEAT_HZ / (PB_FLAP_HZ * (1 + 1.25 * excited) * FLAP_VAR_MAX)
+	if flapBase > flapCap then
+		flapBase = flapCap
 	end
 	local compact = 1 - 0.45 * downK -- downed owners keep their pets close
 	local leadX, leadZ = vx * LEAD_H, vz * LEAD_H

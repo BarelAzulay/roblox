@@ -674,16 +674,18 @@ local function buildResults(data)
 		})
 	end
 
+	-- MatchTokens is what was PAID OUT to this player (pet TokenBonus and rounding carry included), while
+	-- TotalTokens is the course's raw token value, so the two must not be shown as "own / total" ("48 / 24"
+	-- with a +100% pet). The row shows the personal payout on its own, like the member list below.
 	local ownTokens = math.max(0, math.floor(tonumber(data.MatchTokens) or 0))
-	local totalTokens = math.max(0, math.floor(tonumber(data.TotalTokens) or 0))
 	local bonus = math.max(0, math.floor(tonumber(data.Bonus) or 0))
 	local seconds = tonumber(data.Seconds) or 0
 
 	statRow(1, "Time", Util.FormatTime(seconds), WHITE)
-	local tokenValue = statRow(2, "Tokens", "0 / " .. tostring(totalTokens), Colors.TokenGlow)
+	local tokenValue = statRow(2, "Tokens", "0 \226\152\129", Colors.TokenGlow)
 	local bonusValue = statRow(3, "Win bonus", bonus > 0 and "+0 \226\152\129" or "-", bonus > 0 and GOLD or MUTED)
 	countUp(tokenValue, ownTokens, 0.45, 0.8, function(n)
-		return tostring(n) .. " / " .. tostring(totalTokens)
+		return tostring(n) .. " \226\152\129"
 	end, serial)
 	if bonus > 0 then
 		countUp(bonusValue, bonus, 0.9, 0.7, function(n)

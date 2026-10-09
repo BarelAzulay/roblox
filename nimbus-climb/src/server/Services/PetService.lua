@@ -18,6 +18,8 @@
 --                                           when PerksChanged fires), so this module never touches Humanoids
 --   * TokenBonus / CheckpointHeal        -> read by MatchService through GetPerks / GetTokenMultiplier
 -- perkState is updated BEFORE PerksChanged fires, so listeners always see the new numbers.
+-- Equip / Unequip / BuyRoulette are refused while the player attribute InMatch is true, so the
+-- loadout cannot be hot-swapped between token pickups and checkpoints.
 --
 -- Plain Lua 5.1-compatible syntax only.
 
@@ -109,6 +111,12 @@ end
 
 local function validId(id)
 	return type(id) == "string" and #id > 0 and #id <= MAX_ID_LENGTH
+end
+
+-- Perks are read by MatchService at the moment of each pickup / checkpoint, so the loadout must not
+-- change while a match runs (same rule as the roulette and the item shop).
+local function inMatch(player)
+	return player:GetAttribute(Config.Attr.InMatch) == true
 end
 
 local function fireClient(remoteName, player, ...)
@@ -257,6 +265,9 @@ function PetService.Equip(player, petId)
 	if not isLivePlayer(player) then
 		return false, "Player unavailable"
 	end
+	if inMatch(player) then
+		return false, "Pets are locked during a match"
+	end
 	if not validId(petId) then
 		return false, "Unknown pet"
 	end
@@ -286,6 +297,9 @@ end
 function PetService.Unequip(player, petId)
 	if not isLivePlayer(player) then
 		return false, "Player unavailable"
+	end
+	if inMatch(player) then
+		return false, "Pets are locked during a match"
 	end
 	if not validId(petId) then
 		return false, "Unknown pet"

@@ -3,7 +3,7 @@
 --   ItemService.Init(lobbyInfo, deps)    deps = { DataService, DamageService, MatchService } (all optional;
 --                                        siblings are required lazily). ItemService.SetMatchService(ms) also works.
 --   ItemService.Buy(player, itemId, qty) -> ok, reason     lobby only, spends tokens, respects Config.Items.MaxCarry
---   ItemService.Use(player, itemId)      -> ok, reason     match only, alive, not downed
+--   ItemService.Use(player, itemId)      -> ok, reason     running match only (not the intro countdown), alive, not downed
 --
 -- Items (ItemCatalog.List order):
 --   heal_cloud       heals 40% of max health (refused at full health, nothing consumed)
@@ -409,6 +409,11 @@ function ItemService.Use(player, itemId)
 		end
 		if match.State == "Ended" or match.Stopped == true then
 			return false, "The match is over"
+		end
+		-- Items are for the run itself: the intro freeze (Countdown, or Setup before it) already grants
+		-- invulnerability, so a shield used then would be wasted. Nothing is consumed on this refusal.
+		if match.State ~= "Playing" then
+			return false, "Wait for the countdown to finish"
 		end
 	end
 

@@ -10,10 +10,13 @@
 --   * Windows (CloudUI.Panel, centred because the player asked for them): Inventory (tabs Pets + Items,
 --     pet detail card with Equip / Unequip), Shop (tabs Roulettes + Items, odds popup), Stats.
 --     One window at a time, Esc / gamepad B / the red X / the menu button / a click outside closes it.
+--     Gamepad B is bound (ContextActionService, High priority, sunk) only while something is open, so it does
+--     not also fire MovementController's dash.
 --   * Roulette stage: a scrolling strip of pet viewports that eases to the server result (RouletteResult),
 --     then a reveal card with a rarity glow, a NEW! flag and an Equip button.
 --   * Every window re-renders from State.Changed (and when the token count or the InMatch attribute
---     changes). Pet slots are kept per pet id and updated in place, so nothing is rebuilt or leaked.
+--     changes). Pet slots are kept per pet id and updated in place, so nothing is rebuilt or leaked; the
+--     pet viewports of the Inventory grid are attached PETS_PER_FRAME at a time so a big collection never hitches.
 --
 -- Remotes used: OpenPanel, RouletteResult (in); BuyRoulette, EquipPet, UnequipPet, BuyItem, GoToSpot (out).
 -- Plain Lua 5.1-compatible syntax only. All text goes through Theme roles.
@@ -22,6 +25,7 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
+local ContextActionService = game:GetService("ContextActionService")
 local TweenService = game:GetService("TweenService")
 local Debris = game:GetService("Debris")
 
@@ -82,6 +86,8 @@ local FIRE_GAP = 0.3 -- client-side spacing between two sends of the same remote
 local HINT_SECONDS = 2.6
 local WAIT_TIMEOUT = 7 -- seconds to wait for a RouletteResult
 local COMPACT_BELOW = 560 -- gui height under which the menu captions are hidden
+local PETS_PER_FRAME = 3 -- pet viewports the Inventory grid builds per frame (a PetBuilder model is 35-66 parts)
+local BACK_ACTION = "NimbusMenuBack" -- ContextActionService action that owns gamepad B while something is closable
 
 local WIN_SIZES = {
 	Inventory = { 800, 540 },
@@ -138,10 +144,12 @@ local touchDevice = false
 local Spin = { Waiting = false, WaitToken = 0, Queue = {}, Stage = nil }
 local Odds = { Gui = nil, Token = 0, Slots = {} }
 local Badge = { LastPetTotal = nil }
+local Back = { Bound = false, Busy = false, Swallowed = false } -- gamepad B binding state (see syncBackBinding)
 
 -- forward declarations
 local openWindow, closeWindow, toggleWindow, refreshOpenWindow, updateMenuActive
 local requestSpin, closeStage, skipSpin, closeOdds, openOdds, showHint, handleBack, beginStage
+local syncBackBinding
 
 ----------------------------------------------------------------------
 -- Small helpers
@@ -547,6 +555,7 @@ function openWindow(id, args)
 	win.Shown = true
 	win.Token = win.Token + 1
 	openId = id
+	syncBackBinding()
 	win.Fit.Scale = fitScale(win.Size[1], win.Size[2])
 	win.Holder.Visible = true
 	if not wasShown then
@@ -572,6 +581,7 @@ function closeWindow(id, instant)
 	if openId == id then
 		openId = nil
 	end
+	syncBackBinding()
 	if win.OnClose then
 		safe("close " .. id, win.OnClose)
 	end
@@ -638,6 +648,67 @@ function handleBack()
 		return true
 	end
 	return false
+end
+
+-- Gamepad B is also the dash button (MovementController binds "NimbusDash" at Default priority), and
+-- UserInputService.InputBegan cannot stop that action. So B is owned here through ContextActionService at
+-- High priority, but only while something closable is open: the press then closes it and is sunk, so
+-- the character does not dash (or spend stamina / start the cooldown) on the same press. With nothing open
+-- the binding is gone and B dashes as usual. Esc stays on the plain InputBegan path (onInput).
+local function onBackAction(_name, state)
+	if state == Enum.UserInputState.Begin then
+		Back.Busy = true
+		local ok, handled = pcall(handleBack)
+		Back.Busy = false
+		if not ok then
+			warnOnce("back", handled)
+			handled = false
+		end
+		Back.Swallowed = handled == true
+		if Back.Swallowed then
+			return Enum.ContextActionResult.Sink
+		end
+		return Enum.ContextActionResult.Pass
+	end
+	-- release / cancel: sink it when the press was ours, so nothing below sees half a press
+	local swallowed = Back.Swallowed
+	Back.Swallowed = false
+	if swallowed then
+		return Enum.ContextActionResult.Sink
+	end
+	return Enum.ContextActionResult.Pass
+end
+
+-- Binds B while a window, the odds popup or the roulette stage is open and unbinds it when none is.
+-- Called after every change of openId / Odds.Gui / Spin.Stage.
+function syncBackBinding()
+	local wanted = openId ~= nil or Odds.Gui ~= nil or Spin.Stage ~= nil
+	if wanted == Back.Bound then
+		return
+	end
+	if wanted then
+		Back.Bound = true
+		local ok, err = pcall(function()
+			ContextActionService:BindActionAtPriority(
+				BACK_ACTION,
+				onBackAction,
+				false,
+				Enum.ContextActionPriority.High.Value,
+				Enum.KeyCode.ButtonB
+			)
+		end)
+		if not ok then
+			warnOnce("bind back", err)
+		end
+	elseif Back.Busy then
+		-- the press that closed the last thing is still being dispatched: unbind right after it
+		task.defer(syncBackBinding)
+	else
+		Back.Bound = false
+		pcall(function()
+			ContextActionService:UnbindAction(BACK_ACTION)
+		end)
+	end
 end
 
 ----------------------------------------------------------------------
@@ -831,6 +902,9 @@ local function buildInventory(win)
 		DetailViewport = nil,
 		PillRarity = nil,
 		Pill = nil,
+		Order = {}, -- owned pet ids in grid order (rarest first)
+		Ready = {}, -- petId -> true once the grid slot got its pet viewport
+		Filling = false, -- true while the staggered viewport builder is running
 	}
 	local itemRows = {} -- itemId -> { Slot, Owned }
 	local W = {} -- widgets of the pets page
@@ -1073,6 +1147,60 @@ local function buildInventory(win)
 		W.Status.Text = status
 	end
 
+	-- Content of a grid slot. The pet viewport (a PetBuilder model of 35-66 parts, a ViewportFrame and a
+	-- Camera) is attached by fillPetSlots, a few per frame, so a big collection never builds ~30 models in
+	-- the frame the Inventory opens (same idea as the odds popup). Until then a slot is its rarity tile.
+	local function gridInfo(def, withPet)
+		local info = {
+			RarityColor = rarityOf(def),
+			Name = def.Name .. " (" .. def.Rarity .. ")",
+			Blurb = def.Blurb,
+		}
+		if withPet then
+			info.Pet = def
+		end
+		return info
+	end
+
+	local function fillPetSlots()
+		if pets.Filling then
+			return
+		end
+		local function buildBatch()
+			local built = 0
+			for _, id in ipairs(pets.Order) do
+				local slot = pets.Slots[id]
+				local def = PetCatalog.Get(id)
+				if slot and def and not pets.Ready[id] then
+					pets.Ready[id] = true
+					slot.SetContent(gridInfo(def, true))
+					slot.SetCount(State.OwnedCount(id)) -- pet slots hide "x1": needs the Pet content to be set first
+					built = built + 1
+					if built >= PETS_PER_FRAME then
+						break
+					end
+				end
+			end
+			return built
+		end
+		pets.Filling = true
+		task.spawn(function()
+			-- stops when the window closes; the next open refreshes it and resumes with what is still missing
+			while win.Shown do
+				local ok, built = pcall(buildBatch)
+				if not ok then
+					warnOnce("fill pets", built)
+					break
+				end
+				if built < PETS_PER_FRAME then
+					break
+				end
+				task.wait()
+			end
+			pets.Filling = false
+		end)
+	end
+
 	local function refreshPetsPage()
 		local ids = ownedPetIds()
 		local ownedSet = {}
@@ -1100,8 +1228,10 @@ local function buildInventory(win)
 			if not ownedSet[id] then
 				slot.Destroy()
 				pets.Slots[id] = nil
+				pets.Ready[id] = nil
 			end
 		end
+		pets.Order = ids
 		for index, id in ipairs(ids) do
 			local def = PetCatalog.Get(id)
 			local slot = pets.Slots[id]
@@ -1118,13 +1248,14 @@ local function buildInventory(win)
 				pets.Slots[id] = slot
 			end
 			slot.Root.LayoutOrder = index
-			slot.SetContent({
-				Pet = def,
-				RarityColor = rarityOf(def),
-				Name = def.Name .. " (" .. def.Rarity .. ")",
-				Blurb = def.Blurb,
-			})
-			slot.SetCount(State.OwnedCount(id))
+			local ready = pets.Ready[id] == true
+			local owned = State.OwnedCount(id)
+			slot.SetContent(gridInfo(def, ready))
+			if ready or owned > 1 then
+				slot.SetCount(owned)
+			else
+				slot.SetCount(nil) -- a tile without its pet yet would show "x1"
+			end
 			if State.IsEquipped(id) then
 				slot.SetMarker(G.Star, GOLD)
 			else
@@ -1178,6 +1309,8 @@ local function buildInventory(win)
 		else
 			W.PerksLabel.Text = "Equip pets to gain perks."
 		end
+
+		fillPetSlots() -- last: the first batch of grid viewports is built right here, the rest follow per frame
 	end
 
 	------------------------------------------------------------------
@@ -1298,6 +1431,7 @@ function closeOdds()
 		Odds.Gui:Destroy()
 		Odds.Gui = nil
 	end
+	syncBackBinding()
 end
 
 function openOdds(rouletteId)
@@ -1311,6 +1445,7 @@ function openOdds(rouletteId)
 
 	local root = makeFrame(gui, "OddsPopup", { Size = UDim2.new(1, 0, 1, 0), ZIndex = 8 })
 	Odds.Gui = root
+	syncBackBinding()
 	local dim = Util.Create("TextButton", {
 		Name = "Backdrop",
 		AutoButtonColor = false,
@@ -2105,6 +2240,7 @@ function closeStage()
 		return
 	end
 	Spin.Stage = nil
+	syncBackBinding()
 	stage.Phase = "closed"
 	if stage.Conn then
 		stage.Conn:Disconnect()
@@ -2151,6 +2287,7 @@ function beginStage(result)
 	local accent = roulette and roulette.Color or rarityColor
 	local stage = { Phase = "spin", Def = def, Result = result, Cells = {}, Elapsed = 0, X = 0, Tick = 0 }
 	Spin.Stage = stage
+	syncBackBinding()
 	closeOdds()
 	refreshShopWindow()
 
@@ -2728,8 +2865,10 @@ local function onMatchFlagChanged()
 	refreshOpenWindow()
 end
 
+-- Escape only: gamepad B goes through the "NimbusMenuBack" action (syncBackBinding), because it must not
+-- also reach MovementController's dash.
 local function onInput(input)
-	if input.KeyCode == Enum.KeyCode.Escape or input.KeyCode == Enum.KeyCode.ButtonB then
+	if input.KeyCode == Enum.KeyCode.Escape then
 		handleBack()
 	end
 end
