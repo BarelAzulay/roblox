@@ -1,30 +1,40 @@
--- CloudUI: the chunky "cloud" UI kit. Pet-Simulator-style panels (thick navy outline, glossy blue
--- fills, bright buttons, round icon buttons) made cloudier: soft sky-blue gradients, puffy bumps along
--- the top edge of every window, calmer colours. Everything is built from Frames / TextLabels /
--- UICorner / UIStroke / UIGradient / UIPadding / list+grid layouts. No images, no asset ids.
+-- CloudUI: the chunky "cloud" UI kit (v3). Front-page-simulator style panels made cloudier: a thick dark
+-- navy outline, glossy sky-blue frames with a bevelled rim, puffy cloud bumps along the top edge, a bold
+-- title bar with big outlined title text and a red X, glossy buttons with a darker bottom lip, and a tiny
+-- pixel glint (a nod to the voxel world). Everything is built from Frames / TextLabels / UICorner /
+-- UIStroke / UIGradient / UIPadding / list+grid layouts. No images, no asset ids.
 --
 --   CloudUI.NewScreenGui(name, displayOrder) -> ScreenGui
---   CloudUI.Panel(props)      -> { Root, Body, Content, TitleLabel, Close, SetTitle, Destroy }
+--   CloudUI.Panel(props)      -> { Root, Body, Content, TitleBar, TitleLabel, CloseButton, Close, SetTitle, SetAccent, Destroy }
 --   CloudUI.Button(props)     -> TextButton
---   CloudUI.IconButton(props) -> { Root, Button, SetBadge, SetGlyph, SetLabel, SetColor }
+--   CloudUI.IconButton(props) -> { Root, Button, Glyph, Caption, SetBadge, SetGlyph, SetLabel, SetColor }
 --   CloudUI.Bar(props)        -> { Root, Fill, Label, SetFraction, SetText, SetColor, GetFraction }
 --   CloudUI.Slot(props)       -> { Root, Button, SetContent, SetSelected, SetCount, SetHotkey, ... }
---   CloudUI.Tabs(props)       -> { Root, Content, Add, Select, GetSelected, GetPage }
+--   CloudUI.Tabs(props)       -> { Root, Content, Add, Select, GetSelected, GetPage, GetButton }
 --   CloudUI.Grid(parent, cellSize, padding) -> ScrollingFrame (UIGridLayout, automatic canvas)
 --   CloudUI.PetViewport(parent, petDef, size, opts) -> { Frame, Destroy, SetAnimated, SetExcited }
 --   CloudUI.Pill(text, kind, parent) -> TextLabel
 --   CloudUI.Tooltip(guiObject, textFn) -> disconnect function
 --   CloudUI.RarityColor(rarityId) -> Color3
+--   v3 readability helpers:
+--   CloudUI.ScreenFactor()            -> Theme.ScreenFactor() (clamp(viewportY / 1080, 0.8, 1.25))
+--   CloudUI.TextSize(basePx)          -> Theme.ScaledSize(basePx) for text that is not under a UIScale
+--   CloudUI.AutoScale(guiObject, opts) -> UIScale kept at the screen factor (one shared camera listener)
+--   CloudUI.Metrics / CloudUI.ContentInset(hasTitle, clouds) -> the panel geometry
 --
 -- Conventions
+--   * Sizes are DESIGN pixels of a 1920x1080 screen and follow the v3 readability rule there (body text
+--     >= 18, captions >= 15, buttons >= 20, titles 28-44). Put a widget tree under one UIScale of the screen
+--     factor (CloudUI.AutoScale, or a window's own fit scale) and it reads well from phones to 1440p.
 --   * Every constructor accepts Name / Parent / Position / AnchorPoint / Size in its props and names
---     its instances for debugging. Text uses Theme font roles only.
+--     its instances for debugging. Text uses Theme font roles only, with a stroke on every text.
 --   * Buttons are plain TextButtons. Their state lives in attributes, so you can change it later:
 --       button:SetAttribute("Disabled", true)   (or button.Active = false)   -> greyed out, callback ignored
 --       button:SetAttribute("Style", "Gold")                                 -> re-skin
 --     (CloudUI.SetDisabled / CloudUI.SetStyle do exactly that.) Setting button.Text just works.
---   * Hover / press feedback is a UIScale (1.04 / 0.95). UIScale grows around the AnchorPoint, so
---     centre-anchored buttons look best.
+--   * Hover / press feedback is a UIScale named "FxScale" (1.04 / 0.95). UIScale grows around the
+--     AnchorPoint, so centre-anchored buttons look best.
+--   * Panel.Content never gets decorative children, so callers may put a UIListLayout / UIGridLayout in it.
 --   * ONE RenderStepped connection (CloudUI.Update) drives every pet viewport and the tooltip; it
 --     disconnects itself when nothing needs it. Viewports of hidden or destroyed UI stop costing time.
 -- Plain Lua 5.1-compatible syntax only.
@@ -58,6 +68,33 @@ local PRESS_SCALE = 0.95
 local FOV = 32 -- pet viewport camera
 local TOOLTIP_DELAY = 0.35
 local LONG_PRESS = 0.45
+
+-- Panel geometry (design px)
+local OUTLINE_THICKNESS = 4 -- the thick navy outline of every window
+local PANEL_CORNER = 16
+local PANEL_PAD = 12 -- frame border around the title bar and the content well
+local TITLE_TOP = 10
+local TITLE_H = 50
+local TITLE_GAP = 10
+local TITLE_TEXT = 32
+local CLOSE_SIZE = 40
+local UNTITLED_TOP_CLOUDS = 20 -- the cloud bumps need a little room above an untitled well
+
+CloudUI.Metrics = {
+	Outline = OUTLINE_THICKNESS,
+	Corner = PANEL_CORNER,
+	Pad = PANEL_PAD,
+	TitleTop = TITLE_TOP,
+	TitleHeight = TITLE_H,
+	TitleGap = TITLE_GAP,
+	TitleText = TITLE_TEXT,
+	CloseSize = CLOSE_SIZE,
+	ContentPad = 10, -- suggested padding for things laid out inside Panel.Content
+	ButtonText = 22,
+	ButtonHeight = 50,
+	BodyText = 19,
+	CaptionText = 16,
+}
 
 CloudUI.Palette = {
 	Navy = NAVY,
@@ -152,7 +189,7 @@ local function frame(name, props, parent)
 end
 
 -- Soft translucent highlight strip near the top of a glossy face.
-local function addShine(parent, heightScale, sideInset, transparency)
+local function addShine(parent, heightScale, sideInset, transparency, zIndex)
 	local shine = Util.Create("Frame", {
 		Name = "Shine",
 		BackgroundColor3 = WHITE,
@@ -162,10 +199,32 @@ local function addShine(parent, heightScale, sideInset, transparency)
 		Position = UDim2.new(0.5, 0, 0, 3),
 		Size = UDim2.new(1, -2 * (sideInset or 10), heightScale or 0.32, 0),
 		Active = false,
+		ZIndex = zIndex or 1,
 		Parent = parent,
 	})
 	round(shine)
 	return shine
+end
+
+-- A tiny pixel-art glint (an "L" of three square pixels) in the top-left corner of a glossy face: the
+-- one voxel accent of the 2-D kit. `px` is the pixel size in design px.
+local function addPixelGlint(parent, x, y, px, transparency, zIndex)
+	local glint = frame("PixelGlint", {
+		Position = UDim2.fromOffset(x, y),
+		Size = UDim2.fromOffset(px * 2, px * 2),
+		ZIndex = zIndex or 1,
+	}, parent)
+	local cells = { { 0, 0, 0 }, { 1, 0, 0.25 }, { 0, 1, 0.25 } }
+	for i, cell in ipairs(cells) do
+		frame("Px" .. i, {
+			BackgroundColor3 = WHITE,
+			BackgroundTransparency = math.min(1, (transparency or 0.25) + cell[3]),
+			Position = UDim2.fromOffset(cell[1] * px, cell[2] * px),
+			Size = UDim2.fromOffset(px, px),
+			ZIndex = zIndex or 1,
+		}, glint)
+	end
+	return glint
 end
 
 local function titleCase(text)
@@ -194,6 +253,100 @@ local function isShown(gui)
 		node = node.Parent
 	end
 	return false
+end
+
+-- Glossy face for a coloured bar: light top, the base colour, then a hard darker lip at the bottom.
+local function lipSequence(c)
+	return ColorSequence.new({
+		ColorSequenceKeypoint.new(0, Theme.Lighten(c, 0.26)),
+		ColorSequenceKeypoint.new(0.55, c),
+		ColorSequenceKeypoint.new(0.78, Theme.Darken(c, 0.08)),
+		ColorSequenceKeypoint.new(0.8, Theme.Darken(c, 0.3)),
+		ColorSequenceKeypoint.new(1, Theme.Darken(c, 0.36)),
+	})
+end
+
+----------------------------------------------------------------------
+-- Readability helpers (v3)
+----------------------------------------------------------------------
+function CloudUI.ScreenFactor()
+	return Theme.ScreenFactor()
+end
+
+-- Pixel size for text that is NOT under a UIScale (never below 14 px).
+function CloudUI.TextSize(basePx, minPx)
+	return Theme.ScaledSize(basePx, minPx)
+end
+
+-- Top / side / bottom insets of Panel.Content inside the panel (design px).
+function CloudUI.ContentInset(hasTitle, clouds)
+	local top = PANEL_PAD
+	if hasTitle then
+		top = TITLE_TOP + TITLE_H + TITLE_GAP
+	elseif clouds ~= false then
+		top = UNTITLED_TOP_CLOUDS
+	end
+	return top, PANEL_PAD, PANEL_PAD
+end
+
+local autoScales = {} -- { Scale = UIScale, Mult, Min, Max }
+local autoCameraConn = nil
+local autoWatchConn = nil
+
+local function autoValue(entry)
+	local value = Theme.ScreenFactor() * entry.Mult
+	if entry.Min then
+		value = math.max(entry.Min, value)
+	end
+	if entry.Max then
+		value = math.min(entry.Max, value)
+	end
+	return value
+end
+
+local function refreshAutoScales()
+	for i = #autoScales, 1, -1 do
+		local entry = autoScales[i]
+		if entry.Scale.Parent == nil then
+			table.remove(autoScales, i)
+		else
+			entry.Scale.Scale = autoValue(entry)
+		end
+	end
+end
+
+local function bindAutoCamera()
+	if autoCameraConn then
+		autoCameraConn:Disconnect()
+		autoCameraConn = nil
+	end
+	local camera = workspace.CurrentCamera
+	if camera then
+		autoCameraConn = camera:GetPropertyChangedSignal("ViewportSize"):Connect(refreshAutoScales)
+	end
+	refreshAutoScales()
+end
+
+-- Adds (or reuses) a UIScale that keeps `guiObject` (designed in 1080p pixels) at the readability factor.
+-- opts: Name (default "ReadScale"), Multiplier (default 1), Min, Max (clamp the final scale)
+function CloudUI.AutoScale(guiObject, opts)
+	if not guiObject then
+		return nil
+	end
+	opts = opts or {}
+	local name = opts.Name or "ReadScale"
+	local scale = guiObject:FindFirstChild(name)
+	if not (scale and scale:IsA("UIScale")) then
+		scale = Util.Create("UIScale", { Name = name, Scale = 1, Parent = guiObject })
+	end
+	local entry = { Scale = scale, Mult = tonumber(opts.Multiplier) or 1, Min = opts.Min, Max = opts.Max }
+	scale.Scale = autoValue(entry)
+	table.insert(autoScales, entry)
+	if not autoWatchConn then
+		autoWatchConn = workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(bindAutoCamera)
+		bindAutoCamera()
+	end
+	return scale
 end
 
 ----------------------------------------------------------------------
@@ -326,8 +479,9 @@ end
 ----------------------------------------------------------------------
 -- Button
 ----------------------------------------------------------------------
--- props: Text, Style ("Green"|"Pink"|"Red"|"Blue"|"Gold"|"Gray"), Size, Position, AnchorPoint,
---        Callback (called as Callback(button)), Parent, TextSize, Name, LayoutOrder, ZIndex
+-- props: Text, Style ("Green"|"Pink"|"Red"|"Blue"|"Gold"|"Gray"), Size (default 160x50), Position,
+--        AnchorPoint, Callback (called as Callback(button)), Parent, TextSize (default 22), Name,
+--        LayoutOrder, ZIndex
 function CloudUI.Button(props)
 	props = props or {}
 	local state = { Style = isStyleName(props.Style) and titleCase(props.Style) or "Green" }
@@ -338,7 +492,7 @@ function CloudUI.Button(props)
 		Active = true, -- explicit: "Active == false" is how a button is switched off (see isDisabled)
 		BorderSizePixel = 0,
 		BackgroundColor3 = Theme.Lighten(styleBase(state.Style), 0.16),
-		Size = props.Size or UDim2.fromOffset(150, 46),
+		Size = props.Size or UDim2.fromOffset(160, 50),
 		Position = props.Position or UDim2.new(),
 		AnchorPoint = props.AnchorPoint or Vector2.new(0, 0),
 		LayoutOrder = props.LayoutOrder or 0,
@@ -346,12 +500,13 @@ function CloudUI.Button(props)
 		Text = props.Text or "",
 		TextTruncate = Enum.TextTruncate.AtEnd,
 	})
-	Theme.Style(button, "Button", { Size = props.TextSize or 22, Stroke = 0.1 })
+	Theme.Style(button, "Button", { Size = props.TextSize or CloudUI.Metrics.ButtonText, Stroke = 0.1 })
 	corner(button, 12)
-	local outline = stroke(button, NAVY, 3, 0)
+	local outline = stroke(button, NAVY, 3, 0) -- Border mode: the chunky outline of the button
+	local textOutline = Theme.TextOutline(button, 2, Theme.Darken(styleBase(state.Style), 0.62), 0) -- Contextual: the text
 	gradient(button, FACE_SEQUENCE, 90)
-	padding(button, 8, 0, 8, UDim.new(0.18, 0))
-	addShine(button, 0.3, 8, 0.8)
+	padding(button, 10, 0, 10, UDim.new(0.18, 0))
+	addShine(button, 0.3, 8, 0.78, button.ZIndex)
 
 	local fx
 	local function isDisabled()
@@ -374,8 +529,11 @@ function CloudUI.Button(props)
 		else
 			button.BackgroundColor3 = face
 		end
-		button.TextColor3 = disabled and Color3.fromRGB(214, 220, 234) or WHITE
+		button.TextColor3 = disabled and Color3.fromRGB(226, 230, 240) or WHITE
 		button.TextStrokeColor3 = Theme.Darken(base, 0.62)
+		if textOutline then
+			textOutline.Color = Theme.Darken(base, disabled and 0.5 or 0.62)
+		end
 		outline.Color = disabled and Theme.Darken(NAVY, 0.1) or NAVY
 	end
 
@@ -440,17 +598,19 @@ local BUMPS = {
 	{ 0.85, 46, 1 },
 	{ 0.94, 30, 5 },
 }
-local OUTLINE_THICKNESS = 4
 
--- props: Name, Size, Position, AnchorPoint, Title, Closable, OnClose, Parent, Accent (Color3), Clouds (default true)
+-- props: Name, Size, Position, AnchorPoint, Title, Closable, OnClose, Parent, Accent (Color3: title bar +
+--        frame tint), Clouds (default true), LayoutOrder, TitleSize (default 32)
 function CloudUI.Panel(props)
 	props = props or {}
 	local hasTitle = type(props.Title) == "string" and props.Title ~= ""
 	local clouds = props.Clouds ~= false
 	local accent = props.Accent
-	if typeof(accent) ~= "Color3" then
+	local hasAccent = typeof(accent) == "Color3"
+	if not hasAccent then
 		accent = BUTTON_COLORS.Blue or Color3.fromRGB(90, 158, 234)
 	end
+	local topInset = CloudUI.ContentInset(hasTitle, clouds)
 
 	local root = frame(props.Name or "CloudPanel", {
 		Size = props.Size or UDim2.fromOffset(520, 380),
@@ -462,18 +622,19 @@ function CloudUI.Panel(props)
 	-- soft drop shadow
 	local shadow = frame("Shadow", {
 		BackgroundColor3 = Color3.fromRGB(8, 12, 32),
-		BackgroundTransparency = 0.72,
+		BackgroundTransparency = 0.66,
 		Position = UDim2.new(0, 0, 0, 7),
 		Size = UDim2.new(1, 0, 1, 0),
 		ZIndex = 0,
 	}, root)
-	corner(shadow, 18)
+	corner(shadow, PANEL_CORNER + 2)
 
-	-- the frame colour at the top, tinted a little by the accent
+	-- the frame colour, tinted a little by the accent
 	local frameTop = Colors.FrameTop:Lerp(accent, 0.12)
 	local frameBottom = Colors.FrameBottom:Lerp(accent, 0.12)
 
 	-- bump outlines (behind the body) and bump fills (in front of the body's top outline)
+	local puffs = {}
 	if clouds then
 		local back = frame("CloudOutline", { Size = UDim2.new(1, 0, 1, 0), ZIndex = 1 }, root)
 		local front = frame("CloudPuffs", { Size = UDim2.new(1, 0, 1, 0), ZIndex = 3 }, root)
@@ -485,6 +646,7 @@ function CloudUI.Panel(props)
 				AnchorPoint = Vector2.new(0.5, 0.5),
 				Position = UDim2.new(bump[1], 0, 0, bump[3]),
 				Size = UDim2.fromOffset(d + 2 * OUTLINE_THICKNESS, d + 2 * OUTLINE_THICKNESS),
+				ZIndex = 1,
 			}, back)
 			round(ring)
 			local puff = frame("Puff" .. i, {
@@ -493,8 +655,20 @@ function CloudUI.Panel(props)
 				AnchorPoint = Vector2.new(0.5, 0.5),
 				Position = UDim2.new(bump[1], 0, 0, bump[3]),
 				Size = UDim2.fromOffset(d, d),
+				ZIndex = 3,
 			}, front)
 			round(puff)
+			-- a soft highlight on the upper part of each puff (rounder, fluffier clouds)
+			local tuft = frame("Tuft", {
+				BackgroundColor3 = WHITE,
+				BackgroundTransparency = 0.7,
+				AnchorPoint = Vector2.new(0.5, 0),
+				Position = UDim2.new(0.42, 0, 0.12, 0),
+				Size = UDim2.new(0.5, 0, 0.3, 0),
+				ZIndex = 3,
+			}, puff)
+			round(tuft)
+			table.insert(puffs, puff)
 		end
 	end
 
@@ -505,61 +679,92 @@ function CloudUI.Panel(props)
 		ZIndex = 2,
 		Active = true, -- sinks clicks so the world behind the window is not clicked
 	}, root)
-	corner(body, 16)
+	corner(body, PANEL_CORNER)
 	stroke(body, NAVY, OUTLINE_THICKNESS, 0)
-	gradient(body, ColorSequence.new(frameTop, frameBottom), 90)
-	-- thin glossy highlight just inside the top edge
+	local bodyGradient = gradient(body, ColorSequence.new(frameTop, frameBottom), 90)
+	-- bevel: a pale rim just inside the dark outline
+	local rim = frame("Rim", {
+		Position = UDim2.new(0, 3, 0, 3),
+		Size = UDim2.new(1, -6, 1, -6),
+		ZIndex = 2,
+	}, body)
+	corner(rim, PANEL_CORNER - 3)
+	local rimStroke = stroke(rim, Theme.Lighten(frameTop, 0.55), 2, 0.35)
+	-- glossy highlight just inside the top edge
 	local highlight = frame("Highlight", {
 		BackgroundColor3 = WHITE,
-		BackgroundTransparency = 0.62,
-		Position = UDim2.new(0, 14, 0, 6),
-		Size = UDim2.new(1, -28, 0, 5),
+		BackgroundTransparency = 0.6,
+		Position = UDim2.new(0, 16, 0, 6),
+		Size = UDim2.new(1, -32, 0, 5),
+		ZIndex = 2,
 	}, body)
 	round(highlight)
 
-	-- inner content well
-	local topInset = hasTitle and 34 or 22
+	-- inner content well (no decorative children: callers own its layout)
 	local content = frame("Content", {
 		BackgroundColor3 = WHITE,
 		BackgroundTransparency = 0,
-		Position = UDim2.new(0, 12, 0, topInset),
-		Size = UDim2.new(1, -24, 1, -(topInset + 12)),
+		Position = UDim2.new(0, PANEL_PAD, 0, topInset),
+		Size = UDim2.new(1, -2 * PANEL_PAD, 1, -(topInset + PANEL_PAD)),
 		ZIndex = 4,
 	}, root)
 	corner(content, 12)
-	stroke(content, Colors.WellEdge or NAVY, 3, 0.1)
+	stroke(content, Colors.WellEdge or NAVY, 3, 0.05)
 	gradient(content, ColorSequence.new(Colors.WellTop, Colors.WellBottom), 90)
 
-	-- title ribbon straddling the top edge
-	local titleLabel = nil
+	-- bold title bar with big outlined title text
+	local titleBar, titleLabel, titleGradient, titleOutline = nil, nil, nil, nil
 	if hasTitle then
+		local barColor = hasAccent and accent or (Colors.TitleBar or accent)
+		titleBar = frame("TitleBar", {
+			BackgroundColor3 = WHITE,
+			BackgroundTransparency = 0,
+			Position = UDim2.new(0, PANEL_PAD, 0, TITLE_TOP),
+			Size = UDim2.new(1, -2 * PANEL_PAD, 0, TITLE_H),
+			ZIndex = 5,
+		}, root)
+		corner(titleBar, 12)
+		stroke(titleBar, NAVY, 3, 0)
+		titleGradient = gradient(titleBar, lipSequence(barColor), 90)
+		local gloss = frame("Gloss", {
+			BackgroundColor3 = WHITE,
+			BackgroundTransparency = 0.76,
+			Position = UDim2.new(0, 8, 0, 4),
+			Size = UDim2.new(1, -16, 0.34, 0),
+			ZIndex = 5,
+		}, titleBar)
+		corner(gloss, 8)
+		addPixelGlint(titleBar, 7, 6, 4, 0.2, 6)
+
+		local rightRoom = props.Closable and (CLOSE_SIZE + 18) or 16
+		local darkText = Theme.Darken(barColor, 0.72)
 		titleLabel = Theme.Label(props.Title, "Title", {
-			Size = 24,
-			Stroke = 0,
-			StrokeColor = Theme.Darken(accent, 0.62),
+			Size = props.TitleSize or TITLE_TEXT,
+			Stroke = 0.1,
+			StrokeColor = darkText,
+			Outline = 2.5,
+			OutlineColor = darkText,
 			Props = {
 				Name = "Title",
-				BackgroundTransparency = 0,
-				BackgroundColor3 = Theme.Lighten(accent, 0.14),
-				BorderSizePixel = 0,
-				AnchorPoint = Vector2.new(0.5, 0.5),
-				Position = UDim2.new(0.5, 0, 0, 2),
-				Size = UDim2.fromOffset(0, 42),
-				AutomaticSize = Enum.AutomaticSize.X,
-				TextXAlignment = Enum.TextXAlignment.Center,
+				Position = UDim2.new(0, 22, 0, 0),
+				Size = UDim2.new(1, -(22 + rightRoom), 0.8, 2),
+				TextXAlignment = Enum.TextXAlignment.Left,
+				TextYAlignment = Enum.TextYAlignment.Center,
+				TextTruncate = Enum.TextTruncate.AtEnd,
 				ZIndex = 6,
 			},
 		})
-		corner(titleLabel, 14)
-		stroke(titleLabel, NAVY, 3, 0)
-		gradient(titleLabel, FACE_SEQUENCE, 90)
-		padding(titleLabel, 28, 0, 28, UDim.new(0.18, 0))
-		Util.Create("UISizeConstraint", { MinSize = Vector2.new(120, 42), Parent = titleLabel })
-		addShine(titleLabel, 0.3, 12, 0.8)
-		titleLabel.Parent = root
+		titleOutline = titleLabel:FindFirstChild("TextOutline")
+		titleLabel.Parent = titleBar
 	end
 
-	local panel = { Root = root, Body = body, Content = content, TitleLabel = titleLabel }
+	local panel = {
+		Root = root,
+		Body = body,
+		Content = content,
+		TitleBar = titleBar,
+		TitleLabel = titleLabel,
+	}
 
 	function panel.Close()
 		if props.OnClose then
@@ -575,25 +780,64 @@ function CloudUI.Panel(props)
 		end
 	end
 
+	-- Re-tint the title bar and the frame (e.g. by rarity).
+	function panel.SetAccent(color)
+		if typeof(color) ~= "Color3" then
+			return
+		end
+		local top = Colors.FrameTop:Lerp(color, 0.12)
+		local bottom = Colors.FrameBottom:Lerp(color, 0.12)
+		bodyGradient.Color = ColorSequence.new(top, bottom)
+		rimStroke.Color = Theme.Lighten(top, 0.55)
+		for _, puff in ipairs(puffs) do
+			puff.BackgroundColor3 = top
+		end
+		if titleGradient then
+			titleGradient.Color = lipSequence(color)
+		end
+		if titleLabel then
+			local darkText = Theme.Darken(color, 0.72)
+			titleLabel.TextStrokeColor3 = darkText
+			if titleOutline then
+				titleOutline.Color = darkText
+			end
+		end
+	end
+
 	function panel.Destroy()
 		root:Destroy()
 	end
 
 	if props.Closable then
+		local closeSize = hasTitle and CLOSE_SIZE or (CLOSE_SIZE - 2)
+		local position
+		if hasTitle then
+			-- inside the right end of the title bar (the lip takes the bottom fifth)
+			position = UDim2.new(1, -(PANEL_PAD + 6 + CLOSE_SIZE / 2), 0, TITLE_TOP + math.floor(TITLE_H * 0.46))
+		else
+			-- on the top-right corner of the frame
+			position = UDim2.new(1, -12, 0, 8)
+		end
 		local closeButton = CloudUI.Button({
 			Name = "Close",
 			Text = "X",
 			Style = "Red",
-			TextSize = 22,
-			Size = UDim2.fromOffset(40, 40),
-			AnchorPoint = Vector2.new(1, 0),
-			Position = UDim2.new(1, 8, 0, -14),
-			ZIndex = 7,
+			TextSize = 26,
+			Size = UDim2.fromOffset(closeSize, closeSize),
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = position,
+			ZIndex = 8,
 			Callback = function()
 				panel.Close()
 			end,
 			Parent = root,
 		})
+		-- the X is short: no side padding, so it stays centred in its square
+		local pad = closeButton:FindFirstChildOfClass("UIPadding")
+		if pad then
+			pad.PaddingLeft = UDim.new(0, 0)
+			pad.PaddingRight = UDim.new(0, 0)
+		end
 		panel.CloseButton = closeButton
 	end
 
@@ -604,10 +848,10 @@ end
 ----------------------------------------------------------------------
 -- Bar
 ----------------------------------------------------------------------
--- props: Size, Color, Label, Parent, Height, Position, AnchorPoint, Name
+-- props: Size, Color, Label, Parent, Height, Position, AnchorPoint, Name, LayoutOrder, TextSize
 function CloudUI.Bar(props)
 	props = props or {}
-	local height = props.Height or 22
+	local height = props.Height or 24
 	local color = props.Color or Colors.Health
 	local fraction = 1
 
@@ -621,6 +865,8 @@ function CloudUI.Bar(props)
 	})
 	round(root)
 	stroke(root, Theme.Darken(NAVY, 0.3), 3, 0)
+	-- a dark inner track so the empty part reads as "empty", not as a hole
+	gradient(root, ColorSequence.new(Color3.fromRGB(26, 34, 74), Color3.fromRGB(44, 58, 112)), 90)
 
 	local inner = frame("Inner", {
 		Position = UDim2.new(0, 3, 0, 3),
@@ -633,13 +879,21 @@ function CloudUI.Bar(props)
 		Size = UDim2.new(1, 0, 1, 0),
 	}, inner)
 	round(fill)
-	local fillGradient = gradient(fill, ColorSequence.new(Theme.Lighten(color, 0.3), Theme.Darken(color, 0.12)), 90)
-	addShine(fill, 0.34, 6, 0.72)
+	local function fillSequence(c)
+		return ColorSequence.new({
+			ColorSequenceKeypoint.new(0, Theme.Lighten(c, 0.34)),
+			ColorSequenceKeypoint.new(0.5, c),
+			ColorSequenceKeypoint.new(1, Theme.Darken(c, 0.16)),
+		})
+	end
+	local fillGradient = gradient(fill, fillSequence(color), 90)
+	addShine(fill, 0.34, 6, 0.7)
 
-	local textSize = Util.Clamp(height - 8, 11, 20)
+	local textSize = props.TextSize or Util.Clamp(math.floor(height * 0.66 + 0.5), 15, 26)
 	local label = Theme.Label(props.Label or "", "Heading", {
 		Size = textSize,
 		Stroke = 0.1,
+		Outline = height >= 20 and 2 or 1.5,
 		Props = {
 			Name = "Text",
 			Size = UDim2.new(1, 0, 1, 0),
@@ -679,7 +933,7 @@ function CloudUI.Bar(props)
 			return
 		end
 		color = newColor
-		fillGradient.Color = ColorSequence.new(Theme.Lighten(color, 0.3), Theme.Darken(color, 0.12))
+		fillGradient.Color = fillSequence(color)
 	end
 
 	root.Parent = props.Parent
@@ -706,25 +960,28 @@ end
 -- kind: "info" | "good" | "bad" | "token" | a rarity id ("Epic") | a Color3
 function CloudUI.Pill(text, kind, parent)
 	local color = kindColor(kind)
+	local dark = Theme.Darken(color, 0.62)
 	local pill = Theme.Label(tostring(text or ""), "Heading", {
-		Size = 14,
-		Stroke = 0.15,
-		StrokeColor = Theme.Darken(color, 0.6),
+		Size = 17,
+		Stroke = 0.1,
+		StrokeColor = dark,
+		Outline = 1.5,
+		OutlineColor = dark,
 		Props = {
 			Name = "Pill",
 			BackgroundTransparency = 0,
 			BackgroundColor3 = Theme.Lighten(color, 0.14),
 			BorderSizePixel = 0,
 			AutomaticSize = Enum.AutomaticSize.X,
-			Size = UDim2.fromOffset(0, 24),
+			Size = UDim2.fromOffset(0, 28),
 			TextXAlignment = Enum.TextXAlignment.Center,
 		},
 	})
 	round(pill)
-	stroke(pill, NAVY, 2, 0)
+	stroke(pill, NAVY, 2.5, 0)
 	gradient(pill, FACE_SEQUENCE, 90)
-	padding(pill, 10, 0, 10, UDim.new(0.14, 0))
-	Util.Create("UISizeConstraint", { MinSize = Vector2.new(30, 24), Parent = pill })
+	padding(pill, 12, 0, 12, UDim.new(0.14, 0))
+	Util.Create("UISizeConstraint", { MinSize = Vector2.new(34, 28), Parent = pill })
 	addShine(pill, 0.3, 8, 0.78)
 	pill.Parent = parent
 	return pill
@@ -734,13 +991,13 @@ end
 -- Icon button (round, with a caption below)
 ----------------------------------------------------------------------
 -- props: Glyph (short text), Label (caption), Color (Color3 or style name), Callback, Parent, Size
---        (whole widget, default 64x84; the circle's diameter is the widget width, and with a caption the
---        widget is made at least width + 22 px tall so the caption never overlaps its neighbours),
+--        (whole widget, default 72x96; the circle's diameter is the widget width, and with a caption the
+--        widget is made at least width + 24 px tall so the caption never overlaps its neighbours),
 --        Badge (bool), Position, AnchorPoint, Name, LayoutOrder
 function CloudUI.IconButton(props)
 	props = props or {}
 	local hasLabel = type(props.Label) == "string" and props.Label ~= ""
-	local labelHeight = 20
+	local labelHeight = 22
 	local color = props.Color
 	if type(color) == "string" then
 		color = styleBase(color)
@@ -748,7 +1005,7 @@ function CloudUI.IconButton(props)
 		color = BUTTON_COLORS.Blue or Color3.fromRGB(90, 158, 234)
 	end
 
-	local widgetSize = props.Size or UDim2.fromOffset(64, hasLabel and 84 or 64)
+	local widgetSize = props.Size or UDim2.fromOffset(72, hasLabel and 96 or 72)
 	if hasLabel and widgetSize.X.Scale == 0 and widgetSize.Y.Scale == 0 then
 		local minHeight = widgetSize.X.Offset + labelHeight + 2
 		if widgetSize.Y.Offset < minHeight then
@@ -784,9 +1041,8 @@ function CloudUI.IconButton(props)
 	local faceGradient = gradient(button, ColorSequence.new(Theme.Lighten(color, 0.3), color), 90)
 
 	-- darker crescent at the bottom for the chunky look (the circle has no text, so a real gradient is fine)
-	local function applyColor(c)
-		color = c
-		faceGradient.Color = ColorSequence.new({
+	local function faceSequence(c)
+		return ColorSequence.new({
 			ColorSequenceKeypoint.new(0, Theme.Lighten(c, 0.34)),
 			ColorSequenceKeypoint.new(0.5, Theme.Lighten(c, 0.06)),
 			ColorSequenceKeypoint.new(0.76, Theme.Darken(c, 0.1)),
@@ -794,12 +1050,16 @@ function CloudUI.IconButton(props)
 			ColorSequenceKeypoint.new(1, Theme.Darken(c, 0.4)),
 		})
 	end
+	local function applyColor(c)
+		color = c
+		faceGradient.Color = faceSequence(c)
+	end
 	applyColor(color)
 
 	local shine = Util.Create("Frame", {
 		Name = "Shine",
 		BackgroundColor3 = WHITE,
-		BackgroundTransparency = 0.78,
+		BackgroundTransparency = 0.76,
 		BorderSizePixel = 0,
 		AnchorPoint = Vector2.new(0.5, 0),
 		Position = UDim2.new(0.5, 0, 0.1, 0),
@@ -812,27 +1072,31 @@ function CloudUI.IconButton(props)
 		Scaled = true,
 		Stroke = 0,
 		StrokeColor = Theme.Darken(color, 0.65),
+		Outline = 2,
+		OutlineColor = Theme.Darken(color, 0.65),
 		Props = {
 			Name = "Glyph",
 			Position = UDim2.new(0.5, 0, 0.44, 0),
 			AnchorPoint = Vector2.new(0.5, 0.5),
-			Size = UDim2.new(0.56, 0, 0.56, 0),
+			Size = UDim2.new(0.58, 0, 0.58, 0),
 			ZIndex = 2,
 		},
 	})
-	Util.Create("UITextSizeConstraint", { MaxTextSize = 56, MinTextSize = 8, Parent = glyph })
+	Util.Create("UITextSizeConstraint", { MaxTextSize = 60, MinTextSize = 10, Parent = glyph })
+	local glyphOutline = glyph:FindFirstChild("TextOutline")
 	glyph.Parent = button
 
 	local caption = nil
 	if hasLabel then
 		caption = Theme.Label(props.Label, "Heading", {
-			Size = 14,
-			Stroke = 0,
+			Size = 16,
+			Stroke = 0.2,
+			Outline = 2,
 			Props = {
 				Name = "Caption",
 				AnchorPoint = Vector2.new(0.5, 1),
 				Position = UDim2.new(0.5, 0, 1, 0),
-				Size = UDim2.new(1.2, 0, 0, labelHeight),
+				Size = UDim2.new(1.3, 0, 0, labelHeight),
 				TextTruncate = Enum.TextTruncate.AtEnd,
 			},
 		})
@@ -845,16 +1109,16 @@ function CloudUI.IconButton(props)
 		BackgroundTransparency = 0,
 		AnchorPoint = Vector2.new(0.5, 0.5),
 		Position = UDim2.new(0.86, 0, 0.14, 0),
-		Size = UDim2.fromOffset(20, 20),
+		Size = UDim2.fromOffset(24, 24),
 		ZIndex = 4,
 		Visible = props.Badge == true,
 	}, button)
 	round(badge)
-	stroke(badge, NAVY, 2, 0)
+	stroke(badge, NAVY, 2.5, 0)
 	local badgeText = Theme.Label("!", "Button", {
-		Size = 14,
-		Stroke = 0.2,
-		Props = { Name = "Mark", Size = UDim2.new(1, 0, 1, 0) },
+		Size = 17,
+		Stroke = 0.1,
+		Props = { Name = "Mark", Size = UDim2.new(1, 0, 1, 0), ZIndex = 5 },
 	})
 	badgeText.Parent = badge
 
@@ -865,13 +1129,7 @@ function CloudUI.IconButton(props)
 		elseif hovering then
 			face = Theme.Lighten(color, 0.1)
 		end
-		faceGradient.Color = ColorSequence.new({
-			ColorSequenceKeypoint.new(0, Theme.Lighten(face, 0.34)),
-			ColorSequenceKeypoint.new(0.5, Theme.Lighten(face, 0.06)),
-			ColorSequenceKeypoint.new(0.76, Theme.Darken(face, 0.1)),
-			ColorSequenceKeypoint.new(0.78, Theme.Darken(face, 0.34)),
-			ColorSequenceKeypoint.new(1, Theme.Darken(face, 0.4)),
-		})
+		faceGradient.Color = faceSequence(face)
 		outline.Color = NAVY
 	end
 	attachFx(button, {
@@ -906,6 +1164,9 @@ function CloudUI.IconButton(props)
 		if typeof(newColor) == "Color3" then
 			applyColor(newColor)
 			glyph.TextStrokeColor3 = Theme.Darken(newColor, 0.65)
+			if glyphOutline then
+				glyphOutline.Color = Theme.Darken(newColor, 0.65)
+			end
 		end
 	end
 
@@ -917,6 +1178,8 @@ end
 -- Tooltip (one shared label, follows the mouse; long-press on touch)
 ----------------------------------------------------------------------
 local tip = nil
+local TIP_TEXT = 18 -- 1080p px; the tooltip gui has no UIScale, so the size is scaled when shown
+local TIP_MAX_W = 300
 
 local function ensureTip()
 	if tip then
@@ -925,12 +1188,12 @@ local function ensureTip()
 	local gui = CloudUI.NewScreenGui("CloudUITooltip", 60)
 	gui.IgnoreGuiInset = true
 	local label = Theme.Label("", "Body", {
-		Size = 16,
+		Size = Theme.ScaledSize(TIP_TEXT),
 		Stroke = 0.35,
 		Props = {
 			Name = "Tip",
 			Visible = false,
-			BackgroundTransparency = 0.05,
+			BackgroundTransparency = 0.04,
 			BackgroundColor3 = Colors.Panel,
 			BorderSizePixel = 0,
 			AutomaticSize = Enum.AutomaticSize.XY,
@@ -941,12 +1204,12 @@ local function ensureTip()
 			ZIndex = 10,
 		},
 	})
-	corner(label, 8)
-	stroke(label, Colors.FrameTop or Colors.Cloud, 2, 0.15)
-	padding(label, 10, 7, 10, 7)
-	Util.Create("UISizeConstraint", { MaxSize = Vector2.new(280, 400), Parent = label })
+	corner(label, 10)
+	stroke(label, Colors.FrameTop or Colors.Cloud, 2.5, 0.1)
+	padding(label, 12, 8, 12, 8)
+	local limit = Util.Create("UISizeConstraint", { MaxSize = Vector2.new(TIP_MAX_W, 480), Parent = label })
 	label.Parent = gui
-	tip = { Gui = gui, Label = label, Owner = nil, Mode = "mouse", Ticker = nil }
+	tip = { Gui = gui, Label = label, Limit = limit, Owner = nil, Mode = "mouse", Ticker = nil }
 	return tip
 end
 
@@ -1015,6 +1278,8 @@ local function showTip(owner, text, mode)
 	hideTip()
 	t.Owner = owner
 	t.Mode = mode or "mouse"
+	t.Label.TextSize = Theme.ScaledSize(TIP_TEXT)
+	t.Limit.MaxSize = Vector2.new(math.floor(TIP_MAX_W * Theme.ScreenFactor()), 480)
 	t.Label.Text = text
 	t.Label.Visible = true
 	placeTip()
@@ -1097,7 +1362,7 @@ function CloudUI.Tooltip(guiObject, textFn)
 			end
 		end)
 	)
-	if guiObject:IsA("GuiButton") then
+	if guiObject:IsA("TextButton") or guiObject:IsA("ImageButton") then
 		table.insert(
 			connections,
 			guiObject.MouseButton1Down:Connect(function()
@@ -1157,7 +1422,7 @@ end
 -- CloudUI.Update loop; hidden viewports skip work and destroyed ones unregister themselves.
 -- size: UDim2 | Vector2 | number (square pixels) | nil (fill the parent)
 -- opts: Position, AnchorPoint, ZIndex, Animate (default true), Spin ("spin"|"sway"|"none", default "spin"),
---       Flap (speed multiplier), Excited (0..1)
+--       Flap (speed multiplier), Excited (0..1), Detail ("High" default | "Low", passed to PetBuilder.Build)
 function CloudUI.PetViewport(parent, petDef, size, opts)
 	opts = opts or {}
 	viewportCounter = viewportCounter + 1
@@ -1165,7 +1430,7 @@ function CloudUI.PetViewport(parent, petDef, size, opts)
 
 	if type(petDef) == "string" then
 		local catalog = getPetCatalog()
-		petDef = catalog and catalog.Get(petDef) or nil
+		petDef = catalog and catalog.Get and catalog.Get(petDef) or nil
 	end
 
 	local viewport = Util.Create("ViewportFrame", {
@@ -1196,10 +1461,14 @@ function CloudUI.PetViewport(parent, petDef, size, opts)
 	local lastAspect = 1
 	local side = -1 -- which side of the model the camera sits on: -1 = the -Z side (Roblox models face -Z)
 
-	if petDef then
+	if type(petDef) == "table" then
 		builder = getPetBuilder()
-		if builder then
-			local ok, built = pcall(builder.Build, petDef, { Scale = 1 })
+		if builder and type(builder.Build) == "function" then
+			local buildOpts = { Scale = 1 }
+			if opts.Detail == "Low" or opts.Detail == "High" then
+				buildOpts.Detail = opts.Detail
+			end
+			local ok, built = pcall(builder.Build, petDef, buildOpts)
 			if ok and typeof(built) == "Instance" then
 				model = built
 			else
@@ -1237,6 +1506,12 @@ function CloudUI.PetViewport(parent, petDef, size, opts)
 		return -1
 	end
 
+	local function animate(t)
+		if builder and type(builder.Animate) == "function" then
+			pcall(builder.Animate, model, t, animOpts)
+		end
+	end
+
 	local function pose(t, dt)
 		if not model or not model.Parent then
 			return
@@ -1248,7 +1523,7 @@ function CloudUI.PetViewport(parent, petDef, size, opts)
 		end
 		local bob = math.sin(t * 2.2 + phase) * halfH * 0.035
 		model:PivotTo(CFrame.new(center + Vector3.new(0, bob, 0)) * CFrame.Angles(0, angle, 0) * CFrame.new(-center))
-		pcall(builder.Animate, model, t + phase, animOpts)
+		animate(t + phase)
 	end
 
 	if model then
@@ -1256,7 +1531,7 @@ function CloudUI.PetViewport(parent, petDef, size, opts)
 		pcall(function()
 			model:PivotTo(CFrame.new())
 		end)
-		pcall(builder.Animate, model, 0.35, animOpts)
+		animate(0.35)
 		local ok, cf, bbox = pcall(function()
 			return model:GetBoundingBox()
 		end)
@@ -1273,10 +1548,11 @@ function CloudUI.PetViewport(parent, petDef, size, opts)
 		pose(0.35, 0)
 	else
 		-- no model available: a friendly placeholder instead of an empty frame
-		local name = petDef and petDef.Name or "?"
+		local name = type(petDef) == "table" and petDef.Name or "?"
 		local fallback = Theme.Label(tostring(name):sub(1, 1), "Title", {
 			Scaled = true,
 			Stroke = 0.2,
+			Outline = 2,
 			Props = { Name = "Fallback", Size = UDim2.new(1, 0, 1, 0) },
 		})
 		fallback.Parent = viewport
@@ -1376,7 +1652,7 @@ local function petKey(info)
 	return nil
 end
 
--- props: Size (default 72x72), Position, AnchorPoint, Parent, Callback, Hotkey, Name, LayoutOrder
+-- props: Size (default 80x80), Position, AnchorPoint, Parent, Callback, Hotkey, Name, LayoutOrder
 -- info = { Glyph, Color, Pet = PetDef, RarityColor, Name, Blurb }
 function CloudUI.Slot(props)
 	props = props or {}
@@ -1387,7 +1663,7 @@ function CloudUI.Slot(props)
 	local viewportHandle = nil
 
 	local root = frame(props.Name or "CloudSlot", {
-		Size = props.Size or UDim2.fromOffset(72, 72),
+		Size = props.Size or UDim2.fromOffset(80, 80),
 		Position = props.Position or UDim2.new(),
 		AnchorPoint = props.AnchorPoint or Vector2.new(0, 0),
 		LayoutOrder = props.LayoutOrder or 0,
@@ -1408,16 +1684,26 @@ function CloudUI.Slot(props)
 	local outline = stroke(button, NAVY, 3, 0)
 	local fill = gradient(button, ColorSequence.new(Colors.Mist, Colors.MistDeep), 90)
 
-	local content = frame("Content", { Size = UDim2.new(1, 0, 1, 0) }, button)
+	-- glossy top band (behind the content)
+	local gloss = frame("Gloss", {
+		BackgroundColor3 = WHITE,
+		BackgroundTransparency = 0.72,
+		Position = UDim2.new(0, 5, 0, 4),
+		Size = UDim2.new(1, -10, 0.28, 0),
+	}, button)
+	corner(gloss, 8)
+
+	local content = frame("Content", { Size = UDim2.new(1, 0, 1, 0), ZIndex = 2 }, button)
 
 	local countLabel = Theme.Label("", "Heading", {
-		Size = 15,
-		Stroke = 0,
+		Size = 17,
+		Stroke = 0.1,
+		Outline = 2,
 		Props = {
 			Name = "Count",
 			AnchorPoint = Vector2.new(1, 1),
 			Position = UDim2.new(1, -5, 1, -3),
-			Size = UDim2.new(0.8, 0, 0, 18),
+			Size = UDim2.new(0.8, 0, 0, 20),
 			TextXAlignment = Enum.TextXAlignment.Right,
 			Visible = false,
 			ZIndex = 5,
@@ -1427,18 +1713,18 @@ function CloudUI.Slot(props)
 
 	local hotkeyChip = frame("Hotkey", {
 		BackgroundColor3 = Colors.Panel,
-		BackgroundTransparency = 0.1,
+		BackgroundTransparency = 0.05,
 		Position = UDim2.new(0, 4, 0, 4),
-		Size = UDim2.fromOffset(20, 20),
+		Size = UDim2.fromOffset(24, 24),
 		ZIndex = 5,
 		Visible = false,
 	}, button)
-	corner(hotkeyChip, 6)
+	corner(hotkeyChip, 7)
 	stroke(hotkeyChip, NAVY, 2, 0)
 	local hotkeyLabel = Theme.Label("", "Heading", {
-		Size = 13,
+		Size = 16,
 		Stroke = 0.2,
-		Props = { Name = "Key", Size = UDim2.new(1, 0, 1, 0) },
+		Props = { Name = "Key", Size = UDim2.new(1, 0, 1, 0), ZIndex = 6 },
 	})
 	hotkeyLabel.Parent = hotkeyChip
 
@@ -1447,16 +1733,16 @@ function CloudUI.Slot(props)
 		BackgroundTransparency = 0,
 		AnchorPoint = Vector2.new(1, 0),
 		Position = UDim2.new(1, -4, 0, 4),
-		Size = UDim2.fromOffset(22, 22),
+		Size = UDim2.fromOffset(24, 24),
 		ZIndex = 5,
 		Visible = false,
 	}, button)
 	round(markerChip)
 	stroke(markerChip, NAVY, 2, 0)
 	local markerLabel = Theme.Label("", "Heading", {
-		Size = 14,
+		Size = 16,
 		Stroke = 0.2,
-		Props = { Name = "Mark", Size = UDim2.new(1, 0, 1, 0) },
+		Props = { Name = "Mark", Size = UDim2.new(1, 0, 1, 0), ZIndex = 6 },
 	})
 	markerLabel.Parent = markerChip
 
@@ -1488,8 +1774,10 @@ function CloudUI.Slot(props)
 		end
 		if not info then
 			fill.Color = ColorSequence.new(Color3.fromRGB(78, 108, 166), Color3.fromRGB(56, 82, 138))
+			gloss.BackgroundTransparency = 0.88
 			return
 		end
+		gloss.BackgroundTransparency = 0.72
 		local tint = rarity or info.Color or Colors.MistDeep
 		local top = Colors.Mist
 		local bottom = Colors.MistDeep:Lerp(tint, rarity and 0.55 or 0.35)
@@ -1540,21 +1828,26 @@ function CloudUI.Slot(props)
 					AnchorPoint = Vector2.new(0.5, 0.5),
 					Animate = hovering or selected,
 					Spin = "sway",
+					ZIndex = 2,
 				})
 			elseif info.Glyph then
+				local glyphColor = info.Color or NAVY
 				local glyph = Theme.Label(tostring(info.Glyph), "Title", {
 					Scaled = true,
 					Stroke = 0.1,
-					Color = info.Color or NAVY,
-					StrokeColor = Theme.Darken(info.Color or NAVY, 0.7),
+					Color = glyphColor,
+					StrokeColor = Theme.Darken(glyphColor, 0.7),
+					Outline = 2,
+					OutlineColor = Theme.Darken(glyphColor, 0.7),
 					Props = {
 						Name = "Glyph",
 						AnchorPoint = Vector2.new(0.5, 0.5),
 						Position = UDim2.new(0.5, 0, 0.46, 0),
 						Size = UDim2.new(0.62, 0, 0.62, 0),
+						ZIndex = 3,
 					},
 				})
-				Util.Create("UITextSizeConstraint", { MaxTextSize = 44, MinTextSize = 8, Parent = glyph })
+				Util.Create("UITextSizeConstraint", { MaxTextSize = 48, MinTextSize = 10, Parent = glyph })
 				glyph.Parent = content
 			end
 		end
@@ -1637,12 +1930,13 @@ end
 ----------------------------------------------------------------------
 -- Tabs
 ----------------------------------------------------------------------
--- props: Parent, Size, Position, AnchorPoint, Name, BarHeight, OnSelect(name)
+-- props: Parent, Size, Position, AnchorPoint, Name, BarHeight (default 44), TextSize (default 21), OnSelect(name)
 -- Add(name, builderFn): creates the page frame, calls builderFn(page) immediately (errors are
 -- warned, not thrown) and returns the page. The first tab added is selected.
 function CloudUI.Tabs(props)
 	props = props or {}
-	local barHeight = props.BarHeight or 38
+	local barHeight = props.BarHeight or 44
+	local textSize = props.TextSize or 21
 
 	local root = frame(props.Name or "CloudTabs", {
 		Size = props.Size or UDim2.new(1, 0, 1, 0),
@@ -1666,6 +1960,7 @@ function CloudUI.Tabs(props)
 
 	local pages = {}
 	local buttons = {}
+	local outlines = {}
 	local selected = nil
 	local count = 0
 
@@ -1685,6 +1980,12 @@ function CloudUI.Tabs(props)
 		else
 			button.BackgroundColor3 = face
 			button.TextColor3 = textColor
+		end
+		button.TextStrokeColor3 = Theme.Darken(face, 0.6)
+		local textOutline = outlines[name]
+		if textOutline then
+			textOutline.Color = Theme.Darken(face, 0.62)
+			textOutline.Transparency = on and 0 or 0.2
 		end
 	end
 
@@ -1723,13 +2024,14 @@ function CloudUI.Tabs(props)
 			Size = UDim2.new(0, 0, 0, barHeight - 4),
 			LayoutOrder = count,
 		})
-		Theme.Style(button, "Button", { Size = 18, Color = MUTED, Stroke = 0.1 })
+		Theme.Style(button, "Button", { Size = textSize, Color = MUTED, Stroke = 0.1 })
 		button.TextStrokeColor3 = Theme.Darken(idleFace, 0.6)
 		corner(button, 11)
 		stroke(button, NAVY, 3, 0)
+		outlines[name] = Theme.TextOutline(button, 2, Theme.Darken(idleFace, 0.62), 0.2)
 		gradient(button, FACE_SEQUENCE, 90)
-		padding(button, 18, 0, 18, UDim.new(0.16, 0))
-		Util.Create("UISizeConstraint", { MinSize = Vector2.new(72, 0), Parent = button })
+		padding(button, 20, 0, 20, UDim.new(0.16, 0))
+		Util.Create("UISizeConstraint", { MinSize = Vector2.new(84, 0), Parent = button })
 		button.Activated:Connect(function()
 			tabs.Select(name)
 		end)
@@ -1770,8 +2072,8 @@ end
 ----------------------------------------------------------------------
 -- cellSize: UDim2 | Vector2 | number; padding: number (px) | UDim2
 function CloudUI.Grid(parent, cellSize, cellPadding)
-	local cell = toUDim2(cellSize, UDim2.fromOffset(80, 80))
-	local pad = toUDim2(cellPadding, UDim2.fromOffset(8, 8))
+	local cell = toUDim2(cellSize, UDim2.fromOffset(84, 84))
+	local pad = toUDim2(cellPadding, UDim2.fromOffset(10, 10))
 
 	local scroll = Util.Create("ScrollingFrame", {
 		Name = "CloudGrid",
@@ -1781,11 +2083,11 @@ function CloudUI.Grid(parent, cellSize, cellPadding)
 		CanvasSize = UDim2.new(0, 0, 0, 0),
 		AutomaticCanvasSize = Enum.AutomaticSize.Y,
 		ScrollingDirection = Enum.ScrollingDirection.Y,
-		ScrollBarThickness = 8,
+		ScrollBarThickness = 10,
 		ScrollBarImageColor3 = Colors.FrameTop or Colors.Cloud,
-		ScrollBarImageTransparency = 0.1,
+		ScrollBarImageTransparency = 0.05,
 	})
-	padding(scroll, 8, 8, 8, 8)
+	padding(scroll, 10, 10, 10, 10)
 	Util.Create("UIGridLayout", {
 		Name = "Layout",
 		CellSize = cell,
