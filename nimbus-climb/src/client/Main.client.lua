@@ -17,6 +17,7 @@ local CONTROLLER_NAMES = {
 	"MenuController",
 	"HotbarController",
 	"PetController",
+	"TokenFx",
 }
 
 local TAG = "[NimbusClimb] "

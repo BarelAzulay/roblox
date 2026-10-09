@@ -277,6 +277,7 @@ Config.Tokens = {
 	DataStoreName = "NimbusClimb_v2",
 	LegacyDataStoreName = "NimbusClimb_v1", -- read once to migrate v1 saves ({Tokens=n})
 	AutosaveSeconds = 90,
+	ClientAnimated = true, -- the client controller TokenFx spins/bobs the coins; the server does not animate them
 }
 
 ----------------------------------------------------------------------
