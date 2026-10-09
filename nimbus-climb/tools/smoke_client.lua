@@ -3,6 +3,9 @@
 -- The client runs in its own Lua state with a fake LocalPlayer ("Tester", 4242). Server messages are
 -- delivered by firing OnClientEvent on the remotes; REPLICATION (if smoke.py ran the server world first)
 -- is the exact traffic the real server modules produced.
+-- v3: client_hud also drives the tutorial side panel (TutorialController) with TutorialState payloads; client_mobile
+-- checks the six-tile menu in its three layouts (labelled column, 2 x 3 grid on short landscape screens, icon-only
+-- column on narrow portrait screens).
 -- Plain Lua 5.1 syntax only.
 
 local T = SmokeCommon.T
@@ -169,6 +172,15 @@ local function ensureRemotes()
 	folder.Parent = ReplicatedStorage
 end
 
+local function descendantOf(root, name)
+	for _, d in ipairs(root:GetDescendants()) do
+		if d.Name == name then
+			return d
+		end
+	end
+	return nil
+end
+
 local function controllersFolder()
 	return Mock.GetPath(ROOTS["client"] .. "/Controllers")
 end
@@ -246,10 +258,23 @@ S.client_load = guarded("client_load", function()
 	Util = require(Mock.GetPath(ROOTS["shared"] .. "/Util"))
 	Theme = require(Mock.GetPath(ROOTS["shared"] .. "/Theme"))
 	ensureRemotes()
-	-- every controller loads and offers its API
+	-- every controller loads and offers its API (an optional one may be absent: Main skips it quietly)
+	local function findModule(key)
+		local inst = Mock.GetPath(ROOTS["client"])
+		for part in key:gsub("^client/", ""):gmatch("[^/]+") do
+			inst = inst and inst:FindFirstChild(part)
+		end
+		return inst
+	end
 	for key, spec in pairs(CONTRACT.modules) do
-		if key:find("^client/") then
-			local inst = Mock.GetPath(ROOTS["client"] .. "/" .. key:gsub("^client/", ""))
+		local inst = key:find("^client/") and findModule(key)
+		if key:find("^client/") and not inst then
+			if spec.optional then
+				T.info("*" .. key .. " is optional and not in this build yet")
+			else
+				T.fail(key .. " exists", "no ModuleScript at " .. key)
+			end
+		elseif key:find("^client/") then
 			local ok, result = pcall(require, inst)
 			if not ok then
 				T.fail(key .. " loads without errors", tostring(result))
@@ -487,6 +512,186 @@ end)
 ----------------------------------------------------------------------------------------------------
 -- scenario: HUD driven by server messages
 ----------------------------------------------------------------------------------------------------
+-- v3: the HUD currency stack (ARCHITECTURE_V3.md section 9): Cloud Tokens now (big abbreviated number), Cash and Gems
+-- rows appear by themselves once phase 2 sets those attributes.
+local function currencyChecks()
+	local hud = gui():FindFirstChild("NimbusHud")
+	local tokens = hud and descendantOf(hud, "Currency_Tokens")
+	if not T.check(tokens ~= nil and isShown(tokens), "HUD: the currency stack shows the Cloud Tokens row") then
+		return
+	end
+	local function row(id)
+		return descendantOf(hud, "Currency_" .. id)
+	end
+	local before = LocalPlayer:GetAttribute(Config.Attr.Tokens)
+	T.check((row("Cash") == nil or not isShown(row("Cash"))) and (row("Gems") == nil or not isShown(row("Gems"))), "HUD: Cash / Gems rows stay hidden while those attributes are unset (phase 1)")
+	LocalPlayer:SetAttribute(Config.Attr.Tokens, 1250000)
+	advance(2.5) -- the number counts up to the new balance
+	T.check(findText("1.25m", tokens) ~= nil, "HUD: a big balance is abbreviated (1,250,000 -> 1.25M)", allShownText():sub(1, 200))
+	LocalPlayer:SetAttribute(Config.Attr.Tokens, 8421)
+	advance(2.5)
+	T.check(findText("8,421", tokens) ~= nil, "HUD: a small balance is shown in full (8,421)")
+	local vp = Mock.Viewport
+	local vitals = hud:FindFirstChild("BottomLeft") and hud.BottomLeft:FindFirstChild("Vitals")
+	local cx = (tokens.AbsolutePosition.X + tokens.AbsoluteSize.X / 2) / vp.X
+	local cy = (tokens.AbsolutePosition.Y + tokens.AbsoluteSize.Y / 2) / vp.Y
+	T.check(cx < 0.45 and cy > 0.5 and (vitals == nil or tokens.AbsolutePosition.Y + tokens.AbsoluteSize.Y <= vitals.AbsolutePosition.Y + 1), "HUD: the currency stack sits bottom-left, above the HP bar", string.format("centre %.2f,%.2f", cx, cy))
+	LocalPlayer:SetAttribute(Config.Attr.Cash, 1500)
+	LocalPlayer:SetAttribute(Config.Attr.Gems, 12)
+	advance(0.8)
+	local cash, gems = row("Cash"), row("Gems")
+	T.check(cash ~= nil and isShown(cash) and findText("1,500", cash) ~= nil and gems ~= nil and isShown(gems) and findText("12", gems) ~= nil, "HUD: Cash / Gems rows appear once their attributes exist (phase 2 ready)")
+	LocalPlayer:SetAttribute(Config.Attr.Cash, nil)
+	LocalPlayer:SetAttribute(Config.Attr.Gems, nil)
+	LocalPlayer:SetAttribute(Config.Attr.Tokens, before)
+	advance(0.8)
+	T.check(not isShown(row("Cash")) and not isShown(row("Gems")), "HUD: ...and hide again when the attributes are removed")
+end
+
+-- v3: the tutorial side panel (TutorialController, ARCHITECTURE_V3.md section 4), fed with TutorialState payloads
+-- built from shared/TutorialSteps exactly like TutorialService builds them.
+local function tutorialPayload(Steps, index, over)
+	local step = Steps.Steps[index]
+	local text = step.Text:gsub("{GiftTokens}", tostring(Config.Tutorial.GiftTokens))
+	text = text:gsub("{FinishTokens}", tostring(Config.Tutorial.FinishReward.Tokens))
+	local st = {
+		Step = index, Total = #Steps.Steps, Id = step.Id, Title = step.Title, Text = text, Target = step.Target,
+		CompleteOn = step.CompleteOn, Hint = step.Hint, Button = step.Button, Gift = step.Gift == true,
+		Done = false, Completed = false, Skipped = false, Reward = 0,
+	}
+	for k, v in pairs(over or {}) do
+		st[k] = v
+	end
+	return st
+end
+
+local function tutorialClientChecks()
+	local TC = M.TutorialController
+	local Steps = require(Mock.GetPath(ROOTS["shared"] .. "/TutorialSteps"))
+	if not T.check(type(TC) == "table" and type(TC.GetState) == "function", "Tutorial panel: TutorialController loaded") then
+		return
+	end
+	local tol = CONTRACT.v2.centreTolerance
+	local vp = Mock.Viewport
+	local function events(from)
+		local out = {}
+		for _, e in ipairs(serverCalls("TutorialEvent", from)) do
+			out[#out + 1] = tostring(e.args[1])
+		end
+		return out
+	end
+	toClient("TutorialState", tutorialPayload(Steps, 1))
+	advance(5)
+	local tg = gui():FindFirstChild("NimbusTutorial")
+	local counter = tg and findText("step 1/" .. #Steps.Steps, tg)
+	T.check(tg ~= nil and counter ~= nil, "Tutorial panel: a TutorialState shows the side panel with 'Step 1/" .. #Steps.Steps .. "'", allShownText():sub(1, 300))
+	if not counter then
+		return
+	end
+	T.check(findText(Steps.Steps[1].Title:lower(), tg) ~= nil, "Tutorial panel: ...the step title")
+	T.check(findText(Steps.Steps[1].Text:sub(1, 24):lower(), tg) ~= nil, "Tutorial panel: ...and Nimbus' text")
+	local cx = (counter.AbsolutePosition.X + counter.AbsoluteSize.X / 2) / vp.X
+	T.check(cx < 0.4, "Tutorial panel: it sits on the left side", string.format("centre x %.2f", cx))
+	T.check(#centredTexts(tol) == 0, "Tutorial panel: nothing is shown in the middle of the screen", describeCentred(centredTexts(tol)))
+	if _G.KC and _G.KC.smallTexts then
+		local small, measured = _G.KC.smallTexts(15)
+		T.check(#small == 0 and measured > 0, "Tutorial panel: every text on screen is readable (>= 15 px at 1920x1080)", #small .. " of " .. measured .. " too small: " .. table.concat(small, "; ", 1, math.min(#small, 6)))
+	end
+	local portrait = tg:FindFirstChildWhichIsA("ViewportFrame", true)
+	T.check(portrait ~= nil and portrait:FindFirstChildWhichIsA("Model", true) ~= nil, "Tutorial panel: a ViewportFrame portrait of Nimbus (a PetBuilder model)")
+	-- Next fires TutorialEvent("Next") (the first press may only finish the typewriter)
+	local nextButton
+	for _, d in ipairs(tg:GetDescendants()) do
+		if d:IsA("TextButton") and d.Name == "Next" then
+			nextButton = d
+		end
+	end
+	local mark = #Mock.RemoteLog
+	if T.check(nextButton ~= nil and isShown(nextButton), "Tutorial panel: a Next button on a 'Next' step") then
+		Mock.Click(nextButton)
+		advance(0.4)
+		if #events(mark) == 0 then
+			Mock.Click(nextButton)
+			advance(0.4)
+		end
+	end
+	T.check(T.contains(events(mark), "Next"), "Tutorial panel: Next fires Remotes.TutorialEvent('Next')", table.concat(events(mark), ","))
+	-- the shop step: the Shop window opening is reported as ShopOpened
+	toClient("TutorialState", tutorialPayload(Steps, 3))
+	advance(2)
+	T.check(nextButton == nil or not isShown(nextButton), "Tutorial panel: no Next button while the step waits for an action")
+	mark = #Mock.RemoteLog
+	if M.MenuController then
+		M.MenuController.Open("Shop")
+		advance(0.6)
+		M.MenuController.Close()
+		advance(0.6)
+	end
+	T.check(T.contains(events(mark), "ShopOpened"), "Tutorial panel: opening the Shop sends TutorialEvent('ShopOpened')", table.concat(events(mark), ","))
+	-- a menu target: a pulsing ring around MenuButton_Pets
+	toClient("TutorialState", tutorialPayload(Steps, 5))
+	advance(2.5)
+	local pointer = gui():FindFirstChild("NimbusTutorialPointer")
+	local ring = pointer and pointer:FindFirstChild("Ring")
+	local petsButton
+	for _, d in ipairs(gui():GetDescendants()) do
+		if d.Name == "MenuButton_Pets" then
+			petsButton = d
+		end
+	end
+	if T.check(ring ~= nil and isShown(ring) and petsButton ~= nil, "Tutorial panel: a Menu target rings the menu button (NimbusTutorialPointer)") then
+		local rc = ring.AbsolutePosition + ring.AbsoluteSize / 2
+		local bc = petsButton.AbsolutePosition + petsButton.AbsoluteSize / 2
+		local function shift(inst)
+			local owner = inst:FindFirstAncestorOfClass("ScreenGui")
+			return (owner and owner.IgnoreGuiInset) and 0 or (Mock.TopInset or 0)
+		end
+		T.check((Vector2.new(rc.X, rc.Y + shift(ring)) - Vector2.new(bc.X, bc.Y + shift(petsButton))).Magnitude < 12, "Tutorial panel: ...centred on MenuButton_Pets", tostring(rc) .. " vs " .. tostring(bc))
+	end
+	-- a world target: a 3D arrow + dotted beam in workspace.ClientFx (client-side parts only)
+	local portalPos = Config.Lobby.Origin + Vector3.new(60, 0, 40)
+	toClient("TutorialState", tutorialPayload(Steps, 7, { Target = { Kind = "Portal", Id = "Easy", Label = "Easy Portal", Position = portalPos } }))
+	advance(2.5)
+	local fx = workspace:FindFirstChild("ClientFx")
+	local guide = fx and fx:FindFirstChild("TutorialGuide")
+	local beam = guide and guide:FindFirstChildWhichIsA("Beam", true)
+	local solid = 0
+	for _, d in ipairs(guide and guide:GetDescendants() or {}) do
+		if d:IsA("BasePart") and (d.CanCollide or d.CanTouch or d.CanQuery or not d.Anchored) then
+			solid = solid + 1
+		end
+	end
+	T.check(guide ~= nil and beam ~= nil and solid == 0, "Tutorial panel: a world target gets the guide arrow and a dotted Beam in workspace.ClientFx (visual only)", tostring(guide) .. " beam " .. tostring(beam) .. ", " .. solid .. " solid parts")
+	-- in a match only the 'finish' step stays on screen
+	LocalPlayer:SetAttribute("InMatch", true)
+	advance(1.5)
+	T.check(not isShown(counter), "Tutorial panel: hidden in a match (step 'portal')")
+	toClient("TutorialState", tutorialPayload(Steps, 8))
+	advance(2)
+	T.check(isShown(counter) and findText("step 8/", tg) ~= nil, "Tutorial panel: ...except the 'finish' step text", allShownText():sub(1, 200))
+	LocalPlayer:SetAttribute("InMatch", false)
+	advance(1)
+	-- Skip asks to confirm, then fires TutorialEvent('Skip')
+	local skipLink = descendantOf(tg, "SkipLink")
+	mark = #Mock.RemoteLog
+	if T.check(skipLink ~= nil and isShown(skipLink), "Tutorial panel: a small 'Skip tutorial' link") then
+		Mock.Click(skipLink)
+		advance(0.4)
+		T.check(not T.contains(events(mark), "Skip"), "Tutorial panel: Skip asks to confirm first", table.concat(events(mark), ","))
+		local yes = descendantOf(tg, "ConfirmSkip")
+		if yes then
+			Mock.Click(yes)
+			advance(0.4)
+		end
+		T.check(T.contains(events(mark), "Skip"), "Tutorial panel: confirming fires TutorialEvent('Skip')", table.concat(events(mark), ","))
+	end
+	-- done: the panel and the guides go away
+	toClient("TutorialState", tutorialPayload(Steps, 9, { Done = true, Skipped = true }))
+	advance(6)
+	T.check(not isShown(counter), "Tutorial panel: Done hides the panel")
+	T.check(guide == nil or guide.Parent == nil or not (beam and beam.Enabled), "Tutorial panel: ...and the world guide")
+end
+
 S.client_hud = guarded("client_hud", function()
 	if gui() == nil or gui():FindFirstChild("NimbusHud") == nil then
 		T.fail("skipped: there is no NimbusHud (HudController failed to start, see client_load)")
@@ -598,6 +803,8 @@ S.client_hud = guarded("client_hud", function()
 	T.check(findText("checkpoint 3/4") == nil, "MatchState(nil) hides the match panel", allShownText())
 	local lm2 = namedButton("LeaveMatch")
 	T.check(lm2 == nil or not isShown(lm2), "...and the Leave button")
+	currencyChecks()
+	tutorialClientChecks()
 	flushWarnings("client hud")
 	flushErrors("client hud")
 end)
@@ -1070,22 +1277,74 @@ S.client_mobile = guarded("client_mobile", function()
 						T.check(not overlaps(col, o), label .. ": the menu column does not cover " .. other[2], show(col) .. " vs " .. show(o))
 					end
 				end
-				-- MenuController: a vertical list of five equal entries with a 6 px gap, the whole column under one UIScale
-				-- and anchored (0, 0.5). Its size must be the sum of its (already scaled) entries plus the scaled gaps, once
-				-- (the mock used to apply the UIScale twice: 158 px instead of 219 on a 844x390 phone), and it must sit
-				-- vertically centred in the ScreenGui area.
-				local sum, count = 0, 0
+				-- MenuController (v3, ARCHITECTURE_V3.md section 9): six tiles under ONE UIScale, anchored (0, 0.5), laid out as
+				-- "Column" (labelled tiles in one column), "Grid" (labelled tiles, 2 x 3, short landscape screens) or "Compact"
+				-- (icon-only tiles in one column, narrow portrait screens). Its size must be the laid-out entries plus the scaled
+				-- gaps, scaled once (the mock used to apply the UIScale twice: 158 px instead of 219 on a 844x390 phone), and it
+				-- must sit vertically centred in the ScreenGui area.
+				local entries, sum = {}, 0
 				for _, entry in ipairs(menuColumn:GetChildren()) do
 					if entry:IsA("GuiObject") and entry.Name:find("^Entry_") then
+						entries[#entries + 1] = entry
 						sum = sum + entry.AbsoluteSize.Y
-						count = count + 1
 					end
 				end
+				local count = #entries
 				local colScale = menuColumn:FindFirstChildOfClass("UIScale")
 				local factor = colScale and colScale.Scale or 1
-				if T.check(count == 5, label .. ": the menu column has five entries", tostring(count)) then
-					local expected = sum + 6 * (count - 1) * factor
+				local gridLayout = menuColumn:FindFirstChildOfClass("UIGridLayout")
+				local xs, labelsShown = {}, 0
+				for _, entry in ipairs(entries) do
+					xs[math.floor(entry.AbsolutePosition.X + 0.5)] = true
+					for _, d in ipairs(entry:GetDescendants()) do
+						if d:IsA("TextLabel") and isShown(d) and tostring(d.Text):gsub("%s", "") ~= "" and d.AbsoluteSize.Y > 0 then
+							labelsShown = labelsShown + 1
+						end
+					end
+				end
+				local columns = 0
+				for _ in pairs(xs) do
+					columns = columns + 1
+				end
+				-- icon-only tiles are square (entry height == tile width); labelled tiles are taller than wide
+				local designH = count > 0 and entries[1].AbsoluteSize.Y / factor or 0
+				local designW = count > 0 and entries[1].AbsoluteSize.X / factor or 0
+				local mode = gridLayout and "Grid" or (designH < designW - 4 and "Compact" or "Column")
+				T.info("*" .. label .. ": menu layout " .. mode .. " (" .. columns .. " column(s), scale " .. fmt(factor, 2) .. ", entry " .. fmt(designW, 0) .. "x" .. fmt(designH, 0) .. " design px, " .. labelsShown .. " texts shown)")
+				if T.check(count == #CONTRACT.v3.menuEntries, label .. ": the menu column has six entries", tostring(count)) then
+					local expected
+					if gridLayout then
+						local rows = math.ceil(count / 2)
+						expected = (rows * gridLayout.CellSize.Y.Offset + (rows - 1) * gridLayout.CellPadding.Y.Offset) * factor
+						T.eq(columns, 2, label .. ": the grid layout is 2 x 3 (two columns)")
+					else
+						expected = sum + 6 * (count - 1) * factor
+						T.eq(columns, 1, label .. ": the list layouts keep one column")
+					end
 					T.check(math.abs(menuColumn.AbsoluteSize.Y - expected) <= 1.5, label .. ": the menu column height is its entries + gaps, scaled once", fmt(menuColumn.AbsoluteSize.Y, 1) .. " px vs " .. fmt(expected, 1))
+					if mode == "Compact" then
+						T.check(w < h, label .. ": icon-only tiles are used on portrait screens only")
+						local named = 0
+						for _, entry in ipairs(entries) do
+							local l = entry:FindFirstChild("Label", true)
+							if l and isShown(l) then
+								named = named + 1
+							end
+						end
+						T.eq(named, 0, label .. ": icon-only tiles hide their labels")
+					end
+					T.check(mode ~= "Grid" or w > h, label .. ": the 2 x 3 grid is used on landscape screens only")
+					if mode == "Column" or mode == "Grid" then
+						local smallest = math.huge
+						for _, entry in ipairs(entries) do
+							for _, d in ipairs(entry:GetDescendants()) do
+								if d:IsA("TextLabel") and isShown(d) and not d.TextScaled then
+									smallest = math.min(smallest, d.TextSize * factor)
+								end
+							end
+						end
+						T.check(smallest >= 14, label .. ": menu tile labels stay readable (>= 14 px on screen)", fmt(smallest, 1) .. " px")
+					end
 				end
 				local area = Mock.GuiLayerSize(menuColumn)
 				if area then

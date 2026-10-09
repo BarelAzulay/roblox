@@ -2,13 +2,16 @@
 -- tools/smoke.py after smoke_client.lua (which exports its helpers as the global KC):
 --   client_ui_kit      CloudUI: every constructor of the kit, chunky style, shared update loop
 --   client_state       State: ProfileSync mirror, defaults, sanitising, Changed / Tokens
---   client_menu        MenuController: 5 icon buttons, Inventory / Pets / Shop (roulettes + items) / Stats windows,
---                      the roulette spin + reveal, OpenPanel, Esc, one window at a time
+--   client_menu        MenuController: 6 icon tiles (v3), Inventory / Pets / Shop (roulettes + items) / Stats windows,
+--                      the roulette spin + reveal, OpenPanel, Esc, one window at a time; v3 Pet Index window
+--                      (IndexController: group tiles, ??? silhouettes, CLAIM -> IndexClaim, Unlocked: x/N, Stormfang art)
+--   client_pets        PetController: followers of every player (High / Low detail), culling, snapping, clean-up;
+--                      v3 NPC pets (NpcController idle + dialog through ProximityPromptService) and the sky dragon
 --   client_hotbar      HotbarController: 4 slots, keys 1-4, dimmed in the lobby, UseItem remote, cooldown
---   client_pets        PetController: followers of every player, culling, snapping, clean-up
 --   client_tokens      TokenFx: the client-side coin spin + bob (rates, amplitude, culling, release of collected coins)
 --   client_layout_rule NO text from the HUD / toasts / countdown / party / results / menu / hotbar in the middle of
---                      the screen at 1920x1080 (and, from client_mobile, at 390x844)
+--                      the screen at 1920x1080 (and, from client_mobile, at 390x844), and the v3 readability rule
+--                      (every text on screen >= 15 px at 1920x1080, >= 14 px on phones)
 -- Plain Lua 5.1 syntax only.
 
 local KC = _G.KC
@@ -510,6 +513,20 @@ S.client_state = guarded("client_state", function()
 	advance(0.1)
 	T.check(type(State.Get()) == "table", "a non-table ProfileSync is ignored")
 	conn:Disconnect()
+	-- v3 (ARCHITECTURE_V3.md section 1): the Pet Index + tutorial progress travel in the snapshot
+	toClient("ProfileSync", snapshot({ Discovered = { pebble_pup = true, eclipse_dragon = true, junk = "yes" }, IndexClaimed = { Common = true, Rare = false }, Tutorial = { Step = 4, Done = false, Gifted = true } }))
+	advance(0.1)
+	T.check(State.IsDiscovered("pebble_pup") and State.IsDiscovered("eclipse_dragon"), "v3: State.IsDiscovered reads Discovered")
+	T.check(State.IsDiscovered("biscuit_bear"), "v3: ...an owned pet always counts as discovered")
+	T.check(not State.IsDiscovered("starlight_unicorn") and not State.IsDiscovered("junk") and not State.IsDiscovered(nil), "v3: ...undiscovered ids and junk values do not")
+	T.check(State.IsClaimed("Common") and not State.IsClaimed("Rare") and not State.IsClaimed("Epic") and not State.IsClaimed(nil), "v3: State.IsClaimed reads IndexClaimed (true entries only)")
+	if type(State.Tutorial) == "function" then
+		local tut = State.Tutorial()
+		T.check(type(tut) == "table" and tut.Step == 4 and tut.Gifted == true and tut.Done == false, "v3: State.Tutorial() mirrors the saved tutorial progress")
+	end
+	toClient("ProfileSync", snapshot({ Discovered = "lots", IndexClaimed = 5, Tutorial = "x" }))
+	advance(0.1)
+	T.check(not State.IsDiscovered("eclipse_dragon") and not State.IsClaimed("Common"), "v3: messy Discovered / IndexClaimed values are sanitised to empty sets")
 	-- no more retries after the first snapshot
 	local requests = #serverCalls("RequestProfile")
 	advance(40)
@@ -548,6 +565,165 @@ local function clickEntry(name)
 	return button
 end
 
+-- v3: the Pet Index window (IndexController, ARCHITECTURE_V3.md sections 3, 10 and 11), opened from the menu tile.
+local function indexWindowChecks(PetCatalog)
+	local Config = env()
+	local Index, Menu = M.IndexController, M.MenuController
+	if not T.check(type(Index) == "table" and type(Index.Open) == "function", "Pet Index: IndexController loaded") then
+		return
+	end
+	local commons = PetCatalog.ListByRarity("Common")
+	local discovered = {}
+	for _, def in ipairs(commons) do
+		discovered[def.Id] = true
+	end
+	local mythics = PetCatalog.ListByRarity("Mythic")
+	local hidden -- an undiscovered Mythic
+	for _, def in ipairs(mythics) do
+		if def.Id ~= CONTRACT.v2.mascotPetId then
+			hidden = def
+		end
+	end
+	-- every Common discovered (claimable), the mascot owned (discovered), the other Mythic not
+	feed({ Discovered = discovered, IndexClaimed = {} })
+	local opened = {}
+	local conn = Menu and Menu.WindowOpened and Menu.WindowOpened:Connect(function(id)
+		opened[#opened + 1] = id
+	end)
+	clickEntry("Index")
+	advance(1.2)
+	local indexGui = gui():FindFirstChild("NimbusIndex")
+	local window = indexGui and descendantNamed(indexGui, "Window_Index")
+	T.check(Index.IsOpen and Index.IsOpen() and window ~= nil and isShown(window), "Pet Index: the Index tile opens the Pet Index window (ScreenGui NimbusIndex)")
+	T.check(T.contains(opened, "Index"), "Pet Index: ...and MenuController.WindowOpened fires 'Index' (the tutorial listens)", table.concat(opened, ","))
+	T.eq(#visibleWindows(), 0, "Pet Index: ...and no menu window is open behind it")
+	if not window then
+		if conn then
+			conn:Disconnect()
+		end
+		return
+	end
+	T.check(findText("pet index", window) ~= nil, "Pet Index: the window is titled 'Pet Index'")
+	do
+		local small, measured = KC.smallTexts(15)
+		T.check(#small == 0 and measured > 0, "Pet Index: every text on screen is readable (>= 15 px at 1920x1080)", #small .. " of " .. measured .. " too small: " .. table.concat(small, "; ", 1, math.min(#small, 6)))
+	end
+	-- one group tile per rarity group with its x/N progress
+	local groups = PetCatalog.IndexGroups()
+	local tilesOk, missing = true, {}
+	for _, group in ipairs(groups) do
+		local tile = descendantNamed(window, "Group_" .. group.Id)
+		local found = 0
+		for _, def in ipairs(group.Pets) do
+			if discovered[def.Id] or def.Id == CONTRACT.v2.mascotPetId or def.Id == "pebble_pup" or def.Id == "biscuit_bear" then
+				found = found + 1
+			end
+		end
+		local want = found .. "/" .. #group.Pets
+		if not tile or findText(want, tile) == nil then
+			tilesOk = false
+			missing[#missing + 1] = group.Id .. " (" .. want .. ")"
+		end
+	end
+	T.check(tilesOk, "Pet Index: a group tile per rarity (Group_<Id>) showing 'found/N'", table.concat(missing, ", "))
+	local total = PetCatalog.TotalCount()
+	local unlocked = 0
+	for _, def in ipairs(PetCatalog.Pets) do
+		if discovered[def.Id] or def.Id == CONTRACT.v2.mascotPetId or def.Id == "pebble_pup" or def.Id == "biscuit_bear" then
+			unlocked = unlocked + 1
+		end
+	end
+	T.check(findText("unlocked: " .. unlocked .. "/" .. total, window) ~= nil, "Pet Index: the footer reads 'Unlocked: " .. unlocked .. "/" .. total .. "' (every pet in the catalog)", allShownText():sub(1, 300))
+	-- the Mythic group: the mascot is shown by name, the undiscovered Mythic is a black ??? silhouette
+	Index.Open("Mythic")
+	advance(1.5)
+	local mascotTile = descendantNamed(window, "IndexPet_" .. CONTRACT.v2.mascotPetId)
+	T.check(mascotTile ~= nil and findText(PetCatalog.Get(CONTRACT.v2.mascotPetId).Name:lower(), mascotTile) ~= nil, "Pet Index: a discovered pet's tile shows its name")
+	if hidden then
+		local tile = descendantNamed(window, "IndexPet_" .. hidden.Id)
+		local vp = tile and tile:FindFirstChildWhichIsA("ViewportFrame", true)
+		T.check(tile ~= nil and findText("???", tile) ~= nil and findText(hidden.Name:lower(), tile) == nil, "Pet Index: an undiscovered pet's tile reads '???' (no name)")
+		T.check(vp ~= nil and vp.ImageColor3.R == 0 and vp.ImageColor3.G == 0 and vp.ImageColor3.B == 0, "Pet Index: ...over a black silhouette (ViewportFrame.ImageColor3 = 0, 0, 0)", vp and tostring(vp.ImageColor3) or "no viewport")
+	end
+	local mascotVp = mascotTile and mascotTile:FindFirstChildWhichIsA("ViewportFrame", true)
+	T.check(mascotVp ~= nil and mascotVp.ImageColor3.R > 0.9, "Pet Index: discovered pets are drawn in colour")
+	-- the claim button: grey for an incomplete group, green CLAIM for a complete one, 'Claimed' when done
+	local claim = descendantNamed(window, "Claim")
+	local before = #serverCalls("IndexClaim")
+	if claim then
+		Mock.Click(claim)
+		advance(0.3)
+	end
+	T.eq(#serverCalls("IndexClaim"), before, "Pet Index: CLAIM on an incomplete group sends nothing")
+	Index.Open("Common")
+	advance(1)
+	claim = descendantNamed(window, "Claim")
+	T.check(claim ~= nil and isShown(claim) and tostring(claim.Text):upper():find("CLAIM") ~= nil, "Pet Index: a complete group offers CLAIM", claim and claim.Text or "no button")
+	T.check(hasNumber(window, Config.Index.Rewards.Common.Tokens), "Pet Index: the rewards box shows the Config.Index reward (" .. Config.Index.Rewards.Common.Tokens .. ")")
+	advance(0.7)
+	if claim then
+		Mock.Click(claim)
+		advance(0.3)
+	end
+	local calls = callsAfter("IndexClaim", before)
+	T.check(#calls == 1 and calls[1].args[1] == "Common", "Pet Index: CLAIM fires Remotes.IndexClaim('Common')", #calls .. " calls")
+	if claim then
+		Mock.Click(claim)
+		advance(0.2)
+	end
+	T.eq(#callsAfter("IndexClaim", before), 1, "Pet Index: ...once (no double send while the server answers)")
+	feed({ Discovered = discovered, IndexClaimed = { Common = true } })
+	advance(0.5)
+	claim = descendantNamed(window, "Claim")
+	T.check(claim ~= nil and tostring(claim.Text):lower():find("claimed") ~= nil, "Pet Index: after the server confirms, the button reads 'Claimed'", claim and claim.Text or "")
+	-- Stormfang's 2D art banner (Config.Art.StormfangImage) once discovered (ARCHITECTURE_V3.md section 10)
+	local storm = PetCatalog.Get(CONTRACT.v3.stormfang.petId)
+	if storm then
+		local function bannerShown()
+			for _, d in ipairs(window:GetDescendants()) do
+				if (d:IsA("ImageLabel") or d:IsA("ImageButton")) and d.Image == Config.Art.StormfangImage and isShown(d) then
+					return true
+				end
+			end
+			return false
+		end
+		Index.Open(storm.Rarity)
+		advance(1)
+		local tile = descendantNamed(window, "IndexPet_" .. storm.Id)
+		local pick = tile and (tile:IsA("GuiButton") and tile or tile:FindFirstChildWhichIsA("TextButton", true) or tile:FindFirstChildWhichIsA("ImageButton", true))
+		if pick then
+			Mock.Click(pick)
+			advance(0.5)
+		end
+		T.check(not bannerShown(), "Pet Index: Stormfang's art banner stays hidden while it is undiscovered")
+		local disc = {}
+		for k, v in pairs(discovered) do
+			disc[k] = v
+		end
+		disc[storm.Id] = true
+		feed({ Discovered = disc, IndexClaimed = { Common = true } })
+		advance(0.5)
+		if pick then
+			Mock.Click(pick)
+			advance(0.5)
+		end
+		T.check(bannerShown(), "Pet Index: once discovered, Stormfang's detail card shows the player's art (Config.Art.StormfangImage)")
+	end
+	-- Esc closes; OpenPanel("Index") opens it again
+	press("Escape")
+	advance(0.6)
+	T.check(not Index.IsOpen(), "Pet Index: Esc closes the window")
+	toClient("OpenPanel", "Index", nil)
+	advance(0.8)
+	T.check(Index.IsOpen(), "Pet Index: OpenPanel('Index') opens it")
+	press("Escape")
+	advance(0.6)
+	if conn then
+		conn:Disconnect()
+	end
+	feed()
+end
+
 S.client_menu = guarded("client_menu", function()
 	local Config, Util, Theme = env()
 	local PetCatalog = require(Mock.GetPath(ROOTS["shared"] .. "/PetCatalog"))
@@ -564,12 +740,26 @@ S.client_menu = guarded("client_menu", function()
 	-- the column
 	local column = menu:FindFirstChild("MenuColumn")
 	if T.check(column ~= nil, "the menu column exists") then
-		local names = { "Inventory", "Pets", "Shop", "Spot", "Stats" }
+		-- v3 (ARCHITECTURE_V3.md section 9): six icon tiles, MenuButton_<Id> inside Entry_<Id>
+		local names = CONTRACT.v3.menuEntries
 		local entries = {}
+		local present, buttonsOk = 0, true
 		for _, n in ipairs(names) do
 			entries[n] = column:FindFirstChild("Entry_" .. n)
+			if entries[n] then
+				present = present + 1
+				local b = entries[n]:FindFirstChild("MenuButton_" .. n, true)
+				buttonsOk = buttonsOk and b ~= nil and b:IsA("TextButton")
+			end
 		end
-		T.check(entries.Inventory and entries.Pets and entries.Shop and entries.Spot and entries.Stats, "...with five entries: Inventory, Pets, Shop, Spot, Stats")
+		local extra = 0
+		for _, c in ipairs(column:GetChildren()) do
+			if c.Name:find("^Entry_") then
+				extra = extra + 1
+			end
+		end
+		T.check(present == #names and extra == #names, "...with six entries: " .. table.concat(names, ", "), present .. " of " .. #names .. " found, " .. extra .. " entries in total")
+		T.check(buttonsOk, "...each tile is a TextButton named MenuButton_<Id> (the tutorial rings it)")
 		local ordered = true
 		for i = 2, #names do
 			if entries[names[i]] and entries[names[i - 1]] and entries[names[i]].AbsolutePosition.Y <= entries[names[i - 1]].AbsolutePosition.Y then
@@ -583,7 +773,7 @@ S.client_menu = guarded("client_menu", function()
 		T.check(cy > vp.Y * 0.3 and cy < vp.Y * 0.7, "...vertically centred ('left-centre')", string.format("centre y %.2f of the screen", cy / vp.Y))
 		for _, n in ipairs(names) do
 			local b = entries[n] and entries[n]:FindFirstChildWhichIsA("TextButton", true)
-			T.check(b ~= nil and b.AbsoluteSize.X >= 44 and abs(b.AbsoluteSize.X - b.AbsoluteSize.Y) < 3, "Entry_" .. n .. " is a round icon button (>= 44 px)", b and tostring(b.AbsoluteSize) or "no button")
+			T.check(b ~= nil and b.AbsoluteSize.X >= 44 and abs(b.AbsoluteSize.X - b.AbsoluteSize.Y) < 3, "Entry_" .. n .. " is a square icon tile (>= 44 px)", b and tostring(b.AbsoluteSize) or "no button")
 		end
 	end
 	T.eq(#visibleWindows(), 0, "no window is open at rest")
@@ -593,6 +783,10 @@ S.client_menu = guarded("client_menu", function()
 	T.eq(table.concat(visibleWindows(), ","), "Window_Inventory", "the Pets button opens the Inventory window")
 	local inv = windowOf("Window_Inventory")
 	if inv and inv.Visible then
+		do
+			local small, measured = KC.smallTexts(15)
+			T.check(#small == 0 and measured > 0, "Inventory window: every text on screen is readable (>= 15 px at 1920x1080)", #small .. " of " .. measured .. " too small: " .. table.concat(small, "; ", 1, math.min(#small, 6)))
+		end
 		local cxw = inv.AbsolutePosition.X + inv.AbsoluteSize.X / 2
 		local cyw = inv.AbsolutePosition.Y + inv.AbsoluteSize.Y / 2
 		T.check(abs(cxw - vp.X / 2) < vp.X * 0.05 and abs(cyw - vp.Y / 2) < vp.Y * 0.1, "windows open centred on the screen", string.format("centre %.2f,%.2f", cxw / vp.X, cyw / vp.Y))
@@ -708,6 +902,10 @@ S.client_menu = guarded("client_menu", function()
 	clickEntry("Stats")
 	local stats = windowOf("Window_Stats")
 	if stats and stats.Visible then
+		do
+			local small, measured = KC.smallTexts(15)
+			T.check(#small == 0 and measured > 0, "Stats window: every text on screen is readable (>= 15 px at 1920x1080)", #small .. " of " .. measured .. " too small: " .. table.concat(small, "; ", 1, math.min(#small, 6)))
+		end
 		local function tile(name)
 			local t = descendantNamed(stats, "Tile_" .. name)
 			local v = t and t:FindFirstChild("Value")
@@ -718,7 +916,8 @@ S.client_menu = guarded("client_menu", function()
 		T.eq(tile("WinRate"), "58%", "Stats: win rate (7 of 12)")
 		T.check(tostring(tile("Earned")):find("900") ~= nil, "Stats: tokens earned", tostring(tile("Earned")))
 		T.eq(tile("Spins"), "5", "Stats: roulette spins")
-		T.check(tostring(tile("Found")):find("3") ~= nil and tostring(tile("Found")):find("26") ~= nil, "Stats: pets discovered 3 / 26", tostring(tile("Found")))
+		local total = PetCatalog.TotalCount()
+		T.check(tostring(tile("Found")):find("3") ~= nil and tostring(tile("Found")):find(tostring(total)) ~= nil, "Stats: pets discovered 3 / " .. total .. " (PetCatalog.TotalCount())", tostring(tile("Found")))
 		for _, diff in ipairs(Config.Difficulties) do
 			T.check(descendantNamed(stats, "Row_" .. diff.Id) ~= nil, "Stats: a best-time row for " .. diff.Id)
 		end
@@ -727,6 +926,9 @@ S.client_menu = guarded("client_menu", function()
 	end
 	press("Escape")
 	advance(0.5)
+
+	-- v3: the Pet Index window
+	indexWindowChecks(PetCatalog)
 
 	-- Spot button
 	local mark = #serverCalls("GoToSpot")
@@ -739,6 +941,10 @@ S.client_menu = guarded("client_menu", function()
 	local shop = windowOf("Window_Shop")
 	if shop and shop.Visible then
 		T.check(findText("cloud shop", shop) ~= nil, "the Shop window is titled 'Cloud Shop'")
+		do
+			local small, measured = KC.smallTexts(15)
+			T.check(#small == 0 and measured > 0, "Shop window: every text on screen is readable (>= 15 px at 1920x1080)", #small .. " of " .. measured .. " too small: " .. table.concat(small, "; ", 1, math.min(#small, 6)))
+		end
 		T.check(findText("☁ 600", shop) ~= nil or findText("600", shop) ~= nil, "...and shows the token balance", allShownText())
 		local cards = {}
 		for _, r in ipairs(Config.Roulettes) do
@@ -1083,6 +1289,193 @@ end)
 ----------------------------------------------------------------------------------------------------
 -- scenario: pet followers
 ----------------------------------------------------------------------------------------------------
+-- v3: the NPC pets on this client (NpcController, ARCHITECTURE_V3.md section 5). The client world has no server, so the
+-- real NpcService builds the six NPCs here, standing in for replication; then the controller idles them and shows the
+-- dialog when the local player triggers a Talk prompt (ProximityPromptService.PromptTriggered).
+local function npcClientChecks()
+	local Config = env()
+	local NC = M.NpcController
+	local ND = require(Mock.GetPath(ROOTS["shared"] .. "/NpcDialog"))
+	local services = Mock.GetPath(ROOTS["server"]):FindFirstChild("Services")
+	local npcModule = services and services:FindFirstChild("NpcService")
+	if not T.check(type(NC) == "table" and type(NC.Open) == "function" and npcModule ~= nil, "NPC: NpcController loaded and NpcService available to build the NPCs") then
+		return
+	end
+	local NS = require(npcModule)
+	local here = Config.Lobby.Origin + Vector3.new(0, 3, 0)
+	local spots = {}
+	for i = 1, CONTRACT.v3.npcCount do
+		local a = (i - 1) * math.pi * 2 / CONTRACT.v3.npcCount
+		local pos = Config.Lobby.Origin + Vector3.new(math.cos(a) * 30, 0, math.sin(a) * 30)
+		spots[i] = CFrame.lookAt(pos, Vector3.new(Config.Lobby.Origin.X, pos.Y, Config.Lobby.Origin.Z))
+	end
+	Mock.Teleport(LocalPlayer, here)
+	local cam = workspace.CurrentCamera
+	cam.CFrame = CFrame.lookAt(here + Vector3.new(0, 12, 40), here)
+	NS.Init({ NpcSpots = spots })
+	advance(2)
+	local holder = workspace:FindFirstChild("NimbusNpcs")
+	local first = ND.Npcs[1]
+	local model = holder and holder:FindFirstChild("Npc_" .. first.Id)
+	if not T.check(model ~= nil, "NPC: the six NPC models exist on the client") then
+		return
+	end
+	-- idle: the client bobs / turns the pet (the server never moves it)
+	local pet = model:FindFirstChild("Pet")
+	local root = pet and pet.PrimaryPart
+	Mock.Teleport(LocalPlayer, spots[1].Position + spots[1].LookVector * 7 + Vector3.new(0, 3, 0))
+	advance(0.5)
+	local positions = {}
+	for i = 1, 20 do
+		advance(0.1)
+		positions[i] = root and root.CFrame or CFrame.new()
+	end
+	local moved = 0
+	for i = 2, #positions do
+		moved = math.max(moved, (positions[i].Position - positions[1].Position).Magnitude, (positions[i].LookVector - positions[1].LookVector).Magnitude)
+	end
+	T.check(root ~= nil and moved > 0.02 and moved < 3, "NPC: the client idles the NPC pet (gentle bob / turn)", "moved " .. fmt(moved, 3))
+	-- the dialog: triggered by the local player through ProximityPromptService.PromptTriggered
+	local prompt = model:FindFirstChildWhichIsA("ProximityPrompt", true)
+	local other = Mock.AddPlayer("Stranger", 6101)
+	advance(0.5)
+	if prompt then
+		Mock.Trigger(prompt, other)
+		advance(0.5)
+	end
+	T.check(not NC.IsOpen(), "NPC: another player's prompt does not open the local dialog")
+	if prompt then
+		Mock.Trigger(prompt, LocalPlayer)
+		advance(0.5)
+	end
+	local open, openId = NC.IsOpen()
+	T.check(open == true and openId == first.Id, "NPC: triggering the Talk prompt opens the NPC's dialog", tostring(openId))
+	local dlg = gui():FindFirstChild("NimbusNpcDialog")
+	local line = dlg and descendantNamed(dlg, "Line")
+	advance(6) -- let the typewriter finish
+	local function shownLine()
+		return line and (tostring(line.Text):gsub("<[^>]*>", "")) or ""
+	end
+	T.check(dlg ~= nil and findText(first.Name:lower(), dlg) ~= nil, "NPC: the dialog shows the NPC's name", dlg and allShownText():sub(1, 200) or "no dialog gui")
+	T.check(shownLine():find(first.Lines[1]:sub(1, 24), 1, true) ~= nil, "NPC: ...and its first line", shownLine())
+	-- a side card at the bottom-left, never in the middle of the screen
+	local card = line
+	while card and card.Parent and card.Parent:IsA("GuiObject") do
+		card = card.Parent
+	end
+	if card and card:IsA("GuiObject") then
+		local vp = Mock.Viewport
+		local cx = (card.AbsolutePosition.X + card.AbsoluteSize.X / 2) / vp.X
+		local cy = (card.AbsolutePosition.Y + card.AbsoluteSize.Y / 2) / vp.Y
+		T.check(cx < 0.45 and cy > 0.5, "NPC: the dialog is a side card at the bottom-left", string.format("centre %.2f,%.2f", cx, cy))
+	end
+	T.check(#centredTexts(CONTRACT.v2.centreTolerance) == 0, "NPC: nothing is shown in the middle of the screen while talking", describeCentred(centredTexts(CONTRACT.v2.centreTolerance)))
+	do
+		local small, measured = KC.smallTexts(15)
+		T.check(#small == 0 and measured > 0, "NPC dialog: every text on screen is readable (>= 15 px at 1920x1080)", #small .. " of " .. measured .. " too small: " .. table.concat(small, "; ", 1, math.min(#small, 6)))
+	end
+	-- Next: the next line, cycling back to the first
+	local nextButton = dlg and descendantNamed(dlg, "Button_Next")
+	if nextButton then
+		Mock.Click(nextButton)
+	else
+		NC.Advance()
+	end
+	advance(6)
+	T.check(shownLine():find(first.Lines[2]:sub(1, 24), 1, true) ~= nil, "NPC: Next shows the second line", shownLine())
+	for _ = 2, #first.Lines do
+		NC.Advance()
+		advance(6)
+	end
+	T.check(shownLine():find(first.Lines[1]:sub(1, 24), 1, true) ~= nil, "NPC: after the last line Next starts over", shownLine())
+	-- Close, and walking away closes it too
+	local closeButton = dlg and descendantNamed(dlg, "Button_Close")
+	if closeButton then
+		Mock.Click(closeButton)
+	else
+		NC.Close()
+	end
+	advance(0.8)
+	T.check(not NC.IsOpen(), "NPC: Close closes the dialog")
+	NC.Open(first.Id)
+	advance(0.5)
+	T.check(NC.IsOpen(), "NPC: NpcController.Open(npcId) opens it again")
+	Mock.Teleport(LocalPlayer, spots[1].Position + spots[1].LookVector * 60 + Vector3.new(0, 3, 0))
+	advance(1.5)
+	T.check(not NC.IsOpen(), "NPC: walking away closes the dialog")
+	Mock.RemovePlayer(other)
+	if holder then
+		holder:Destroy()
+	end
+	advance(1)
+	Mock.Teleport(LocalPlayer, Vector3.new(0, 20, 0))
+	cam.CFrame = CFrame.new()
+	advance(0.5)
+end
+
+-- v3: the Sage Dragon in the sky (SkyDragonController, ARCHITECTURE_V3.md section 7 + ART DIRECTION).
+local function skyDragonChecks()
+	local Config = env()
+	local SD = M.SkyDragonController
+	if not T.check(type(SD) == "table" and type(SD.GetModel) == "function", "Sky dragon: SkyDragonController loaded (GetModel)") then
+		return
+	end
+	local cam = workspace.CurrentCamera
+	cam.CFrame = CFrame.lookAt(Config.Lobby.Origin + Vector3.new(0, 20, 80), Config.Lobby.Origin)
+	advance(1)
+	local model = SD.GetModel()
+	local fx = workspace:FindFirstChild("ClientFx")
+	if not T.check(model ~= nil and model:IsA("Model") and fx ~= nil and model:IsDescendantOf(fx), "Sky dragon: the dragon Model lives in workspace.ClientFx") then
+		return
+	end
+	local parts = {}
+	local flagsOk = true
+	for _, d in ipairs(model:GetDescendants()) do
+		if d:IsA("BasePart") then
+			parts[#parts + 1] = d
+			flagsOk = flagsOk and d.Anchored and not d.CanCollide and not d.CanTouch and not d.CanQuery and not d.CastShadow
+		end
+	end
+	T.check(#parts <= CONTRACT.v3.partBudget.skyDragon and #parts >= 60, "Sky dragon: built within ~" .. CONTRACT.v3.partBudget.skyDragon .. " parts", #parts .. " parts")
+	T.check(flagsOk, "Sky dragon: every part is anchored with collisions, touches, queries and shadows off")
+	local function centre()
+		local sum = Vector3.new(0, 0, 0)
+		for _, p in ipairs(parts) do
+			sum = sum + p.Position
+		end
+		return sum / math.max(1, #parts)
+	end
+	local instances = Mock.CountDescendants(model)
+	local bulk0 = Mock.BulkMoves or 0
+	local c0 = centre()
+	local track, minH, maxH = 0, huge, -huge
+	local last = c0
+	for _ = 1, 40 do
+		advance(0.25)
+		local c = centre()
+		track = track + (c - last).Magnitude
+		last = c
+		local h = c.Y - Config.Lobby.Origin.Y
+		minH, maxH = min(minH, h), max(maxH, h)
+	end
+	T.check(track > 40, "Sky dragon: it flies (the body travels " .. fmt(track, 0) .. " studs in 10 s)")
+	T.check(minH >= 90 and maxH <= 280, "Sky dragon: high above the lobby (120-240 studs, the body's centre at " .. fmt(minH, 0) .. "-" .. fmt(maxH, 0) .. ")")
+	T.check(SD.IsPaused == nil or SD.IsPaused() == false, "Sky dragon: not paused while the camera is at the lobby")
+	T.eq(Mock.CountDescendants(model), instances, "Sky dragon: no instances are created while it flies")
+	T.check((Mock.BulkMoves or 0) > bulk0, "Sky dragon: the parts are moved with workspace:BulkMoveTo", tostring((Mock.BulkMoves or 0) - bulk0) .. " calls")
+	-- frozen when the camera is far away (the player is in a match)
+	cam.CFrame = CFrame.new(Config.Match.ArenaOrigin + Vector3.new(0, 20, 0))
+	advance(0.5)
+	local frozen = centre()
+	advance(2)
+	T.check((centre() - frozen).Magnitude < 0.01, "Sky dragon: frozen while the camera is far from the lobby")
+	if SD.IsPaused then
+		T.eq(SD.IsPaused(), true, "Sky dragon: IsPaused() reports it")
+	end
+	cam.CFrame = CFrame.new()
+	advance(0.5)
+end
+
 S.client_pets = guarded("client_pets", function()
 	local Config = env()
 	local PC = require(Mock.GetPath(ROOTS["shared"] .. "/PetCatalog"))
@@ -1204,6 +1597,22 @@ S.client_pets = guarded("client_pets", function()
 	other:SetAttribute("EquippedPets", pup .. "," .. dragon)
 	advance(2.0)
 	T.eq(#modelsOf(other), 2, "another player's pets are drawn too (EquippedPets of every player)")
+	-- v3 level of detail: your own pets are High detail, other players' followers Low (ARCHITECTURE_V3.md ART DIRECTION)
+	do
+		local lowOk, highOk, detail = true, true, {}
+		for _, m in ipairs(modelsOf(other)) do
+			local n = Mock.CountDescendants(m, "BasePart")
+			detail[#detail + 1] = "other " .. n
+			lowOk = lowOk and n <= CONTRACT.v3.partBudget.petLow
+		end
+		for _, m in ipairs(modelsOf(LocalPlayer)) do
+			local n = Mock.CountDescendants(m, "BasePart")
+			detail[#detail + 1] = "mine " .. n
+			highOk = highOk and n > CONTRACT.v3.partBudget.petLow and n <= CONTRACT.v3.partBudget.petHigh
+		end
+		T.check(lowOk, "other players' followers use PetBuilder Detail Low (<= " .. CONTRACT.v3.partBudget.petLow .. " parts each)", table.concat(detail, ", "))
+		T.check(highOk, "the local player's own pets use Detail High (<= " .. CONTRACT.v3.partBudget.petHigh .. " parts)", table.concat(detail, ", "))
+	end
 	Mock.Teleport(other, myRoot().Position + Vector3.new(400, 0, 0))
 	advance(2.0)
 	T.eq(#modelsOf(other), 0, "...but only within ~150 studs: far players' pets are culled")
@@ -1235,6 +1644,8 @@ S.client_pets = guarded("client_pets", function()
 	advance(1.0)
 	Mock.Teleport(LocalPlayer, Vector3.new(0, 20, 0))
 	advance(0.5)
+	npcClientChecks()
+	skyDragonChecks()
 	flushErrors("client_pets")
 	flushWarnings("client_pets")
 end)
@@ -1388,6 +1799,28 @@ S.client_tokens = guarded("client_tokens", function()
 		local others = late[4].CFrame
 		advance(0.3)
 		T.check(late[4].CFrame ~= others, "destroying a coin does not stop the others")
+
+		-- v3: the soft Halo (an anchored, unwelded child of the coin, built by TokenService) bobs WITH the coin
+		local haloCoin = makeCoin(Vector3.new(12, 0, -12), false, 0.3)
+		local halo = Instance.new("Part")
+		halo.Name = "Halo"
+		halo.Shape = Enum.PartType.Ball
+		halo.Anchored = true
+		halo.CanCollide = false
+		halo.Size = Vector3.new(3, 3, 3)
+		halo.Transparency = 0.8
+		halo.CFrame = CFrame.new(haloCoin.Position)
+		halo.Parent = haloCoin
+		advance(1)
+		local offset0 = halo.Position - haloCoin.Position
+		local worst, bobbed = 0, 0
+		local y0 = haloCoin.Position.Y
+		for _ = 1, 45 do
+			advance(1 / 30)
+			worst = math.max(worst, ((halo.Position - haloCoin.Position) - offset0).Magnitude)
+			bobbed = math.max(bobbed, math.abs(haloCoin.Position.Y - y0))
+		end
+		T.check(bobbed > 0.1 and worst < 0.02, "the coin's Halo moves with the coin (it never stays behind)", "coin bobbed " .. fmt(bobbed, 2) .. ", halo offset changed by " .. fmt(worst, 3))
 	end
 
 	holder:Destroy()
@@ -1419,13 +1852,44 @@ local function scaleOf(inst)
 	return scale
 end
 
+-- ARCHITECTURE_V3.md readability rule: text on screen never shrinks below `floor` px (TextSize x every UIScale above it).
+-- Returns the offenders as "path (size px) 'text'" strings, smallest first, and the number of texts measured.
+local function smallTexts(floorPx)
+	local out, measured = {}, 0
+	for _, d in ipairs(texts(nil, true)) do
+		local owner = d:FindFirstAncestorOfClass("ScreenGui")
+		local world = d:FindFirstAncestorOfClass("BillboardGui") or d:FindFirstAncestorOfClass("SurfaceGui")
+		local t = tostring(d.Text):gsub("<[^>]*>", "")
+		if owner and not world and t:gsub("%s", "") ~= "" and d.AbsoluteSize.X > 0 and d.AbsoluteSize.Y > 0 then
+			local px = d.TextScaled and d.AbsoluteSize.Y or d.TextSize * scaleOf(d)
+			measured = measured + 1
+			if px < floorPx - 0.01 then
+				out[#out + 1] = { px = px, text = string.format("%s (%.1f px) '%s'", d:GetFullName():gsub("^Players%.[^.]+%.PlayerGui%.", ""), px, t:sub(1, 24)) }
+			end
+		end
+	end
+	table.sort(out, function(a, b)
+		return a.px < b.px
+	end)
+	local lines = {}
+	for i, o in ipairs(out) do
+		lines[i] = o.text
+	end
+	return lines, measured
+end
+KC.smallTexts = smallTexts
+
 local function layoutRule(label)
 	local Config = env()
 	local tol = CONTRACT.v2.centreTolerance
 	local vp = Mock.Viewport
+	-- readability rule (ARCHITECTURE_V3.md): at 1920x1080 even small captions are >= 15 px; phones never below 14 px
+	local floorPx = (vp.Y >= 1000) and 15 or 14
 	local function check(state)
 		local list = centredTexts(tol)
 		T.check(#list == 0, label .. ": nothing is shown in the middle of the screen (" .. state .. ")", describeCentred(list))
+		local small, measured = smallTexts(floorPx)
+		T.check(#small == 0 and measured > 0, label .. ": every text on screen is readable, >= " .. floorPx .. " px (" .. state .. ")", #small .. " of " .. measured .. " too small: " .. table.concat(small, "; ", 1, math.min(#small, 6)))
 	end
 	local function zoneOf(inst)
 		return (inst.AbsolutePosition.X + inst.AbsoluteSize.X / 2) / vp.X, (inst.AbsolutePosition.Y + inst.AbsoluteSize.Y / 2) / vp.Y

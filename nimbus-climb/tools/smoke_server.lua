@@ -3,6 +3,10 @@
 -- Globals provided by smoke.py: Mock (tools/robloxmock.lua), CONTRACT (tools/contract.json), ROOTS
 -- (src directory name -> instance path), ARGS ({ seeds, verbose, quick }).
 -- Every scenario is a function in the returned table; checks are reported through T.
+-- v3: boot checks the brighter, warmer lighting; lobby checks the voxel lobby budget, the Portal_<Id> / Roulette_<Id>
+-- tutorial targets, the empty flat home yards, LobbyInfo.NpcSpots / AltarSite / AltarDock, the six NPC pets
+-- (workspace.NimbusNpcs, own part budget, Talk prompts, never moved by the server) and, once built, the Storm Altar;
+-- final_checks validates every ProfileSync (Discovered / IndexClaimed / Tutorial) and TutorialState payload.
 -- Plain Lua 5.1 syntax only.
 
 local T = SmokeCommon.T
@@ -356,8 +360,66 @@ S.mock_selftest = guarded("mock_selftest", function()
 	prompt.Triggered:Connect(function(who)
 		triggeredBy = who
 	end)
+	local PPS = game:GetService("ProximityPromptService")
+	local serviceSaw, serviceBy, shown, hidden
+	local c1 = PPS.PromptTriggered:Connect(function(p, who)
+		serviceSaw, serviceBy = p, who
+	end)
+	local c2 = PPS.PromptShown:Connect(function(p, inputType)
+		shown = { p, inputType }
+	end)
+	local c3 = PPS.PromptHidden:Connect(function(p)
+		hidden = p
+	end)
 	Mock.Trigger(prompt, Players:GetPlayers()[1] or "nobody")
+	advance(0.05)
 	T.check(triggeredBy ~= nil, "Mock.Trigger fires ProximityPrompt.Triggered with the player")
+	T.check(serviceSaw == prompt and serviceBy == triggeredBy, "...and ProximityPromptService.PromptTriggered(prompt, player)", tostring(serviceSaw))
+	Mock.ShowPrompt(prompt)
+	Mock.HidePrompt(prompt)
+	advance(0.05)
+	T.check(shown ~= nil and shown[1] == prompt and shown[2] == Enum.ProximityPromptInputType.Keyboard and hidden == prompt, "Mock.ShowPrompt / HidePrompt fire PromptShown(prompt, inputType) / PromptHidden(prompt)")
+	c1:Disconnect()
+	c2:Disconnect()
+	c3:Disconnect()
+	T.check(prompt.Style == Enum.ProximityPromptStyle.Default and prompt.Exclusivity == Enum.ProximityPromptExclusivity.OnePerButton, "ProximityPrompt.Style / Exclusivity defaults")
+	-- GuiButton is the abstract base of TextButton and ImageButton
+	T.check(Instance.new("TextButton"):IsA("GuiButton") and Instance.new("ImageButton"):IsA("GuiButton") and not Instance.new("TextLabel"):IsA("GuiButton"), "TextButton / ImageButton are GuiButtons (TextLabel is not)")
+	T.check(raises(function()
+		return Instance.new("GuiButton")
+	end), "GuiButton cannot be created (abstract class)")
+	T.check(Instance.new("ImageButton").AutoButtonColor == true and Instance.new("TextButton").Modal == false, "GuiButton properties (AutoButtonColor, Modal) on both button classes")
+	-- WorldRoot:BulkMoveTo really moves the parts (the sky dragon poses every part with one call per frame)
+	local bulkA, bulkB = Instance.new("Part"), Instance.new("Part")
+	bulkA.Anchored, bulkB.Anchored = true, true
+	bulkA.Parent, bulkB.Parent = workspace, workspace
+	local moved = 0
+	local mc = bulkA:GetPropertyChangedSignal("CFrame"):Connect(function()
+		moved = moved + 1
+	end)
+	workspace:BulkMoveTo({ bulkA, bulkB }, { CFrame.new(1, 2, 3), CFrame.new(4, 5, 6) * CFrame.Angles(0, 1, 0) }, Enum.BulkMoveMode.FireCFrameChanged)
+	advance(0.05)
+	T.check(bulkA.Position == Vector3.new(1, 2, 3) and (bulkB.Position - Vector3.new(4, 5, 6)).Magnitude < 1e-9 and math.abs(bulkB.CFrame.LookVector.X + math.sin(1)) < 1e-6, "workspace:BulkMoveTo sets every part's CFrame", tostring(bulkA.Position) .. " / " .. tostring(bulkB.Position))
+	T.check(moved >= 1, "...and fires CFrame changed (BulkMoveMode.FireCFrameChanged)")
+	mc:Disconnect()
+	T.check(raises(function()
+		workspace:BulkMoveTo({ bulkA, bulkB }, { CFrame.new() })
+	end), "BulkMoveTo rejects lists of different length")
+	T.check(raises(function()
+		workspace:BulkMoveTo({ bulkA }, { Vector3.new() })
+	end), "BulkMoveTo rejects a non-CFrame")
+	T.check(raises(function()
+		workspace:BulkMoveTo({ bulkA }, { CFrame.new() }, Enum.Material.Neon)
+	end), "BulkMoveTo rejects an eventMode that is not an Enum.BulkMoveMode")
+	local wm = Instance.new("WorldModel")
+	bulkB.Parent = wm
+	wm:BulkMoveTo({ bulkB }, { CFrame.new(7, 7, 7) })
+	T.check(bulkB.Position == Vector3.new(7, 7, 7), "WorldModel:BulkMoveTo works too (ViewportFrame worlds)")
+	bulkA:Destroy()
+	wm:Destroy()
+	T.check(Enum.BulkMoveMode.FireAllEvents ~= nil and raises(function()
+		return Enum.BulkMoveMode.Typo
+	end), "Enum.BulkMoveMode is a known (closed) enum")
 	local vp = Instance.new("ViewportFrame")
 	local world = Instance.new("WorldModel")
 	local vcam = Instance.new("Camera")
@@ -524,7 +586,10 @@ S.load_modules = guarded("load_modules", function()
 	local loaded = 0
 	for _, key in ipairs(keys) do
 		local inst = moduleInstance(key)
-		if not inst then
+		if not inst and CONTRACT.modules[key].optional then
+			-- Main loads it only when present (ARCHITECTURE_V3.md): absent is fine, present must work
+			T.info("*" .. key .. " is optional and not in this build yet")
+		elseif not inst then
 			T.fail(key .. " exists", "no ModuleScript at " .. key .. " (default.project.json mounts src/ for Rojo)")
 		else
 			local ok, result = pcall(require, inst)
@@ -676,10 +741,12 @@ S.boot = guarded("boot", function()
 		end
 	end
 
-	-- lighting + global settings: the v2 "late-afternoon calm" look (ARCHITECTURE_V2.md section 6)
+	-- lighting + global settings: v3 "slightly brighter and warmer" than the v2 late-afternoon calm look
+	-- (ARCHITECTURE_V3.md section 6: ClockTime ~14.5, Brightness ~2.0, warmer ColorShift_Top, OutdoorAmbient a little
+	-- higher, Bloom stays subtle, no blow-out)
 	local Lighting = game:GetService("Lighting")
-	T.near(Lighting.ClockTime, 15.2, 1.0, "Lighting.ClockTime is late afternoon (~15.2)")
-	T.near(Lighting.Brightness, 1.5, 0.45, "Lighting.Brightness is lowered (~1.5)")
+	T.near(Lighting.ClockTime, CONTRACT.v3.lighting.ClockTime, 0.75, "Lighting.ClockTime is early afternoon (~14.5)")
+	T.near(Lighting.Brightness, CONTRACT.v3.lighting.Brightness, 0.35, "Lighting.Brightness is a little brighter than v2 (~2.0)")
 	local function rgb255(c)
 		return c.R * 255, c.G * 255, c.B * 255
 	end
@@ -687,9 +754,15 @@ S.boot = guarded("boot", function()
 		local cr, cg, cb = rgb255(c)
 		T.check(math.abs(cr - r) <= tol and math.abs(cg - g) <= tol and math.abs(cb - b) <= tol, name, string.format("got %.0f,%.0f,%.0f expected ~%d,%d,%d", cr, cg, cb, r, g, b))
 	end
-	nearColor(Lighting.Ambient, 84, 96, 128, 24, "Lighting.Ambient is a dim blue (~84,96,128)")
-	nearColor(Lighting.OutdoorAmbient, 108, 120, 152, 24, "Lighting.OutdoorAmbient is a dim blue (~108,120,152)")
-	T.check(Lighting.ExposureCompensation <= -0.1 and Lighting.ExposureCompensation >= -0.6, "Lighting.ExposureCompensation is slightly negative (~-0.3)", tostring(Lighting.ExposureCompensation))
+	nearColor(Lighting.Ambient, 96, 104, 130, 24, "Lighting.Ambient is a soft blue (~96,104,130)")
+	do
+		-- v2 had OutdoorAmbient ~108,120,152: v3 lifts it a little (no black voxel creases) without washing out
+		local r, g, b = rgb255(Lighting.OutdoorAmbient)
+		T.check(r + g + b > 108 + 120 + 152 + 10 and math.max(r, g, b) <= 190 and b >= r, "Lighting.OutdoorAmbient is a little higher than v2 and stays a soft blue", string.format("%.0f,%.0f,%.0f", r, g, b))
+		local tr, tg, tb = rgb255(Lighting.ColorShift_Top)
+		T.check(tr > tb + 15 and tr >= tg, "Lighting.ColorShift_Top is warm (a golden sun)", string.format("%.0f,%.0f,%.0f", tr, tg, tb))
+	end
+	T.check(Lighting.ExposureCompensation <= 0.05 and Lighting.ExposureCompensation >= -0.6, "Lighting.ExposureCompensation is about neutral (no blow-out)", tostring(Lighting.ExposureCompensation))
 	T.near(Lighting.EnvironmentDiffuseScale, 0.5, 0.25, "Lighting.EnvironmentDiffuseScale ~0.5")
 	T.near(Lighting.EnvironmentSpecularScale, 0.4, 0.25, "Lighting.EnvironmentSpecularScale ~0.4")
 	T.eq(Lighting.GlobalShadows, true, "Lighting.GlobalShadows is on")
@@ -828,6 +901,346 @@ local function groundBelow(pos, depth)
 	return hit ~= nil, hit
 end
 
+local function hdist(a, b)
+	return math.sqrt((a.X - b.X) ^ 2 + (a.Z - b.Z) ^ 2)
+end
+
+-- Notify messages sent to one player since log index `mark` whose text contains `needle` (plain search).
+local function notifiedSince(player, needle, mark)
+	for i = (mark or 0) + 1, #Mock.RemoteLog do
+		local e = Mock.RemoteLog[i]
+		if e.remote == "Notify" and e.kind ~= "server" and (e.kind == "all" or e.userId == player.UserId) and tostring(e.args[1]):lower():find(needle:lower(), 1, true) then
+			return e
+		end
+	end
+	return nil
+end
+
+local function partCFrames(root)
+	local out = {}
+	for _, d in ipairs(root:GetDescendants()) do
+		if d:IsA("BasePart") then
+			out[d] = d.CFrame
+		end
+	end
+	return out
+end
+
+local function movedParts(before)
+	local n = 0
+	for part, cf in pairs(before) do
+		if part.Parent and not part.CFrame:FuzzyEq(cf) then
+			n = n + 1
+		end
+	end
+	return n
+end
+
+-- ARCHITECTURE_V3.md section 5: the six NPC pets (shared/NpcDialog data, NpcService models in workspace.NimbusNpcs).
+local function npcChecks(info)
+	local Config = config()
+	local ND, PC, PB, NS = mod("NpcDialog"), mod("PetCatalog"), mod("PetBuilder"), mod("NpcService")
+	if not T.check(type(ND) == "table" and type(ND.Npcs) == "table", "shared/NpcDialog lists the NPC pets") then
+		return
+	end
+	T.eq(#ND.Npcs, CONTRACT.v3.npcCount, "NpcDialog has " .. CONTRACT.v3.npcCount .. " NPCs")
+	local data = T.tally("every NPC has a unique Id, a Name, a catalog PetId, Scale ~" .. CONTRACT.v3.npcScale .. " and 3-5 short plain-text lines")
+	local seen, allLines = {}, {}
+	for _, npc in ipairs(ND.Npcs) do
+		local lines = type(npc.Lines) == "table" and npc.Lines or {}
+		local linesOk = #lines >= 3 and #lines <= 5
+		for _, line in ipairs(lines) do
+			linesOk = linesOk and type(line) == "string" and #line >= 8 and #line <= 240 and not line:find("[<>&]")
+			allLines[#allLines + 1] = tostring(line)
+		end
+		local ok = type(npc.Id) == "string" and not seen[npc.Id] and type(npc.Name) == "string" and #npc.Name > 2 and PC.Get(npc.PetId) ~= nil
+			and type(npc.Scale) == "number" and math.abs(npc.Scale - CONTRACT.v3.npcScale) <= 0.3 and linesOk and ND.Get(npc.Id) == npc
+		data:case(ok, tostring(npc.Id) .. ": Name " .. tostring(npc.Name) .. ", PetId " .. tostring(npc.PetId) .. ", Scale " .. tostring(npc.Scale) .. ", " .. #lines .. " lines")
+		seen[tostring(npc.Id)] = true
+		T.check(not tostring(npc.Name):lower():find("nimbus", 1, true), tostring(npc.Id) .. ": Nimbus is the tutorial guide, not an NPC")
+	end
+	data:report()
+	T.check(ND.Get("no_such_npc") == nil, "NpcDialog.Get of an unknown id is nil")
+	local text = table.concat(allLines, "\n"):lower()
+	T.check(text:find("storm altar", 1, true) ~= nil and text:find("secret", 1, true) ~= nil, "an NPC tip mentions the Storm Altar and Secret pets (ARCHITECTURE_V3.md section 10)")
+	T.check(text:find("element", 1, true) ~= nil, "an NPC explains pet elements (ARCHITECTURE_V3.md section 11)")
+	T.check(text:find("index", 1, true) ~= nil and text:find("dash", 1, true) ~= nil, "the NPC tips cover the Pet Index and the controls (dash)")
+
+	local holder = workspace:FindFirstChild("NimbusNpcs")
+	if not T.check(holder ~= nil, "NpcService builds workspace.NimbusNpcs") then
+		return
+	end
+	local models = {}
+	for _, inst in ipairs(CollectionService:GetTagged(ND.Tag)) do
+		if inst:IsDescendantOf(holder) then
+			models[#models + 1] = inst
+		end
+	end
+	T.eq(#models, #ND.Npcs, "every NPC model is tagged " .. ND.Tag .. " inside workspace.NimbusNpcs")
+	local npcParts = Mock.CountDescendants(holder, "BasePart")
+	T.check(npcParts <= CONTRACT.v3.partBudget.npcs, "the six NPCs stay within " .. CONTRACT.v3.partBudget.npcs .. " parts (budgeted apart from the lobby)", npcParts .. " parts")
+	T.info("*NPCs: " .. #models .. " models, " .. npcParts .. " parts")
+	local built = T.tally("every NPC: attribute NpcId, a Talk prompt (ObjectText = Name, HoldDuration 0, distance " .. CONTRACT.v3.npcPromptDistance .. "), a nameplate and a High-detail pet at Scale ~" .. CONTRACT.v3.npcScale .. " on its NPC spot")
+	local firstPrompt, firstId
+	for i, npc in ipairs(ND.Npcs) do
+		local model = holder:FindFirstChild("Npc_" .. npc.Id)
+		local why = "missing model Npc_" .. npc.Id
+		local ok = model ~= nil and model:GetAttribute("NpcId") == npc.Id and CollectionService:HasTag(model, ND.Tag)
+		if ok then
+			local prompt = model:FindFirstChildWhichIsA("ProximityPrompt", true)
+			local plate = model:FindFirstChildWhichIsA("BillboardGui", true)
+			local pet = model:FindFirstChild("Pet")
+			local petDef = PC.Get(npc.PetId)
+			local petParts = pet and Mock.CountDescendants(pet, "BasePart") or 0
+			local height = pet and pet:GetExtentsSize().Y or 0
+			local want = petDef and PB.GetHeight(petDef) * (npc.Scale or CONTRACT.v3.npcScale) or 0
+			local spot = type(info.NpcSpots) == "table" and info.NpcSpots[i]
+			local pivot = model:GetPivot().Position
+			ok = prompt ~= nil and prompt.ActionText == "Talk" and prompt.ObjectText == npc.Name and prompt.HoldDuration == 0 and prompt.MaxActivationDistance == CONTRACT.v3.npcPromptDistance
+				and plate ~= nil and plainText(textsUnder(plate)):find(npc.Name, 1, true) ~= nil
+				and pet ~= nil and petParts <= CONTRACT.v3.partBudget.petHigh and petParts > 0 and math.abs(height - want) <= want * 0.25
+				and (typeof(spot) ~= "CFrame" or hdist(pivot, spot.Position) <= 4)
+			why = string.format("prompt %s (%s / %s / hold %s / %s), nameplate %s, pet %d parts, height %.2f vs %.2f, %s from its spot",
+				tostring(prompt ~= nil), prompt and prompt.ActionText or "-", prompt and prompt.ObjectText or "-", prompt and tostring(prompt.HoldDuration) or "-", prompt and tostring(prompt.MaxActivationDistance) or "-",
+				tostring(plate ~= nil), petParts, height, want, typeof(spot) == "CFrame" and fmt(hdist(pivot, spot.Position)) or "?")
+			if prompt and not firstPrompt then
+				firstPrompt, firstId = prompt, npc.Id
+			end
+		end
+		built:case(ok, npc.Id .. ": " .. why)
+	end
+	built:report()
+	local loose = 0
+	for _, d in ipairs(holder:GetDescendants()) do
+		if d:IsA("BasePart") and not d.Anchored then
+			loose = loose + 1
+		end
+	end
+	T.eq(loose, 0, "every NPC part is anchored")
+	-- the server never animates an NPC (the client idles them)
+	local before = partCFrames(holder)
+	advance(2)
+	T.eq(movedParts(before), 0, "the server never moves an NPC part (client-side idle animation only)")
+	-- the prompt reaches NpcService.Talked
+	if firstPrompt and type(NS) == "table" and type(NS.Talked) == "table" then
+		local p = Mock.AddPlayer("NpcTalker", 975001)
+		advance(0.6)
+		local got
+		local conn = NS.Talked:Connect(function(who, id)
+			got = { who, id }
+		end)
+		Mock.Trigger(firstPrompt, p)
+		advance(0.1)
+		conn:Disconnect()
+		T.check(got ~= nil and got[1] == p and got[2] == firstId, "triggering an NPC's Talk prompt fires NpcService.Talked(player, npcId)", got and tostring(got[2]) or "no event")
+		Mock.RemovePlayer(p)
+		advance(0.5)
+	end
+end
+
+-- ARCHITECTURE_V3.md section 10: the Storm Altar landmark (built by the optional StormAltar service).
+local function stormAltarChecks(info, folder)
+	local Config = config()
+	local altar
+	for _, d in ipairs(workspace:GetDescendants()) do
+		if d.Name == "StormAltar" and d:IsA("Model") then
+			altar = d
+			break
+		end
+	end
+	if not altar then
+		if moduleInstance("server/Services/StormAltar") then
+			T.fail("the StormAltar service builds a Model named StormAltar")
+		else
+			T.warn("the Storm Altar is not in this build yet (optional StormAltar service, ARCHITECTURE_V3.md section 10)")
+		end
+		return
+	end
+	local showcase = altar:FindFirstChild("StormfangShowcase", true) or workspace:FindFirstChild("StormfangShowcase", true)
+	local parts, glass, cyanNeon, navy = 0, 0, 0, 0
+	for _, d in ipairs(altar:GetDescendants()) do
+		if d:IsA("BasePart") and not (showcase and d:IsDescendantOf(showcase)) then
+			parts = parts + 1
+			local c = d.Color
+			if d.Material == Enum.Material.Glass then
+				glass = glass + 1
+			end
+			if d.Material == Enum.Material.Neon and c.B > 0.7 and c.G > 0.45 and c.R < 0.5 then
+				cyanNeon = cyanNeon + 1
+			end
+			if colorDistance255(c, Color3.fromRGB(46, 58, 102)) <= 45 then
+				navy = navy + 1
+			end
+		end
+	end
+	T.check(parts <= CONTRACT.v3.partBudget.stormAltar and parts >= 30, "the Storm Altar stays within " .. CONTRACT.v3.partBudget.stormAltar .. " parts (showcase pet excluded)", parts .. " parts")
+	T.check(navy >= 6, "the Storm Altar stands on a dark navy storm-cloud island", navy .. " navy parts")
+	T.check(cyanNeon >= 6 and glass >= 6, "tall cyan crystal shards (Neon core + Glass) ring the dais", cyanNeon .. " cyan neon, " .. glass .. " glass parts")
+	local lights, blue = 0, 0
+	for _, d in ipairs(altar:GetDescendants()) do
+		if d:IsA("PointLight") then
+			lights = lights + 1
+			if d.Color.B > d.Color.R + 0.2 and d.Brightness <= 4 then
+				blue = blue + 1
+			end
+		end
+	end
+	T.check(lights >= 1 and blue == lights, "soft electric-blue PointLights", lights .. " lights, " .. blue .. " soft blue")
+	if typeof(info.AltarSite) == "CFrame" then
+		T.check(hdist(altar:GetPivot().Position, info.AltarSite.Position) <= 45, "the Storm Altar is built at LobbyInfo.AltarSite")
+	end
+	if T.check(showcase ~= nil and showcase:IsA("Model"), "a big Stormfang showcase (Model StormfangShowcase) prowls on the altar") then
+		local n = Mock.CountDescendants(showcase, "BasePart")
+		T.check(n <= CONTRACT.v3.partBudget.showcasePet and n > 0, "...built with PetBuilder at High detail (<= " .. CONTRACT.v3.partBudget.showcasePet .. " parts)", n .. " parts")
+		local def = mod("PetCatalog").Get(CONTRACT.v3.stormfang.petId)
+		if def then
+			local want = mod("PetBuilder").GetHeight(def) * 3
+			T.check(math.abs(showcase:GetExtentsSize().Y - want) <= want * 0.3, "...at Scale ~3", fmt(showcase:GetExtentsSize().Y, 2) .. " studs tall vs ~" .. fmt(want, 2))
+		end
+		local before = partCFrames(showcase)
+		advance(2)
+		T.eq(movedParts(before), 0, "...and the server never animates it (client-side hover / pulse)")
+	end
+	local sign = altar:FindFirstChild("StormAltarSign", true) or workspace:FindFirstChild("StormAltarSign", true)
+	if T.check(sign ~= nil, "the poster StormAltarSign exists") then
+		T.check(plainText(textsUnder(sign)):upper():find("STORM ALTAR", 1, true) ~= nil, "...reading 'STORM ALTAR'", plainText(textsUnder(sign)))
+		local art = false
+		for _, d in ipairs(sign:GetDescendants()) do
+			if (d:IsA("ImageLabel") or d:IsA("ImageButton")) and d.Image == Config.Art.StormfangImage then
+				art = true
+			elseif (d:IsA("Decal") or d:IsA("Texture")) and d.Texture == Config.Art.StormfangImage then
+				art = true
+			end
+		end
+		T.check(art, "...and showing the player's Stormfang art (Config.Art.StormfangImage)")
+	end
+	local prompt
+	for _, d in ipairs(altar:GetDescendants()) do
+		if d:IsA("ProximityPrompt") and (tostring(d.ObjectText) .. " " .. tostring(d.ActionText)):lower():find("storm altar", 1, true) then
+			prompt = d
+		end
+	end
+	if T.check(prompt ~= nil, "the altar has a 'Storm Altar' ProximityPrompt") then
+		local p = Mock.AddPlayer("AltarVisitor", 975002)
+		advance(0.6)
+		local mark = #Mock.RemoteLog
+		Mock.Trigger(prompt, p)
+		advance(0.3)
+		T.check(notifiedSince(p, "awakens soon", mark) ~= nil, "triggering it shows the side toast 'The Storm Altar awakens soon ...' (phase 1)")
+		Mock.RemovePlayer(p)
+		advance(0.5)
+	end
+end
+
+-- ARCHITECTURE_V3.md sections 4-6 and 10: named tutorial targets, home plots with an empty flat yard, the NPC spots,
+-- the six NPC pets (workspace.NimbusNpcs) and, once it is built, the Storm Altar landmark.
+local function lobbyV3(info, folder)
+	local Config = config()
+	-- tutorial targets keep their names: Portal_<Id> / Roulette_<Id> models under workspace.NimbusLobby
+	for _, diff in ipairs(Config.Difficulties) do
+		local model = folder:FindFirstChild("Portal_" .. diff.Id, true)
+		local p = info.Portals and info.Portals[diff.Id]
+		if T.check(model ~= nil and model:IsA("Model"), "Portal_" .. diff.Id .. " is a Model in the lobby (tutorial arrow target)", model and model.ClassName or "missing") then
+			T.check(p and p.Zone and hdist(model:GetPivot().Position, p.Zone.Position) <= 20, "Portal_" .. diff.Id .. " stands at its portal zone")
+		end
+	end
+	for _, r in ipairs(Config.Roulettes) do
+		local m = info.Shop and info.Shop.Roulettes and info.Shop.Roulettes[r.Id]
+		local model = folder:FindFirstChild("Roulette_" .. r.Id, true)
+		T.check(model ~= nil and model:IsA("Model") and m ~= nil and m.Model == model, "Roulette_" .. r.Id .. " is the roulette machine Model (tutorial arrow target)", model and model:GetFullName() or "missing")
+	end
+	-- home plots: a flat PlotSize square yard whose centre stays EMPTY for the phase-2 home
+	local plots = T.tally("every SpotInfo has PlotCFrame / PlotSize and its folder carries the SpotIndex attribute")
+	local yards = T.tally("the centre of every home yard is flat and empty (room for the phase-2 home)")
+	local params = OverlapParams.new()
+	do
+		-- audit self-test: a block dropped into the first yard centre must be found by the same query
+		local sp = info.Spots and info.Spots[1]
+		if sp and typeof(sp.PlotCFrame) == "CFrame" then
+			local probe = Instance.new("Part")
+			probe.Anchored = true
+			probe.Size = Vector3.new(4, 4, 4)
+			probe.CFrame = sp.PlotCFrame * CFrame.new(3, 2.5, -2)
+			probe.Parent = folder
+			local found = false
+			for _, part in ipairs(workspace:GetPartBoundsInBox(sp.PlotCFrame * CFrame.new(0, 6.5, 0), Vector3.new(Config.Lobby.PlotSize / 2, 11, Config.Lobby.PlotSize / 2), params)) do
+				found = found or part == probe
+			end
+			probe:Destroy()
+			T.check(found, "yard audit self-test: a block in the yard centre is detected")
+		end
+	end
+	for i = 1, Config.Lobby.SpotCount do
+		local sp = info.Spots and info.Spots[i]
+		if sp then
+			local ok = typeof(sp.PlotCFrame) == "CFrame" and sp.PlotSize == Config.Lobby.PlotSize and typeof(sp.Folder) == "Instance" and sp.Folder:GetAttribute("SpotIndex") == i
+			plots:case(ok, "spot " .. i .. ": PlotCFrame " .. typeof(sp.PlotCFrame) .. ", PlotSize " .. tostring(sp.PlotSize) .. ", SpotIndex attr " .. tostring(typeof(sp.Folder) == "Instance" and sp.Folder:GetAttribute("SpotIndex")))
+			if typeof(sp.PlotCFrame) == "CFrame" then
+				local half = Config.Lobby.PlotSize / 4
+				local flat, note = true, ""
+				for _, dx in ipairs({ -half, 0, half }) do
+					for _, dz in ipairs({ -half, 0, half }) do
+						local pos = (sp.PlotCFrame * CFrame.new(dx, 0, dz)).Position
+						local hit, result = groundBelow(pos + Vector3.new(0, 1, 0), 8)
+						if not hit or math.abs(result.Position.Y - sp.PlotCFrame.Position.Y) > 0.35 then
+							flat = false
+							note = string.format("no flat ground at (%d, %d): %s", dx, dz, hit and fmt(result.Position.Y - sp.PlotCFrame.Position.Y, 2) or "nothing")
+						end
+					end
+				end
+				local inside = workspace:GetPartBoundsInBox(sp.PlotCFrame * CFrame.new(0, 6.5, 0), Vector3.new(Config.Lobby.PlotSize / 2, 11, Config.Lobby.PlotSize / 2), params)
+				local blockers = {}
+				for _, part in ipairs(inside) do
+					if part:IsDescendantOf(folder) and part.Transparency < 1 then
+						blockers[#blockers + 1] = part.Name
+					end
+				end
+				yards:case(flat and #blockers == 0, "spot " .. i .. ": " .. note .. (#blockers > 0 and (" " .. #blockers .. " parts in the yard centre, e.g. " .. table.concat(blockers, ", ", 1, math.min(3, #blockers))) or ""))
+			end
+		end
+	end
+	plots:report()
+	yards:report()
+	-- NPC spots: six ground-level CFrames on the plaza, apart from each other
+	local spots = info.NpcSpots
+	if T.check(type(spots) == "table" and #spots == CONTRACT.v3.npcCount, "LobbyInfo.NpcSpots holds " .. CONTRACT.v3.npcCount .. " CFrames", type(spots) == "table" and (#spots .. " entries") or tostring(spots)) then
+		local spotTally = T.tally("every NPC spot is a CFrame on solid plaza ground, at least 10 studs from the others")
+		for i, cf in ipairs(spots) do
+			local ok = typeof(cf) == "CFrame"
+			local why = "not a CFrame"
+			if ok then
+				local horiz = hdist(cf.Position, Config.Lobby.Origin)
+				ok = horiz <= Config.Lobby.PlazaRadius + 12 and groundBelow(cf.Position + Vector3.new(0, 1, 0), 8)
+				why = "distance " .. fmt(horiz) .. " from the plaza centre, ground " .. tostring(groundBelow(cf.Position + Vector3.new(0, 1, 0), 8))
+				for j = 1, i - 1 do
+					if typeof(spots[j]) == "CFrame" and hdist(spots[j].Position, cf.Position) < 10 then
+						ok, why = false, "only " .. fmt(hdist(spots[j].Position, cf.Position)) .. " studs from spot " .. j
+					end
+				end
+			end
+			spotTally:case(ok, "NPC spot " .. i .. ": " .. why)
+		end
+		spotTally:report()
+	end
+	-- the v3 LobbyInfo keys and their types (tools/contract.json v3.lobbyInfo; the Storm Altar site is reserved by
+	-- LobbyBuilder and used by the optional StormAltar service)
+	for key, ty in pairs(CONTRACT.v3.lobbyInfo) do
+		if key:sub(1, 1) ~= "_" then
+			local optional = ty:sub(-1) == "?"
+			local want = optional and ty:sub(1, -2) or ty
+			local got = typeof(info[key])
+			T.check(got == want or (optional and info[key] == nil), "LobbyInfo." .. key .. " is a " .. want .. (optional and " (or nil)" or ""), got)
+		end
+	end
+	if typeof(info.AltarSite) == "CFrame" then
+		local site = info.AltarSite
+		local toPlaza = Vector3.new(Config.Lobby.Origin.X - site.Position.X, 0, Config.Lobby.Origin.Z - site.Position.Z)
+		T.check(toPlaza.Magnitude > Config.Lobby.PlazaRadius and site.LookVector:Dot(toPlaza.Unit) > 0.7, "the Storm Altar site is at the lobby edge, facing the plaza", "distance " .. fmt(toPlaza.Magnitude))
+	end
+	npcChecks(info)
+	stormAltarChecks(info, folder)
+end
+
 S.lobby = guarded("lobby", function()
 	local Config = config()
 	local info = W.lobbyInfo
@@ -844,10 +1257,17 @@ S.lobby = guarded("lobby", function()
 		T.check(math.abs(p.Y - (Config.Lobby.Origin.Y + 3)) <= 4, "spawn is ~3 studs above the plaza surface", "y=" .. fmt(p.Y))
 		T.check(groundBelow(p, 12), "the plaza spawn stands on a solid surface")
 	end
-	-- size + budget
-	local parts = Mock.CountDescendants(folder, "BasePart")
-	T.check(parts < 2500, "lobby has fewer than 2500 parts", parts .. " parts")
-	T.check(parts > 800, "the v2 lobby is big (more than 800 parts)", parts .. " parts")
+	-- size + budget (ARCHITECTURE_V3.md ART DIRECTION: the detailed voxel lobby stays <= ~6000 parts after merging; the
+	-- Storm Altar has its own budget and the NPC pets live in workspace.NimbusNpcs, so neither counts here)
+	local altarParts = 0
+	for _, d in ipairs(folder:GetDescendants()) do
+		if d.Name == "StormAltar" and d:IsA("Model") then
+			altarParts = altarParts + Mock.CountDescendants(d, "BasePart")
+		end
+	end
+	local parts = Mock.CountDescendants(folder, "BasePart") - altarParts
+	T.check(parts <= CONTRACT.v3.partBudget.lobby, "lobby has at most " .. CONTRACT.v3.partBudget.lobby .. " parts (Storm Altar excluded)", parts .. " parts")
+	T.check(parts > 2000, "the v3 voxel lobby is detailed (more than 2000 parts)", parts .. " parts")
 	T.info("*lobby: " .. parts .. " parts, " .. Mock.CountDescendants(folder) .. " instances, " .. Mock.CountDescendants(folder, "ParticleEmitter") .. " emitters, " .. Mock.CountDescendants(folder, "PointLight") .. " lights")
 	local loose, bigCasters = 0, 0
 	for _, d in ipairs(folder:GetDescendants()) do
@@ -1043,6 +1463,8 @@ S.lobby = guarded("lobby", function()
 			T.check(prompt ~= nil and prompt.HoldDuration == 0, "ItemService put a ProximityPrompt on the item counter")
 		end
 	end
+
+	lobbyV3(info, folder)
 
 	-- signs
 	local all = plainText(textsUnder(folder)):upper()
@@ -1256,6 +1678,34 @@ function V.profileSync(s)
 	if s.SpotIndex ~= nil and not int(s.SpotIndex, 1, Config.Lobby.SpotCount) then
 		p[#p + 1] = "SpotIndex = " .. tostring(s.SpotIndex)
 	end
+	-- v3 (ARCHITECTURE_V3.md section 1): Discovered / IndexClaimed sets of known ids, the tutorial progress
+	if type(s.Discovered) ~= "table" then
+		p[#p + 1] = "Discovered is not a table"
+	else
+		for id, v in pairs(s.Discovered) do
+			if v ~= true or (PC and not PC.Get(id)) then
+				p[#p + 1] = "Discovered[" .. tostring(id) .. "] = " .. tostring(v)
+			end
+		end
+		for id in pairs(type(s.Pets) == "table" and s.Pets or {}) do
+			if s.Discovered[id] ~= true and PC and PC.Get(id) then
+				p[#p + 1] = "owned pet " .. tostring(id) .. " is not in Discovered (owned pets always count as discovered)"
+			end
+		end
+	end
+	if type(s.IndexClaimed) ~= "table" then
+		p[#p + 1] = "IndexClaimed is not a table"
+	else
+		for id, v in pairs(s.IndexClaimed) do
+			if v ~= true or (PC and type(PC.GetRarity) == "function" and not PC.GetRarity(id)) then
+				p[#p + 1] = "IndexClaimed[" .. tostring(id) .. "] = " .. tostring(v)
+			end
+		end
+	end
+	local tut = s.Tutorial
+	if type(tut) ~= "table" or not int(tut.Step, 1, 1000) or not isBool(tut.Done) or not isBool(tut.Gifted) then
+		p[#p + 1] = "Tutorial is not { Step = int >= 1, Done = bool, Gifted = bool }"
+	end
 	if type(s.Perks) ~= "table" then
 		p[#p + 1] = "Perks is not a table"
 	else
@@ -1315,6 +1765,38 @@ function V.rouletteResult(r)
 	return p
 end
 
+-- ARCHITECTURE_V3.md section 4: TutorialState { Step, Total = #Steps, Id, Text, Target, Done } (+ documented extras).
+local TARGET_KINDS = { Spot = true, Shop = true, Roulette = true, Portal = true, Menu = true }
+function V.tutorialState(st)
+	local p = {}
+	if type(st) ~= "table" then
+		return { "payload is " .. type(st) }
+	end
+	local steps = M["shared/TutorialSteps"] and M["shared/TutorialSteps"].Steps
+	if not (isNum(st.Step) and st.Step >= 1 and st.Step == math.floor(st.Step)) then
+		p[#p + 1] = "Step is " .. tostring(st.Step)
+	end
+	if not (isNum(st.Total) and (steps == nil or st.Total == #steps)) then
+		p[#p + 1] = "Total is " .. tostring(st.Total) .. (steps and (", expected #Steps = " .. #steps) or "")
+	end
+	if isNum(st.Step) and isNum(st.Total) and st.Step > st.Total then
+		p[#p + 1] = "Step " .. st.Step .. " > Total " .. st.Total
+	end
+	if not isStr(st.Id) or (steps and isNum(st.Step) and steps[st.Step] and steps[st.Step].Id ~= st.Id) then
+		p[#p + 1] = "Id " .. tostring(st.Id) .. " is not TutorialSteps.Steps[Step].Id"
+	end
+	if not isStr(st.Text) or #st.Text < 8 or st.Text:find("{%a+}") then
+		p[#p + 1] = "Text is missing or has an unfilled {placeholder}: " .. tostring(st.Text)
+	end
+	if not isBool(st.Done) then
+		p[#p + 1] = "Done is " .. typeof(st.Done)
+	end
+	if st.Target ~= nil and (type(st.Target) ~= "table" or not TARGET_KINDS[st.Target.Kind]) then
+		p[#p + 1] = "Target.Kind is " .. tostring(type(st.Target) == "table" and st.Target.Kind or st.Target)
+	end
+	return p
+end
+
 local NOTIFY_KINDS = { info = true, good = true, bad = true, token = true }
 function V.entry(e, Config)
 	local a = e.args
@@ -1358,6 +1840,8 @@ function V.entry(e, Config)
 		out = V.profileSync(a[1])
 	elseif e.remote == "RouletteResult" then
 		out = V.rouletteResult(a[1])
+	elseif e.remote == "TutorialState" then
+		out = V.tutorialState(a[1])
 	elseif e.remote == "OpenPanel" then
 		if not isStr(a[1]) then
 			out[#out + 1] = "panelId is " .. typeof(a[1])
@@ -2907,7 +3391,7 @@ S.final_checks = guarded("final_checks", function()
 	table.sort(parts)
 	T.info("*server->client traffic: " .. table.concat(parts, "  "))
 	T.check(#bad == 0, "every remote message uses a Config.Remotes name and the documented payload", table.concat(bad, "\n"))
-	for _, name in ipairs({ "Notify", "DamageTaken", "PartyState", "MatchState", "MatchResult", "DashFx" }) do
+	for _, name in ipairs({ "Notify", "DamageTaken", "PartyState", "MatchState", "MatchResult", "DashFx", "ProfileSync", "RouletteResult", "TutorialState" }) do
 		T.check((counts[name] or 0) > 0, "the run exercised the " .. name .. " remote")
 	end
 

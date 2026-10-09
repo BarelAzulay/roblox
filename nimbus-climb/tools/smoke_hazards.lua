@@ -701,6 +701,18 @@ S.hazards = guarded("hazards", function()
 		end
 		T.check(bigness(golden) >= bigness(regular) * 1.4, "golden tokens are 1.5x bigger", fmt(bigness(golden), 2) .. " vs " .. fmt(bigness(regular), 2))
 		T.check(golden.Color ~= regular.Color, "...and look different")
+		-- v3 (ARCHITECTURE_V3.md section 8): the soft halo is a child named Halo of the coin, anchored and NOT welded, so
+		-- TokenFx can move it with the coin on the client
+		for _, token in ipairs({ regular, golden }) do
+			local halo = token:FindFirstChild("Halo")
+			local welded = false
+			for _, d in ipairs(token.Parent:GetDescendants()) do
+				if (d:IsA("WeldConstraint") or d:IsA("Weld")) and (d.Part0 == halo or d.Part1 == halo) then
+					welded = true
+				end
+			end
+			T.check(halo ~= nil and halo:IsA("BasePart") and halo.Anchored and not halo.CanCollide and not halo.CanTouch and not welded, (token == golden and "golden" or "normal") .. " token: a Halo child (anchored, unwelded, not collidable) that TokenFx moves with the coin")
+		end
 
 		-- Animation: with Config.Tokens.ClientAnimated (the shipping setting) the SERVER never poses a coin, because every
 		-- pose would replicate to every client; TokenFx spins/bobs them locally (scenario client_tokens). With the flag

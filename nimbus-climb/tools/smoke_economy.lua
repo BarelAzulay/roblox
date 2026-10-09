@@ -1,8 +1,12 @@
 -- smoke_economy.lua: server scenarios for the v2 economy and lobby systems (ARCHITECTURE_V2.md sections 1-3, 5):
 --   spots              SpotService: assign / free on leave / prefer the previous index / none when full /
 --                      nameplates / showcase podium / teleport and the GoToSpot remote
+--                      + v3 tutorial flow (TutorialService: every step from welcome to done, the home step on the
+--                      player's own spot, gift once, finish reward once, skip, persistence, remote validation)
 --   economy            DataService + PetService: spend / refund / stack cap / equip limits / perks /
 --                      EquippedPets attribute / rate limiting / argument checks / prompts / stats
+--                      + v3 Pet Index flow (MarkDiscovered, PetService.Rolled, IndexService.Completed / CanClaim /
+--                      Claim, the IndexClaim remote: once per group, the Config.Index reward, persistence)
 --   items              ItemService: buy rules and the three item effects (heal, shield, phoenix revive)
 --   match_locks        items are refused during the match countdown (nothing consumed); pets are locked during matches
 --   profile_sync       the ProfileSync snapshot shape, when it is sent, and that it is a copy
@@ -110,6 +114,279 @@ local function snapshots(p, fromIndex)
 		out[#out + 1] = e.args[1]
 	end
 	return out
+end
+
+----------------------------------------------------------------------------------------------------
+-- v3: the Pet Index claim flow (ARCHITECTURE_V3.md sections 1 + 3), run inside the economy scenario
+----------------------------------------------------------------------------------------------------
+local function indexFlow()
+	local Config = config()
+	local DataS, PS, IS = mod("DataService"), mod("PetService"), mod("IndexService")
+	local PC = M["shared/PetCatalog"]
+	if not T.check(type(IS) == "table" and type(IS.Claim) == "function" and type(IS.CanClaim) == "function", "Pet Index: IndexService is loaded") then
+		return
+	end
+	local R = remoteFolder()
+	local p = freshPlayers(1, "Collector")[1]
+	local prof = profileOf(p)
+	T.check(type(prof.Discovered) == "table" and next(prof.Discovered) == nil and type(prof.IndexClaimed) == "table" and next(prof.IndexClaimed) == nil,
+		"Pet Index: a new profile starts with empty Discovered / IndexClaimed sets")
+	local commons = PC.ListByRarity("Common")
+	local reward = Config.Index.Rewards.Common.Tokens
+	-- MarkDiscovered
+	T.eq(DataS.MarkDiscovered(p, commons[1].Id), true, "Pet Index: MarkDiscovered returns true for a new pet")
+	T.eq(DataS.MarkDiscovered(p, commons[1].Id), false, "Pet Index: ...and false when it was discovered before")
+	T.eq(DataS.MarkDiscovered(p, "ghost_pet"), false, "Pet Index: MarkDiscovered ignores unknown pet ids")
+	T.check(prof.Discovered[commons[1].Id] == true and prof.Discovered.ghost_pet == nil, "Pet Index: Profile.Discovered records it")
+	-- a roll discovers the pet and fires PetService.Rolled(player, petId)
+	setTokens(p, 2000)
+	local rolled
+	local rc = PS.Rolled:Connect(function(who, id)
+		if who == p then
+			rolled = id
+		end
+	end)
+	withRoll(commons[2].Id, function()
+		PS.BuyRoulette(p, Config.Roulettes[1].Id)
+	end)
+	advance(0.1)
+	rc:Disconnect()
+	T.eq(rolled, commons[2].Id, "Pet Index: a successful roll fires PetService.Rolled(player, petId)")
+	T.eq(prof.Discovered[commons[2].Id], true, "Pet Index: ...and marks the pet discovered")
+	-- an incomplete group cannot be claimed
+	local ok, why = IS.CanClaim(p, "Common")
+	T.check(ok == false and type(why) == "string", "Pet Index: CanClaim is false while the group is incomplete", tostring(why))
+	local tokens = DataS.GetTokens(p)
+	T.eq(select(1, IS.Claim(p, "Common")), false, "Pet Index: Claim of an incomplete group fails")
+	T.eq(DataS.GetTokens(p), tokens, "Pet Index: ...and pays nothing")
+	-- completing the group through a roll fires IndexService.Completed once and a side toast
+	for i = 3, #commons - 1 do
+		DataS.MarkDiscovered(p, commons[i].Id)
+	end
+	local completed = {}
+	local cc = IS.Completed:Connect(function(who, groupId)
+		if who == p then
+			completed[#completed + 1] = groupId
+		end
+	end)
+	local mark = logSize()
+	withRoll(commons[#commons].Id, function()
+		PS.BuyRoulette(p, Config.Roulettes[1].Id)
+	end)
+	advance(0.3)
+	T.check(#completed == 1 and completed[1] == "Common", "Pet Index: discovering the last Common fires IndexService.Completed(player, 'Common') once", table.concat(completed, ","))
+	T.check(notified(p, "Common", nil, mark), "Pet Index: ...and tells the player the reward can be claimed")
+	withRoll(commons[1].Id, function()
+		PS.BuyRoulette(p, Config.Roulettes[1].Id)
+	end)
+	advance(0.3)
+	cc:Disconnect()
+	T.eq(#completed, 1, "Pet Index: rolling another Common later does not fire Completed again")
+	ok = IS.CanClaim(p, "Common")
+	T.eq(ok, true, "Pet Index: CanClaim is true once every Common is discovered")
+	-- claim through the remote: pays the Config.Index reward exactly once
+	tokens = DataS.GetTokens(p)
+	advance(0.6)
+	mark = logSize()
+	Mock.FromClient(R.IndexClaim, p, "Common")
+	advance(0.2)
+	T.eq(DataS.GetTokens(p), tokens + reward, "Pet Index: the IndexClaim remote pays Config.Index.Rewards.Common (" .. reward .. " tokens)")
+	T.eq(prof.IndexClaimed.Common, true, "Pet Index: ...and records Profile.IndexClaimed.Common")
+	local snaps = snapshots(p, mark)
+	T.check(#snaps >= 1 and snaps[#snaps].IndexClaimed and snaps[#snaps].IndexClaimed.Common == true, "Pet Index: ...and syncs the profile (ProfileSync.IndexClaimed)")
+	T.check(notified(p, "%+" .. reward, nil, mark) or notified(p, tostring(reward), nil, mark), "Pet Index: ...with a side toast naming the reward")
+	-- once only: a quick repeat is rate limited, a later one is refused
+	Mock.FromClient(R.IndexClaim, p, "Common")
+	advance(0.7)
+	mark = logSize()
+	Mock.FromClient(R.IndexClaim, p, "Common")
+	advance(0.2)
+	T.eq(DataS.GetTokens(p), tokens + reward, "Pet Index: a group reward pays only once")
+	T.check(notified(p, "claimed", "bad", mark), "Pet Index: ...a second claim is answered with 'Already claimed'")
+	local ok2, why2 = IS.CanClaim(p, "Common")
+	T.check(ok2 == false and tostring(why2):lower():find("claimed") ~= nil, "Pet Index: CanClaim after the claim is false ('Already claimed')", tostring(why2))
+	-- owned pets always count as discovered (ARCHITECTURE_V3.md section 1)
+	local uncommons = PC.ListByRarity("Uncommon")
+	for _, def in ipairs(uncommons) do
+		prof.Pets[def.Id] = 1
+	end
+	DataS.MarkDirty(p)
+	T.eq(select(1, IS.CanClaim(p, "Uncommon")), true, "Pet Index: owning every Uncommon completes that group (owned = discovered)")
+	-- untrusted input never raises and pays nothing
+	tokens = DataS.GetTokens(p)
+	local errs = #Mock.Errors
+	for _, junk in ipairs({ 5, true, { "Common" }, string.rep("x", 400), "", "NoSuchGroup" }) do
+		advance(0.6)
+		Mock.FromClient(R.IndexClaim, p, junk)
+	end
+	advance(0.6)
+	Mock.FromClient(R.IndexClaim, p)
+	advance(0.3)
+	T.eq(#Mock.Errors, errs, "Pet Index: IndexClaim with garbage arguments raises no errors")
+	T.eq(DataS.GetTokens(p), tokens, "Pet Index: ...and pays nothing")
+	T.eq(select(1, IS.Claim(p, CONTRACT.v3.secretRarity)), false, "Pet Index: the Secret group cannot be claimed without its pets")
+	-- the claim survives a rejoin (persisted, no second payout)
+	removePlayers({ p })
+	advance(1.5)
+	local again = joinWithId(p.Name, p.UserId)
+	advance(0.5)
+	local ok3 = IS.CanClaim(again, "Common")
+	T.check(ok3 == false and profileOf(again).IndexClaimed.Common == true, "Pet Index: the claim is saved (a rejoin cannot claim the same group again)")
+	removePlayers({ again })
+end
+
+----------------------------------------------------------------------------------------------------
+-- v3: the tutorial step flow (ARCHITECTURE_V3.md section 4), run inside the spots scenario (the home step walks to
+-- the player's own spot)
+----------------------------------------------------------------------------------------------------
+local function tutorialFlow()
+	local Config = config()
+	local TS, DataS, PS, SS = mod("TutorialService"), mod("DataService"), mod("PetService"), mod("SpotService")
+	local Steps = M["shared/TutorialSteps"]
+	if not T.check(type(TS) == "table" and type(TS.HandleEvent) == "function" and type(TS.GetState) == "function" and type(Steps) == "table", "Tutorial: TutorialService (HandleEvent / GetState) and TutorialSteps are loaded") then
+		return
+	end
+	local ids = {}
+	for i, step in ipairs(Steps.Steps) do
+		ids[i] = step.Id
+	end
+	T.eq(table.concat(ids, ","), "welcome,home,shop,spin,equip,index,portal,finish,done", "Tutorial: the nine documented steps in order")
+	local R = remoteFolder()
+	local gift = Config.Tutorial.GiftTokens
+	local finishReward = Config.Tutorial.FinishReward.Tokens
+	local function stepId(p)
+		local st = TS.GetState(p)
+		return st and st.Id
+	end
+	local function send(p, eventName)
+		advance(0.3) -- the remote is rate limited (0.25 s per player)
+		Mock.FromClient(R.TutorialEvent, p, eventName)
+		advance(0.2)
+	end
+	local mark = logSize()
+	local p = joinWithId("Newbie", 940001)
+	advance(0.5)
+	local first = lastRemote("TutorialState", p.UserId, mark)
+	local st = first and first.args[1]
+	T.check(st ~= nil and #V.tutorialState(st) == 0 and st.Step == 1 and st.Id == "welcome" and st.Done == false and st.Total == #Steps.Steps,
+		"Tutorial: a new player gets TutorialState { Step = 1, Id = 'welcome', Total = " .. #Steps.Steps .. ", Done = false } on join", st and table.concat(V.tutorialState(st), "; ") or "no state")
+	-- events are validated against the CURRENT step only
+	local okWrong = TS.HandleEvent(p, "ShopOpened")
+	T.eq(okWrong, false, "Tutorial: an event for another step is refused")
+	T.eq(stepId(p), "welcome", "Tutorial: ...and does not advance")
+	send(p, "Next")
+	T.eq(stepId(p), "home", "Tutorial: Next completes 'welcome'")
+	-- home: the server poll (2 Hz) notices the player on their own plot
+	local spot = SS.GetSpot(p)
+	local homeTarget = TS.GetState(p) and TS.GetState(p).Target
+	T.check(type(homeTarget) == "table" and homeTarget.Kind == "Spot" and spot ~= nil and typeof(homeTarget.Position) == "Vector3" and (homeTarget.Position - spot.Center).Magnitude < 1
+		and homeTarget.SpotIndex == p:GetAttribute(Config.Attr.SpotIndex), "Tutorial: the 'home' target is the player's own spot (Position = SpotInfo.Center, SpotIndex)")
+	if T.check(spot ~= nil, "Tutorial: the new player has a home spot") then
+		advance(1.5)
+		T.eq(stepId(p), "home", "Tutorial: 'home' waits while the player is away from the plot")
+		Mock.Teleport(p, CFrame.new(spot.Center + Vector3.new(0, 3, 0)))
+		waitFor(function()
+			return stepId(p) ~= "home"
+		end, 3)
+		T.eq(stepId(p), "shop", "Tutorial: standing on the own plot completes 'home' (NearSpot poll)")
+	end
+	-- shop -> spin: the gift is granted once on entering the spin step
+	local tokens = DataS.GetTokens(p)
+	mark = logSize()
+	send(p, "ShopOpened")
+	T.eq(stepId(p), "spin", "Tutorial: the client's ShopOpened completes 'shop'")
+	T.eq(DataS.GetTokens(p), tokens + gift, "Tutorial: entering 'spin' gifts Config.Tutorial.GiftTokens (" .. gift .. ")")
+	T.eq(DataS.GetTutorial(p).Gifted, true, "Tutorial: ...and stores Tutorial.Gifted")
+	T.check(notified(p, "Nimbus", nil, mark), "Tutorial: ...with a side toast from Nimbus")
+	-- leaving and rejoining on the spin step never pays the gift twice
+	removePlayers({ p })
+	advance(1.5)
+	p = joinWithId("Newbie", 940001)
+	advance(0.5)
+	T.eq(stepId(p), "spin", "Tutorial: progress survives a rejoin (back on 'spin')")
+	T.eq(DataS.GetTokens(p), tokens + gift, "Tutorial: ...and the gift is not paid again")
+	-- spin: a real roulette spin with the gift
+	local okSpin = PS.BuyRoulette(p, Config.Roulettes[1].Id)
+	advance(0.5)
+	T.eq(okSpin, true, "Tutorial: the gift pays for a Cloud Roulette spin")
+	T.eq(stepId(p), "equip", "Tutorial: a successful roll completes 'spin' (PetService.Rolled)")
+	-- equip: the first pet is auto-equipped, so opening Pets with a pet equipped completes the step
+	send(p, "PetsOpened")
+	T.eq(stepId(p), "index", "Tutorial: opening Pets with a pet equipped completes 'equip'")
+	send(p, "IndexOpened")
+	T.eq(stepId(p), "portal", "Tutorial: the client's IndexOpened completes 'index'")
+	local portalTarget = TS.GetState(p) and TS.GetState(p).Target
+	local easy = W.lobbyInfo and W.lobbyInfo.Portals and W.lobbyInfo.Portals.Easy
+	T.check(type(portalTarget) == "table" and portalTarget.Kind == "Portal" and portalTarget.Id == "Easy" and easy ~= nil and typeof(portalTarget.Position) == "Vector3" and (portalTarget.Position - easy.Center).Magnitude < 1,
+		"Tutorial: the 'portal' target carries the Easy portal's position for the guide arrow")
+	-- portal / finish: InMatch true, then false
+	local m = startMatch("Easy", { p })
+	waitFor(function()
+		return p:GetAttribute(Config.Attr.InMatch) == true and stepId(p) ~= "portal"
+	end, 10)
+	T.eq(stepId(p), "finish", "Tutorial: starting a match completes 'portal' (InMatch turned true)")
+	if m then
+		MS().LeaveMatch(p)
+	end
+	waitFor(function()
+		return stepId(p) ~= "finish"
+	end, 10)
+	T.eq(stepId(p), "done", "Tutorial: the end of the match completes 'finish' (InMatch turned false)")
+	-- done: Next finishes and pays the finish reward once
+	advance(2)
+	tokens = DataS.GetTokens(p)
+	local finished = {}
+	local fc = type(TS.Finished) == "table" and TS.Finished:Connect(function(who, skipped)
+		if who == p then
+			finished[#finished + 1] = skipped
+		end
+	end)
+	mark = logSize()
+	send(p, "Next")
+	local final = TS.GetState(p)
+	T.check(final and final.Done == true, "Tutorial: Next on 'done' finishes the tutorial (Done = true)")
+	T.eq(DataS.GetTokens(p), tokens + finishReward, "Tutorial: finishing pays Config.Tutorial.FinishReward (" .. finishReward .. " tokens)")
+	local last = lastRemote("TutorialState", p.UserId, mark)
+	T.check(last and last.args[1] and last.args[1].Done == true and #V.tutorialState(last.args[1]) == 0, "Tutorial: ...and sends TutorialState with Done = true")
+	send(p, "Next")
+	send(p, "Skip")
+	T.eq(DataS.GetTokens(p), tokens + finishReward, "Tutorial: the finish reward is paid only once")
+	if fc then
+		fc:Disconnect()
+		T.check(#finished == 1 and finished[1] == false, "Tutorial: TutorialService.Finished fires once (skipped = false)")
+	end
+	T.eq(DataS.GetTutorial(p).Done, true, "Tutorial: Tutorial.Done is stored in the profile")
+	removePlayers({ p })
+	advance(1.5)
+	p = joinWithId("Newbie", 940001)
+	advance(0.5)
+	T.check(TS.GetState(p) and TS.GetState(p).Done == true and DataS.GetTokens(p) == tokens + finishReward, "Tutorial: a finished tutorial stays finished after a rejoin (no replay, no reward)")
+	removePlayers({ p })
+
+	-- skip: ends the tutorial without the finish reward or the gift
+	local q = joinWithId("Skipper", 940002)
+	advance(0.5)
+	tokens = DataS.GetTokens(q)
+	send(q, "Skip")
+	T.check(TS.GetState(q) and TS.GetState(q).Done == true, "Tutorial: Skip ends the tutorial (Done = true)")
+	T.eq(DataS.GetTokens(q), tokens, "Tutorial: skipping pays neither the gift nor the finish reward")
+	T.eq(DataS.GetTutorial(q).Done, true, "Tutorial: ...and is stored")
+	-- rate limit + garbage
+	local errs = #Mock.Errors
+	for _, junk in ipairs({ 5, true, { "Next" }, string.rep("x", 400), "", "Hack" }) do
+		advance(0.3)
+		Mock.FromClient(R.TutorialEvent, q, junk)
+	end
+	advance(0.3)
+	Mock.FromClient(R.TutorialEvent, q)
+	advance(0.3)
+	T.eq(#Mock.Errors, errs, "Tutorial: TutorialEvent with garbage arguments raises no errors")
+	mark = logSize()
+	Mock.FromClient(R.TutorialEvent, q, "Sync")
+	Mock.FromClient(R.TutorialEvent, q, "Sync")
+	advance(0.2)
+	T.eq(#remotesFor("TutorialState", q.UserId, mark), 1, "Tutorial: 'Sync' answers with the current state and is rate limited")
+	removePlayers({ q })
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -399,6 +676,7 @@ S.spots = guarded("spots", function()
 	advance(1.2)
 	T.eq(qs.NameLabel.Text, "Free spot", "the showcase owner leaving frees the nameplate too")
 	T.check(qs.Folder:FindFirstChild("ShowcasePet", true) == nil, "...and removes the showcase pet")
+	tutorialFlow()
 	flushErrors("spots")
 	flushWarnings("spots")
 end)
@@ -767,6 +1045,7 @@ S.economy = guarded("economy", function()
 	DataS.RecordMatch(nil, "Easy", true, 1)
 	T.check(true, "RecordMatch(nil) is harmless")
 	removePlayers({ p })
+	indexFlow()
 	flushErrors("economy")
 	flushWarnings("economy")
 end)
@@ -1064,6 +1343,11 @@ S.profile_sync = guarded("profile_sync", function()
 		local perks = first.Perks
 		T.check(perks and perks.MaxHealth == 0 and perks.TokenBonus == 0 and perks.StaminaRegen == 0 and perks.CheckpointHeal == 0, "...with all four perks at 0")
 		T.check(first.SpotIndex == nil or type(first.SpotIndex) == "number", "SpotIndex is a number or absent")
+		-- v3: Discovered, IndexClaimed, Tutorial travel in the snapshot (Cash / Gems stay hidden until phase 2)
+		T.check(type(first.Discovered) == "table" and next(first.Discovered) == nil and type(first.IndexClaimed) == "table" and next(first.IndexClaimed) == nil,
+			"v3: the join snapshot carries empty Discovered / IndexClaimed sets")
+		T.check(type(first.Tutorial) == "table" and first.Tutorial.Step == 1 and first.Tutorial.Done == false and first.Tutorial.Gifted == false, "v3: ...and Tutorial = { Step = 1, Done = false, Gifted = false }")
+		T.check(p:GetAttribute(Config.Attr.Cash) == nil and p:GetAttribute(Config.Attr.Gems) == nil, "v3: the Cash / Gems attributes stay unset in phase 1 (the HUD hides them)")
 	end
 	-- RequestProfile
 	mark = logSize()
@@ -1100,8 +1384,10 @@ S.profile_sync = guarded("profile_sync", function()
 	-- snapshots are copies: no table is shared with the live profile, and an old snapshot does not change later
 	local snap = afterSpin[#afterSpin]
 	if snap then
-		T.check(snap.Pets ~= prof.Pets and snap.Equipped ~= prof.Equipped and snap.Items ~= prof.Items and snap.Stats ~= prof.Stats and snap.Stats.BestTimes ~= prof.Stats.BestTimes,
+		T.check(snap.Pets ~= prof.Pets and snap.Equipped ~= prof.Equipped and snap.Items ~= prof.Items and snap.Stats ~= prof.Stats and snap.Stats.BestTimes ~= prof.Stats.BestTimes
+			and snap.Discovered ~= prof.Discovered and snap.IndexClaimed ~= prof.IndexClaimed and snap.Tutorial ~= prof.Tutorial,
 			"a snapshot shares no table with the live profile")
+		T.check(snap.Discovered[CONTRACT.v2.mascotPetId] == true, "v3: owned pets appear in the snapshot's Discovered set")
 		local petsInSnap, itemsInSnap = 0, snap.Items.heal_cloud
 		for _, n in pairs(snap.Pets) do
 			petsInSnap = petsInSnap + n
@@ -1221,6 +1507,42 @@ S.migration = guarded("migration", function()
 		T.eq(h:GetAttribute("EquippedPets"), table.concat(hp.Equipped, ","), "the EquippedPets attribute is set from the validated Equipped list on load")
 	end
 	removePlayers({ h })
+	advance(1.0)
+
+	-- v3 (ARCHITECTURE_V3.md section 1): a stored v2 profile gains the v3 fields with their defaults, owned pets count
+	-- as discovered, and hostile v3 values are cleaned
+	data[v2 .. "/u_930008"] = { Version = 2, Tokens = 9, Pets = { [a] = 2, [b] = 1 }, Equipped = { a }, Items = {}, Stats = { Matches = 1, Wins = 1, TokensEarned = 9, Spins = 3, BestTimes = {} } }
+	local old = joinWithId("OldTimer", 930008)
+	local op = profileOf(old)
+	if T.check(op ~= nil, "v3 migration: a v2 profile without the v3 fields loads") then
+		T.check(op.Discovered[a] == true and op.Discovered[b] == true, "v3 migration: pets owned at migration time count as discovered")
+		T.check(type(op.IndexClaimed) == "table" and next(op.IndexClaimed) == nil, "v3 migration: IndexClaimed starts empty")
+		T.check(type(op.Tutorial) == "table" and op.Tutorial.Step == 1 and op.Tutorial.Done == false and op.Tutorial.Gifted == false, "v3 migration: Tutorial = { Step = 1, Done = false, Gifted = false }")
+		T.check(op.Cash == 0 and op.Gems == 0 and type(op.Home) == "table" and op.Home.Level == 0 and op.Home.Prestige == 0 and type(op.Home.Rooms) == "table" and type(op.PetLevels) == "table",
+			"v3 migration: the phase 2/3 reserves exist with defaults (Cash 0, Gems 0, Home Level 0 / Prestige 0, PetLevels {})")
+		T.eq(op.Tokens, 9, "v3 migration: the v2 fields are untouched")
+	end
+	removePlayers({ old })
+	advance(1.0)
+	local storedOld = data[v2 .. "/u_930008"]
+	T.check(type(storedOld) == "table" and type(storedOld.Discovered) == "table" and storedOld.Discovered[a] == true and type(storedOld.Tutorial) == "table",
+		"v3 migration: the save written on leave contains Discovered and Tutorial")
+	data[v2 .. "/u_930009"] = {
+		Version = 2, Tokens = 1, Pets = { [a] = 1 }, Equipped = {}, Items = {}, Stats = { Matches = 0, Wins = 0, TokensEarned = 0, Spins = 0, BestTimes = {} },
+		Discovered = { [b] = true, junk = "yes", [5] = a }, IndexClaimed = { Common = true, Bogus = 7 },
+		Tutorial = { Step = -5, Done = "yes", Gifted = 1 }, Cash = -40, Gems = 0 / 0, Home = { Level = "max", Rooms = { Kitchen = 3, [7] = 1 }, Prestige = -2 },
+		PetLevels = { [a] = { Level = -3, Xp = -10 }, [b] = 4 },
+	}
+	local hv = joinWithId("HostileV3", 930009)
+	local hp3 = profileOf(hv)
+	if T.check(hp3 ~= nil, "v3: a profile with hostile v3 fields loads") then
+		T.check(hp3.Discovered[a] == true and hp3.Discovered[b] == true and hp3.Discovered.junk == nil, "v3: Discovered keeps true entries (and owned pets), drops junk values")
+		T.check(hp3.IndexClaimed.Common == true and hp3.IndexClaimed.Bogus == nil, "v3: IndexClaimed keeps true entries only")
+		T.check(hp3.Tutorial.Step == 1 and hp3.Tutorial.Done == false and hp3.Tutorial.Gifted == false, "v3: a hostile Tutorial table is reset to { Step = 1, Done = false, Gifted = false }")
+		T.check(hp3.Cash == 0 and hp3.Gems == 0 and hp3.Home.Level == 0 and hp3.Home.Prestige == 0 and hp3.Home.Rooms.Kitchen == 3, "v3: Cash / Gems / Home are sanitised to non-negative integers")
+		T.check(hp3.PetLevels[a] and hp3.PetLevels[a].Level == 1 and hp3.PetLevels[a].Xp == 0 and hp3.PetLevels[b] and hp3.PetLevels[b].Level == 4, "v3: PetLevels entries are sanitised ({ Level >= 1, Xp >= 0 })")
+	end
+	removePlayers({ hv })
 	advance(1.0)
 
 	-- an Equipped list with an id the catalog no longer knows loses it on load
