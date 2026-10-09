@@ -41,8 +41,8 @@
 -- Merging: same-key voxels become boxes. Voxels completely enclosed by opaque voxels can never be seen, so any
 -- opaque box may pass through them (fewer, bigger boxes; the surface is unchanged). Untextured opaque materials
 -- (SmoothPlastic, Neon) may also overlap boxes of their own key. Translucent keys get exact, disjoint boxes.
--- If the result has more boxes than opts.MaxParts, nearly-equal shades are merged first (_Light, then _Dark
--- into the base colour, then increasingly different colours) until it fits (level of detail).
+-- If the result has more boxes than opts.MaxParts, nearly-equal shades are merged first (_Light / _Dark back
+-- into their base colour, the patchiest ones first, then increasingly different colours) until it fits (LOD).
 
 local Voxel = {}
 
@@ -714,6 +714,18 @@ end
 -- Offsets of the normal estimator: every neighbour within 2 voxels (weighted 1/d^2).
 -- The same neighbourhood measures "openness": the share of it that is empty (about 0.32 on a flat surface,
 -- more on convex bumps, much less in concave creases).
+local NEIGH26 = {}
+do
+	for dz = -1, 1 do
+		for dy = -1, 1 do
+			for dx = -1, 1 do
+				if dx ~= 0 or dy ~= 0 or dz ~= 0 then
+					NEIGH26[#NEIGH26 + 1] = dx + dy * S + dz * S2
+				end
+			end
+		end
+	end
+end
 local NORMAL_K, NORMAL_X, NORMAL_Y, NORMAL_Z = {}, {}, {}, {}
 local NORMAL_TOTAL = 0
 do
@@ -735,8 +747,9 @@ end
 
 -- Assigns shade variants. opts (all optional):
 --   LightDir = vector (default straight up), LightAt = 0.55 (normal . LightDir at or above -> _Light),
---   DarkAt = -0.35 (at or below -> _Dark), Crease = 0.25 (exposed voxels whose 2-voxel neighbourhood is at most
---   this empty sit in a crease -> _Dark; a flat surface is ~0.32), Light = false / Dark = false (disable one),
+--   DarkAt = -0.35 (at or below -> _Dark), Crease = 0.22 (exposed voxels whose 2-voxel neighbourhood is at most
+--   this empty sit in a crease -> _Dark; a flat surface is ~0.31), Light = false / Dark = false (disable one),
+--   Smooth = 2 (passes that give isolated voxels the shade of their neighbours: cleaner bands, fewer parts),
 --   Skip = {key = true} | {key, ...} (never shaded, e.g. eyes), Only = keys to shade,
 --   Noise = 0..1 (fraction of voxels nudged one shade up / down, deterministic), Seed = n
 function Voxel.Shade(grid, opts)
@@ -750,17 +763,20 @@ function Voxel.Shade(grid, opts)
 	lx, ly, lz = lx / ll, ly / ll, lz / ll
 	local lightAt = tonumber(opts.LightAt) or 0.55
 	local darkAt = tonumber(opts.DarkAt) or -0.35
-	local crease = tonumber(opts.Crease) or 0.25
+	local crease = tonumber(opts.Crease) or 0.22
 	local useLight = opts.Light ~= false
 	local useDark = opts.Dark ~= false
+	local passes = tonumber(opts.Smooth) or 2
 	local skip = toSet(opts.Skip) or {}
 	local only = toSet(opts.Only)
 	local noise = tonumber(opts.Noise) or 0
 	local seed = tonumber(opts.Seed) or 0
-	local out = {}
-	local nLight, nDark = 0, 0
 	local shadeable = {} -- per key: may it be shaded?
 	local OK, OX, OY, OZ = NORMAL_K, NORMAL_X, NORMAL_Y, NORMAL_Z
+
+	-- 1) shade of every exposed voxel from its estimated normal and how open its neighbourhood is
+	local shade = {}
+	local list = {}
 	for k, v in pairs(cells) do
 		local can = shadeable[v]
 		if can == nil then
@@ -786,44 +802,98 @@ function Voxel.Shade(grid, opts)
 					end
 				end
 				local nl = sqrt(nx * nx + ny * ny + nz * nz)
-				local shade = 0
+				local sh = 0
 				if nl > 1e-6 then
 					local d = (nx * lx + ny * ly + nz * lz) / nl
-					if d >= lightAt then
-						shade = 1
-					elseif d <= darkAt then
-						shade = -1
+					if d >= lightAt and useLight then
+						sh = 1
+					elseif d <= darkAt and useDark then
+						sh = -1
 					end
 				end
-				if empty / NORMAL_TOTAL <= crease then
-					shade = -1
+				if empty / NORMAL_TOTAL <= crease and useDark then
+					sh = -1
 				end
-				if noise > 0 then
-					local x, y, z = unpack3(k)
-					local h = Voxel.Hash(x, y, z, seed)
-					if h < noise * 0.5 then
-						shade = shade + 1
-					elseif h < noise then
-						shade = shade - 1
-					end
-					if shade > 1 then
-						shade = 1
-					elseif shade < -1 then
-						shade = -1
-					end
-				end
-				if shade > 0 and useLight then
-					out[k] = v .. "_Light"
-					nLight = nLight + 1
-				elseif shade < 0 and useDark then
-					out[k] = v .. "_Dark"
-					nDark = nDark + 1
-				end
+				shade[k] = sh
+				list[#list + 1] = k
 			end
 		end
 	end
-	for k, v in pairs(out) do
-		cells[k] = v
+	table.sort(list)
+
+	-- 2) smoothing: a voxel that agrees with fewer than 2 of its same-colour surface neighbours takes their
+	--    most common shade (Jacobi passes, so the result does not depend on iteration order)
+	for _ = 1, passes do
+		local nextShade = {}
+		local changed = false
+		for i = 1, #list do
+			local k = list[i]
+			local v = cells[k]
+			local own = shade[k]
+			local same, cl, c0, cd = 0, 0, 0, 0
+			for j = 1, 26 do
+				local nk = k + NEIGH26[j]
+				local ns = shade[nk]
+				if ns ~= nil and cells[nk] == v then
+					if ns == own then
+						same = same + 1
+					end
+					if ns > 0 then
+						cl = cl + 1
+					elseif ns < 0 then
+						cd = cd + 1
+					else
+						c0 = c0 + 1
+					end
+				end
+			end
+			local new = own
+			if same < 2 and cl + c0 + cd > 0 then
+				if c0 >= cl and c0 >= cd then
+					new = 0
+				elseif cl >= cd then
+					new = 1
+				else
+					new = -1
+				end
+			end
+			nextShade[k] = new
+			if new ~= own then
+				changed = true
+			end
+		end
+		shade = nextShade
+		if not changed then
+			break
+		end
+	end
+
+	-- 3) optional speckle, then write the variants
+	local nLight, nDark = 0, 0
+	for i = 1, #list do
+		local k = list[i]
+		local sh = shade[k]
+		if noise > 0 then
+			local x, y, z = unpack3(k)
+			local h = Voxel.Hash(x, y, z, seed)
+			if h < noise * 0.5 then
+				sh = sh + 1
+			elseif h < noise then
+				sh = sh - 1
+			end
+			if sh > 1 or (sh > 0 and not useLight) then
+				sh = useLight and 1 or 0
+			elseif sh < -1 or (sh < 0 and not useDark) then
+				sh = useDark and -1 or 0
+			end
+		end
+		if sh > 0 then
+			cells[k] = cells[k] .. "_Light"
+			nLight = nLight + 1
+		elseif sh < 0 then
+			cells[k] = cells[k] .. "_Dark"
+			nDark = nDark + 1
+		end
 	end
 	return nLight, nDark
 end
@@ -1077,37 +1147,66 @@ function Voxel.Merge(grid, opts)
 	if not maxParts or #boxes <= maxParts then
 		return boxes
 	end
-	-- LOD: 1) highlights into the base colour, 2) shadows too, 3) ever more different colours together
 	local keep = toSet(opts.Keep) or {}
 	local work = cells
-	local function variantMap(which)
-		local map = {}
+
+	-- LOD step 1: fold shade variants back into their base colour, the least efficient ones first (the most
+	-- boxes per voxel: small scattered shade patches go before the broad highlight on top of a head), a few
+	-- keys at a time, until the estimated saving covers the overshoot.
+	for _ = 1, 6 do
+		local nBoxes, nVox = {}, {}
+		for _, b in ipairs(boxes) do
+			nBoxes[b.Key] = (nBoxes[b.Key] or 0) + 1
+		end
 		for _, v in pairs(work) do
-			local base, variant = baseKeyOf(v)
-			if variant == which and not keep[v] then
-				map[v] = base
+			nVox[v] = (nVox[v] or 0) + 1
+		end
+		local cands = {}
+		for key, nb in pairs(nBoxes) do
+			local base, variant = baseKeyOf(key)
+			if variant and not keep[key] then
+				cands[#cands + 1] = { Key = key, Base = base, Boxes = nb, Ratio = nb / max(nVox[key] or 1, 1) }
 			end
 		end
-		return map
-	end
-	local tiers = { "Light", "Dark" }
-	for _, which in ipairs(tiers) do
-		work = remapped(work, variantMap(which))
+		if #cands == 0 then
+			break
+		end
+		table.sort(cands, function(a, b)
+			if a.Ratio ~= b.Ratio then
+				return a.Ratio > b.Ratio
+			end
+			return a.Key < b.Key
+		end)
+		local need = (#boxes - maxParts) * 1.15
+		local saved = 0
+		local map = {}
+		for _, c in ipairs(cands) do
+			map[c.Key] = c.Base
+			saved = saved + c.Boxes * 0.6
+			if saved >= need then
+				break
+			end
+		end
+		work = remapped(work, map)
 		boxes = mergeCells(work, info, prep)
 		if #boxes <= maxParts then
 			return boxes
 		end
 	end
+
+	-- LOD step 2: ever more different colours together (same material and transparency only)
 	if palette then
 		for _, tol in ipairs({ 0.06, 0.12, 0.2, 0.3, 0.45 }) do
 			local map = clusterMap(work, palette, cache, tol)
 			for k in pairs(keep) do
 				map[k] = nil
 			end
-			work = remapped(work, map)
-			boxes = mergeCells(work, info, prep)
-			if #boxes <= maxParts then
-				return boxes
+			if next(map) ~= nil then
+				work = remapped(work, map)
+				boxes = mergeCells(work, info, prep)
+				if #boxes <= maxParts then
+					return boxes
+				end
 			end
 		end
 	end
