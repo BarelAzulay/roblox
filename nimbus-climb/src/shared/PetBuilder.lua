@@ -64,8 +64,8 @@ local FLAP_AMP = math.rad(35)
 
 -- part budgets per group (with 6 lid parts, the root and the Secret aura: High <= ~330, Low <= ~115)
 local BUDGET = {
-	High = { Body = 210, Wing = 32, Tail = 20, Halo = 10 },
-	Low = { Body = 68, Wing = 11, Tail = 7, Halo = 4 },
+	High = { Total = 340, Body = 214, Wing = 32, Tail = 20, Halo = 10 },
+	Low = { Total = 118, Body = 70, Wing = 11, Tail = 7, Halo = 4 },
 }
 
 local TAU = math.pi * 2
@@ -1338,13 +1338,13 @@ end
 
 WINGS.Fairy = function(ctx, w)
 	-- upper and lower translucent lobes (1 voxel thin) with darker veins and bright spots
-	ell(w, "Wing", { -6.4, 4.6, 0 }, { 6, 4.4, 0.5 }, { Rotation = CFrame.Angles(0, 0, -0.35), Pivot = { -6.4, 4.6, 0 } })
-	ell(w, "Wing", { -4.8, -2.6, 0 }, { 3.8, 2.8, 0.5 }, { Rotation = CFrame.Angles(0, 0, 0.45), Pivot = { -4.8, -2.6, 0 } })
+	ell(w, "Wing", { -6.6, 4.6, 0 }, { 6.2, 4.2, 0.5 })
+	ell(w, "Wing", { -4.6, -2.4, 0 }, { 3.8, 2.6, 0.5 })
 	if ctx.High then
-		cap(w, "WingVein", { -1, 1.2, 0 }, { -9.8, 6.8, 0 }, 0.4, 0.3, { Op = "Paint", OnlyKeys = "Wing" })
-		cap(w, "WingVein", { -1, 0, 0 }, { -6.6, -3.4, 0 }, 0.4, 0.3, { Op = "Paint", OnlyKeys = "Wing" })
-		ell(w, "WingEdge", { -9.6, 5, 0 }, { 1.4, 1.4, 1 }, { Op = "Paint", OnlyKeys = "Wing" })
-		ell(w, "WingEdge", { -6.4, -3.4, 0 }, { 1, 1, 1 }, { Op = "Paint", OnlyKeys = "Wing" })
+		cap(w, "WingVein", { -1, 1.6, 0 }, { -10.4, 5.6, 0 }, 0.4, 0.3, { Op = "Paint", OnlyKeys = "Wing" })
+		cap(w, "WingVein", { -1, 0, 0 }, { -6.6, -2.6, 0 }, 0.4, 0.3, { Op = "Paint", OnlyKeys = "Wing" })
+		ell(w, "WingEdge", { -9.8, 3.6, 0 }, { 1.4, 1.4, 1 }, { Op = "Paint", OnlyKeys = "Wing" })
+		ell(w, "WingEdge", { -6.2, -3.2, 0 }, { 1, 1, 1 }, { Op = "Paint", OnlyKeys = "Wing" })
 	end
 	ctx.Pal.Wing = { Color = ctx.Look.WingColor, Transparency = 0.3 }
 	ctx.Pal.WingVein = { Color = darken(ctx.Look.WingColor, 0.22), Transparency = 0.1 }
@@ -1371,13 +1371,13 @@ WINGS.Cloud = function(ctx, w)
 end
 
 WINGS.Crystal = function(ctx, w)
-	-- three thin translucent shards fanning out (lens shaped, 1-2 voxels thick), each with a glowing spine
-	local shards = { { -7.6, 6.4, 6.4, 1.8, 0.75 }, { -9, 1.6, 6.8, 1.7, 0.15 }, { -6.4, -2.6, 4.8, 1.5, -0.5 } }
+	-- three thin translucent diamond shards fanning out (axis aligned in the wing plane, so they stay crisp),
+	-- each with a glowing spine
+	local shards = { { -8, 5.4, 7, 2.2 }, { -9.4, 1, 6.4, 1.8 }, { -6.4, -2.8, 4.6, 1.6 } }
 	for _, sh in ipairs(shards) do
-		local rot = CFrame.Angles(0, 0, sh[5])
-		ell(w, "Wing", { sh[1], sh[2], 0.4 }, { sh[3], sh[4], 0.7 }, { Rotation = rot, Pivot = { sh[1], sh[2], 0.4 } })
+		shape(w, { Kind = "Ellipsoid", Center = { sh[1], sh[2], 0 }, Radius = { sh[3], sh[4], 0.5 }, Key = "Wing" })
 		if ctx.High then
-			box(w, "WingEdge", { sh[1], sh[2], 0.4 }, { sh[3] * 1.6, 0.8, 3 }, { Op = "Paint", OnlyKeys = "Wing", Rotation = rot, Pivot = { sh[1], sh[2], 0.4 } })
+			box(w, "WingEdge", { sh[1] - 0.5, sh[2], 0 }, { sh[3] * 1.5, 1, 3 }, { Op = "Paint", OnlyKeys = "Wing" })
 		end
 	end
 	ctx.Pal.Wing = { Color = ctx.Look.WingColor, Transparency = 0.25, Material = Enum.Material.Glass }
@@ -1439,7 +1439,7 @@ end
 
 ACCESSORIES.Halo = function(ctx)
 	local h = Voxel.NewGrid(30)
-	shape(h, { Kind = "Torus", Center = { 0, 0, 0 }, Radius = 4.6, Thickness = 0.8, Key = "HaloGlow" })
+	shape(h, { Kind = "Torus", Center = { 0, 0, 0 }, Radius = 4.2, Thickness = 0.6, Key = "HaloGlow" })
 	ctx.Halo = h
 	ctx.HaloAt = { 0, ctx.HeadTop + 3.2, ctx.HeadC[3] + 0.6 }
 	ctx.Pal.HaloGlow = { Color = rgb(255, 222, 120), Material = NEON }
@@ -1579,7 +1579,8 @@ local function buildBlueprint(look, detail)
 		end
 
 		local bp = { Groups = {}, Pal = ctx.Pal, Look = look, Detail = detail, K = k }
-		bp.Groups[#bp.Groups + 1] = { Name = "Body", Boxes = mergeGroup(ctx, ctx.Body, budget.Body) }
+		local bodyGroup = { Name = "Body" }
+		bp.Groups[#bp.Groups + 1] = bodyGroup
 
 		-- wings: left from the grid, right = exact mirror image
 		local wh = ctx.WingHinge
@@ -1615,6 +1616,14 @@ local function buildBlueprint(look, detail)
 		for i, cells in ipairs(ctx.LidCells or {}) do
 			bp.Groups[#bp.Groups + 1] = { Name = "EyeLid", Boxes = lidBoxes(cells), Kind = "lid", Index = i }
 		end
+		-- the body gets whatever the other groups left of the total budget (it can always give up shading)
+		local used = 1 -- the root
+		for _, gr in ipairs(bp.Groups) do
+			if gr.Boxes then
+				used = used + #gr.Boxes
+			end
+		end
+		bodyGroup.Boxes = mergeGroup(ctx, ctx.Body, max(30, min(budget.Body, budget.Total - used)))
 		return bp
 	end)
 	SK = 1
