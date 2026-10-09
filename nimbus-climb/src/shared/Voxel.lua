@@ -749,7 +749,7 @@ end
 --   LightDir = vector (default straight up), LightAt = 0.55 (normal . LightDir at or above -> _Light),
 --   DarkAt = -0.35 (at or below -> _Dark), Crease = 0.22 (exposed voxels whose 2-voxel neighbourhood is at most
 --   this empty sit in a crease -> _Dark; a flat surface is ~0.31), Light = false / Dark = false (disable one),
---   Smooth = 2 (passes that give isolated voxels the shade of their neighbours: cleaner bands, fewer parts),
+--   Smooth = 1 (passes that give isolated voxels the shade of their neighbours: cleaner bands, fewer parts),
 --   Skip = {key = true} | {key, ...} (never shaded, e.g. eyes), Only = keys to shade,
 --   Noise = 0..1 (fraction of voxels nudged one shade up / down, deterministic), Seed = n
 function Voxel.Shade(grid, opts)
@@ -766,7 +766,7 @@ function Voxel.Shade(grid, opts)
 	local crease = tonumber(opts.Crease) or 0.22
 	local useLight = opts.Light ~= false
 	local useDark = opts.Dark ~= false
-	local passes = tonumber(opts.Smooth) or 2
+	local passes = tonumber(opts.Smooth) or 1
 	local skip = toSet(opts.Skip) or {}
 	local only = toSet(opts.Only)
 	local noise = tonumber(opts.Noise) or 0

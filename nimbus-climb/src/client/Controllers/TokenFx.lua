@@ -1,6 +1,9 @@
 -- TokenFx: spins and bobs the cloud coins on this client only. The server leaves the coins still when
 -- Config.Tokens.ClientAnimated is true (TokenService), so nothing here replicates and it costs the
 -- network nothing. The motion matches TokenService's old server-side driver.
+-- v3: the coin is a voxel coin (TokenService): its root block is posed here and every other block is welded
+-- to it, so the whole coin spins; the soft "Halo" sphere is an anchored, unwelded child of the root that this
+-- controller bobs along with the coin (it never needs to spin).
 -- Plain Lua 5.1-compatible syntax only.
 
 local CollectionService = game:GetService("CollectionService")

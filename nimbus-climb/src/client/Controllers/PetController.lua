@@ -251,7 +251,7 @@ end
 
 -- Builds the model of one pet (inside pcall: a broken definition must not take the controller down).
 local function buildModel(f, p)
-	local ok, model = pcall(PetBuilder.Build, p.def, BUILD_OPTS)
+	local ok, model = pcall(PetBuilder.Build, p.def, { Scale = BUILD_OPTS.Scale, Detail = f.isLocal and "High" or "Low" }) -- v3 LOD: own pets High, others Low
 	if not ok or typeof(model) ~= "Instance" then
 		p.retryAt = os.clock() + BUILD_RETRY
 		warnLimited("build_" .. tostring(p.id), "could not build pet " .. tostring(p.id) .. ": " .. tostring(model))
