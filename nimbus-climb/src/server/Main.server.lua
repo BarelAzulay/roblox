@@ -210,6 +210,7 @@ local PortalService = loadService("PortalService")
 local IndexService = loadOptionalService("IndexService")
 local NpcService = loadOptionalService("NpcService")
 local TutorialService = loadOptionalService("TutorialService")
+local StormAltar = loadOptionalService("StormAltar") -- the player's Stormfang landmark (ARCHITECTURE_V3.md section 10)
 
 ----------------------------------------------------------------------
 -- 2. World: lighting, lobby, damage, tokens, persistence
@@ -223,6 +224,9 @@ step("Hold spawns", holdSpawns)
 
 local lobbyInfo = call("LobbyBuilder.Build", LobbyBuilder, "Build")
 lobbyInfo = normaliseLobbyInfo(lobbyInfo)
+if StormAltar then
+	call("StormAltar.Build", StormAltar, "Build", lobbyInfo)
+end
 
 call("DamageService.Init", DamageService, "Init")
 call("TokenService.Init", TokenService, "Init")
