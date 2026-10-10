@@ -1,13 +1,17 @@
--- SpotService: every player owns a "spot" (their own cloud home) on the outer lobby ring.
+-- SpotService: the home plots on the outer lobby ring (one per player, claimed with E at the gate).
 --
--- * Assignment: after the profile loads the player gets Profile.SpotIndex when that spot is free,
---   otherwise the lowest free spot. The index is stored back in the profile and mirrored on the
---   player attribute Config.Attr.SpotIndex. Spots are freed when the owner leaves; players who
---   found no free spot are given one as soon as one opens up.
--- * Nameplate (LobbyBuilder builds it: a compact PIXEL-sized tag, World text rule): NameLabel = display name,
---   SubLabel = "3 pets • 120 Cloud Tokens" (refreshed whenever the pets / tokens change), the avatar disc shows
---   the owner's headshot (Players:GetUserThumbnailAsync in pcall, cached per user; the silhouette built from
---   frames is the fallback); unowned spots read "Free home" / "Step in to claim" with a "+" on the disc.
+-- * Claiming (ARCHITECTURE_V3.md "Phase 2: Tycoon homes"; replaces the v2 auto-assignment): nobody gets a plot on
+--   join. Each free plot's gate carries a "Claim Home" ProximityPrompt (HomeBuilder builds it, TycoonService handles
+--   it and calls SpotService.Claim). One plot per player, refused during a match; the plot is the player's for the
+--   session and is released when they leave (TycoonService clears the build, the gate reads "Claim Home" again).
+--   The claimed index is mirrored on the player attribute Config.Attr.SpotIndex (absent while the player has no
+--   plot) and remembered in Profile.SpotIndex as the player's LAST plot: a returning player whose last plot is free
+--   gets the side toast "Welcome back! Press E at your gate", everyone else "Pick a free home: press E at its gate".
+-- * Nameplate (LobbyBuilder builds it: a compact PIXEL-sized tag, World text rule): NameLabel = the owner's display
+--   name, SubLabel = "Home Level 12 • ★★" (the Home Level and one star per Prestige; "★ x7" past five stars),
+--   refreshed whenever the home changes; the avatar disc shows the owner's headshot (Players:GetUserThumbnailAsync in
+--   pcall, cached per user; the silhouette built from frames is the fallback). Free plots read "Free home" /
+--   "Press E at the gate" with a "+" on the disc.
 -- * Showcase podium: a slowly turning + bobbing PetBuilder model of the owner's best (highest
 --   rarity) pet with a small name / rarity tag. It is rebuilt only when that pet changes and is
 --   only moved while a player is nearby.
@@ -17,9 +21,19 @@
 --   welded parts follow on every client by themselves), at most 10 times a second, and only for
 --   showcases with a player within CULL_RADIUS. PetBuilder.Animate is NOT used here (it would
 --   write every part, and it cannot be used on a welded assembly): the pet keeps its rest pose.
--- * Remotes.GoToSpot -> Teleport (rate limited, refused during a match).
+-- * Remotes.GoToSpot -> Teleport (rate limited, refused during a match): home when the player has a plot, otherwise
+--   in front of the gate of their last plot when it is free, else of the nearest free plot.
 --
--- Public API: Init(lobbyInfo, deps)  GetSpot(player) -> SpotInfo|nil  Teleport(player) -> boolean
+-- Public API: Init(lobbyInfo, deps)  GetSpot(player) -> SpotInfo|nil (the CLAIMED plot)  Teleport(player) -> boolean
+-- Phase 2 (used by TycoonService; the plot data stays here):
+--   Claim(player, index) -> ok, reason        validated: a known plot, free, the player has none, not in a match
+--   Release(player) -> index|nil               frees the player's plot (also automatic on leave)
+--   GetOwner(index) -> Player|nil, GetSpotByIndex(index) -> SpotInfo|nil, GetSpots() -> { [index] = SpotInfo }
+--   FindFreeSpot(position|nil, preferIndex|nil) -> SpotInfo|nil   the preferred plot when free, else the free plot
+--                                              nearest to `position` (the lowest index without one)
+--   SuggestSpot(player) -> SpotInfo|nil, owned  the claimed plot, else the last plot when free, else the nearest free
+--   GateCFrame(spotInfo) -> CFrame              the gate on the ground (LookVector = towards the street)
+--   Signals Claimed (player, index), Released (player, index)
 -- Extra: Refresh(player) (re-reads the profile now; normally automatic).
 -- deps = { DataService = , PetService = }.
 --
@@ -35,14 +49,16 @@ local Util = require(Shared.Util)
 local Remotes = require(Shared.Remotes)
 
 local SpotService = {}
+SpotService.Claimed = Util.Signal() -- Fire(player, index)
+SpotService.Released = Util.Signal() -- Fire(player, index)
 
--- "\226\128\162" = bullet (escaped so the file stays plain ASCII).
+-- "\226\128\162" = bullet, "\226\152\133" = black star (escaped so the file stays plain ASCII).
 local BULLET = "\226\128\162"
+local STAR = "\226\152\133"
+local MAX_STAR_GLYPHS = 5 -- more stars than this read "★ x7"
 
 local FREE_NAME = "Free home"
-local FREE_SUB = "Step in to claim"
-local TOKENS_NAME = (Theme.Currency and Theme.Currency.Tokens and Theme.Currency.Tokens.Name) or "Cloud Tokens"
-local TOKENS_FULL_BELOW = 100000 -- the info line shows "99,999" in full, then "123K"
+local FREE_SUB = "Press E at the gate"
 
 -- Showcase tag (World text rule): pixel-sized, names >= 22 px, info >= 18 px, compact solid plate.
 local TAG_W, TAG_H = 300, 96
@@ -64,7 +80,9 @@ local REFRESH_INTERVAL = 1 -- seconds between profile signature checks
 local PROFILE_WAIT = 20 -- give up waiting for a profile after this many seconds
 local REMOTE_COOLDOWN = 0.25 -- per player per remote
 local HEADSHOT_RETRY = 120 -- seconds before a failed headshot request may be tried again
-local WELCOME_DELAY = 4 -- seconds after assignment before the "your spot" toast
+local WELCOME_DELAY = 4 -- seconds after the profile loaded before the "press E at your gate" toast
+local GATE_OUTSIDE = 6 -- studs in front of the gate (street side) where GoToSpot puts a player without a plot
+local GATE_LIFT = 3 -- studs above the ground for that placement (the character's root height)
 
 local initialized = false
 local running = false
@@ -74,11 +92,11 @@ local spots = {} -- [index] = SpotInfo
 local spotCount = 0
 local owners = {} -- [index] = Player
 local spotOf = {} -- [Player] = index
-local waiting = {} -- [Player] = true : profile loaded but no free spot yet
 local conns = {} -- [Player] = { RBXScriptConnection... }
 local shows = {} -- [index] = showcase record (see makeShow)
 local lastSig = {} -- [index] = last nameplate signature
 local lastGo = {} -- [Player] = os.clock() of the last GoToSpot
+local welcomed = {} -- [Player] = true once the join toast was scheduled
 local headshots = {} -- [userId] = content string : the GetUserThumbnailAsync cache
 local headshotFailed = {} -- [userId] = os.clock() of the last failed request (retried after HEADSHOT_RETRY)
 local headshotPending = {} -- [userId] = true while a request runs
@@ -146,14 +164,6 @@ local function getProfile(player)
 		end
 	end
 	return nil
-end
-
-local function readTokens(player)
-	local value = player:GetAttribute(Config.Attr.Tokens)
-	if type(value) == "number" then
-		return math.floor(value)
-	end
-	return 0
 end
 
 local function displayNameOf(player)
@@ -664,16 +674,49 @@ local function pickBestPet(profile)
 	return bestId
 end
 
-local function countPets(profile)
-	local total = 0
-	if profile and type(profile.Pets) == "table" then
-		for _, count in pairs(profile.Pets) do
-			if type(count) == "number" and count > 0 then
-				total = total + math.floor(count)
-			end
+local function wholeNumber(v, maxValue)
+	if type(v) ~= "number" or v ~= v or v < 0 then
+		return 0
+	end
+	if v == math.huge then
+		return maxValue
+	end
+	return math.min(math.floor(v), maxValue)
+end
+
+-- Home Level + Prestige stars of a profile's Home (the live table: read only).
+local function homeStatsOf(profile)
+	local home = profile and profile.Home
+	if type(home) ~= "table" then
+		return 0, 0
+	end
+	local level = nil
+	local catalog = loadShared("TycoonCatalog")
+	if catalog and type(catalog.HomeLevelOf) == "function" then
+		local ok, value = pcall(catalog.HomeLevelOf, home)
+		if ok and type(value) == "number" then
+			level = value
 		end
 	end
-	return total
+	if level == nil then
+		level = home.Level
+	end
+	return wholeNumber(level, 100000), wholeNumber(home.Prestige, 100000)
+end
+
+-- "Home Level 12" / "Home Level 12 • ★★" / "Home Level 3 • ★ x7"
+local function homeLine(level, stars)
+	local text = "Home Level " .. tostring(level)
+	if stars > 0 then
+		local glyphs
+		if stars <= MAX_STAR_GLYPHS then
+			glyphs = string.rep(STAR, stars)
+		else
+			glyphs = STAR .. " x" .. tostring(stars)
+		end
+		text = text .. " " .. BULLET .. " " .. glyphs
+	end
+	return text
 end
 
 -- Re-reads one owner's profile; touches the labels / podium only when something changed.
@@ -683,37 +726,27 @@ local function refreshSpot(index)
 		return
 	end
 	local profile = getProfile(owner)
-	local tokens = readTokens(owner)
-	local petTotal = countPets(profile)
+	local level, stars = homeStatsOf(profile)
 	local bestId = pickBestPet(profile)
 	local name = displayNameOf(owner)
 
-	local sig = name .. "|" .. tostring(tokens) .. "|" .. tostring(petTotal) .. "|" .. tostring(bestId)
+	local sig = name .. "|" .. tostring(level) .. "|" .. tostring(stars) .. "|" .. tostring(bestId)
 	if lastSig[index] == sig then
 		return
 	end
 	lastSig[index] = sig
-
-	local petsText = tostring(petTotal) .. " pets"
-	if petTotal == 1 then
-		petsText = "1 pet"
-	end
-	local tokenText = Theme.ShortNumber(tokens, TOKENS_FULL_BELOW) .. " " .. TOKENS_NAME
-	if tokens == 1 then
-		tokenText = "1 " .. (TOKENS_NAME:gsub("s$", ""))
-	end
-	setLabels(index, name, petsText .. " " .. BULLET .. " " .. tokenText)
+	setLabels(index, name, homeLine(level, stars))
 	setShowcasePet(index, bestId)
 end
 
 function SpotService.Refresh(player)
-	local index = spotOf[player]
+	local index = player and spotOf[player]
 	if index then
 		refreshSpot(index)
 	end
 end
 
--- Several attribute changes in one frame produce a single refresh.
+-- Several changes in one frame produce a single refresh.
 local function queueRefresh(player)
 	if refreshQueued[player] then
 		return
@@ -745,16 +778,173 @@ local function refreshLoop()
 end
 
 ----------------------------------------------------------------------
--- Assignment
+-- Gates, free plots
 ----------------------------------------------------------------------
 
-local function claimSpot(player, index, profile)
+local function validIndex(index)
+	return type(index) == "number" and index == index and index == math.floor(index) and spots[index] ~= nil
+end
+
+-- The gate on the ground (LookVector = towards the street): SpotInfo.GateCFrame, else derived from the plot.
+function SpotService.GateCFrame(info)
+	if type(info) ~= "table" then
+		return nil
+	end
+	if typeof(info.GateCFrame) == "CFrame" then
+		return info.GateCFrame
+	end
+	if typeof(info.PlotCFrame) == "CFrame" then
+		local size = tonumber(info.PlotSize) or Config.Lobby.PlotSize or 72
+		return info.PlotCFrame * CFrame.new(0, 0, -size / 2)
+	end
+	return nil
+end
+
+-- Where a player without a plot is put: just outside the gate (street side), facing into the yard.
+local function gateArrivalCFrame(info)
+	local gate = SpotService.GateCFrame(info)
+	if not gate then
+		return info and info.SpawnCFrame or nil
+	end
+	local pos = (gate * CFrame.new(0, GATE_LIFT, -GATE_OUTSIDE)).Position
+	local inward = -gate.LookVector
+	local flat = Vector3.new(inward.X, 0, inward.Z)
+	if flat.Magnitude < 1e-3 then
+		return CFrame.new(pos)
+	end
+	return CFrame.lookAt(pos, pos + flat.Unit)
+end
+
+local function gatePosition(info)
+	local gate = SpotService.GateCFrame(info)
+	if gate then
+		return gate.Position
+	end
+	if typeof(info.Center) == "Vector3" then
+		return info.Center
+	end
+	if typeof(info.SpawnCFrame) == "CFrame" then
+		return info.SpawnCFrame.Position
+	end
+	return nil
+end
+
+function SpotService.FindFreeSpot(position, preferIndex)
+	if validIndex(preferIndex) and not owners[preferIndex] then
+		return spots[preferIndex]
+	end
+	local best, bestDist = nil, math.huge
+	for index = 1, spotCount do
+		local info = spots[index]
+		if info and not owners[index] then
+			if typeof(position) ~= "Vector3" then
+				return info -- the lowest free index
+			end
+			local at = gatePosition(info)
+			local d = at and (at - position).Magnitude or math.huge
+			if d < bestDist then
+				best, bestDist = info, d
+			end
+		end
+	end
+	return best
+end
+
+local function lastSpotIndex(player)
+	local profile = getProfile(player)
+	local wanted = profile and profile.SpotIndex
+	if validIndex(wanted) then
+		return wanted
+	end
+	return nil
+end
+
+function SpotService.SuggestSpot(player)
+	if not player then
+		return nil, false
+	end
+	local index = spotOf[player]
+	if index then
+		return spots[index], true
+	end
+	local root = Util.GetRoot(player)
+	return SpotService.FindFreeSpot(root and root.Position or nil, lastSpotIndex(player)), false
+end
+
+----------------------------------------------------------------------
+-- Claim / release
+----------------------------------------------------------------------
+
+local function freeSpot(player)
+	refreshQueued[player] = nil
+	local list = conns[player]
+	conns[player] = nil
+	if list then
+		for _, conn in ipairs(list) do
+			conn:Disconnect()
+		end
+	end
+	local index = spotOf[player]
+	spotOf[player] = nil
+	if not index then
+		return nil
+	end
+	if owners[index] == player then
+		owners[index] = nil
+	end
+	lastSig[index] = nil
+	if player.Parent then
+		pcall(function()
+			player:SetAttribute(Config.Attr.SpotIndex, nil)
+		end)
+	end
+	local info = spots[index]
+	if info and info.Folder then
+		pcall(function()
+			info.Folder:SetAttribute("OwnerUserId", nil)
+		end)
+	end
+	if shows[index] then
+		setShowcasePet(index, nil)
+	end
+	setLabels(index, FREE_NAME, FREE_SUB)
+	setAvatar(index, "Free")
+	return index
+end
+
+function SpotService.Claim(player, index)
+	if not initialized then
+		return false, "Homes are not ready yet"
+	end
+	if typeof(player) ~= "Instance" or not player:IsA("Player") or not player.Parent or departed[player] then
+		return false, "Not in the game"
+	end
+	if not validIndex(index) then
+		return false, "Unknown home"
+	end
+	if spotOf[player] then
+		if spotOf[player] == index then
+			return false, "This is already your home"
+		end
+		return false, "You already have a home"
+	end
+	if player:GetAttribute(Config.Attr.InMatch) == true then
+		return false, "Finish your match first"
+	end
+	local owner = owners[index]
+	if owner then
+		if owner.Parent then
+			return false, "This home belongs to " .. displayNameOf(owner)
+		end
+		freeSpot(owner) -- a stale owner (left without PlayerRemoving): free it now
+	end
+
 	owners[index] = player
 	spotOf[player] = index
-	waiting[player] = nil
 	lastSig[index] = nil
-
-	player:SetAttribute(Config.Attr.SpotIndex, index)
+	pcall(function()
+		player:SetAttribute(Config.Attr.SpotIndex, index)
+	end)
 	local info = spots[index]
 	if info and info.Folder then
 		pcall(function()
@@ -762,6 +952,8 @@ local function claimSpot(player, index, profile)
 		end)
 	end
 
+	-- remember the LAST plot (the welcome-back toast offers it again next time)
+	local profile = getProfile(player)
 	if profile and profile.SpotIndex ~= index then
 		profile.SpotIndex = index
 		if dataService and type(dataService.MarkDirty) == "function" then
@@ -777,99 +969,28 @@ local function claimSpot(player, index, profile)
 
 	local list = {}
 	conns[player] = list
-	table.insert(list, player:GetAttributeChangedSignal(Config.Attr.Tokens):Connect(function()
-		queueRefresh(player)
-	end))
 	table.insert(list, player:GetAttributeChangedSignal(Config.Attr.EquippedPets):Connect(function()
 		queueRefresh(player)
 	end))
-
 	refreshSpot(index)
-
-	task.delay(WELCOME_DELAY, function()
-		if player.Parent and spotOf[player] == index then
-			notify(player, "Your cloud home is spot " .. tostring(index) .. " - use the house button!", "info", 5)
-		end
-	end)
+	SpotService.Claimed:Fire(player, index)
+	return true, nil
 end
 
-local function freeSpot(player)
-	waiting[player] = nil
-	refreshQueued[player] = nil
-	local list = conns[player]
-	conns[player] = nil
-	if list then
-		for _, conn in ipairs(list) do
-			conn:Disconnect()
-		end
+function SpotService.Release(player)
+	if not player then
+		return nil
 	end
-	local index = spotOf[player]
-	spotOf[player] = nil
-	if not index then
-		return
+	local index = freeSpot(player)
+	if index then
+		SpotService.Released:Fire(player, index)
 	end
-	if owners[index] == player then
-		owners[index] = nil
-	end
-	lastSig[index] = nil
-	if player.Parent then
-		player:SetAttribute(Config.Attr.SpotIndex, nil)
-	end
-	local info = spots[index]
-	if info and info.Folder then
-		pcall(function()
-			info.Folder:SetAttribute("OwnerUserId", nil)
-		end)
-	end
-	local show = shows[index]
-	if show then
-		setShowcasePet(index, nil)
-	end
-	setLabels(index, FREE_NAME, FREE_SUB)
-	setAvatar(index, "Free")
+	return index
 end
 
-local function lowestFreeSpot()
-	for index = 1, spotCount do
-		if spots[index] and not owners[index] then
-			return index
-		end
-	end
-	return nil
-end
-
--- Gives `player` a spot (preferred one first). Idempotent; no free spot => parked in `waiting`.
-local function assignSpot(player)
-	if not player or not player.Parent or departed[player] or spotOf[player] then
-		return
-	end
-	local profile = getProfile(player)
-	local index = nil
-	local wanted = profile and profile.SpotIndex
-	if type(wanted) == "number" and wanted == math.floor(wanted) and spots[wanted] and not owners[wanted] then
-		index = wanted
-	end
-	if not index then
-		index = lowestFreeSpot()
-	end
-	if not index then
-		waiting[player] = true
-		return
-	end
-	claimSpot(player, index, profile)
-end
-
-local function assignWaiting()
-	for player in pairs(waiting) do
-		if player.Parent then
-			if lowestFreeSpot() then
-				assignSpot(player)
-			end
-		else
-			waiting[player] = nil
-		end
-	end
-end
+----------------------------------------------------------------------
+-- Join / leave
+----------------------------------------------------------------------
 
 local function hasProfile(player)
 	if not dataService or type(dataService.GetProfile) ~= "function" then
@@ -878,16 +999,37 @@ local function hasProfile(player)
 	return getProfile(player) ~= nil
 end
 
--- Waits (bounded) for the player's profile, then assigns. The ProfileLoaded signal usually wins.
+-- The join toast (side toast, never centred): the last plot when it is still free, any free gate otherwise.
+local function scheduleWelcome(player)
+	if welcomed[player] or not player.Parent or departed[player] then
+		return
+	end
+	welcomed[player] = true
+	task.delay(WELCOME_DELAY, function()
+		if not player.Parent or departed[player] or spotOf[player] then
+			return
+		end
+		local last = lastSpotIndex(player)
+		if last and not owners[last] then
+			notify(player, "Welcome back! Press E at your gate (home #" .. tostring(last) .. ").", "info", 6)
+		elseif SpotService.FindFreeSpot(nil, nil) then
+			notify(player, "Pick a free home: press E at its gate to claim it!", "info", 6)
+		else
+			notify(player, "Every home is taken right now - one frees up when a player leaves.", "info", 6)
+		end
+	end)
+end
+
+-- Waits (bounded) for the player's profile, then schedules the welcome toast. ProfileLoaded usually wins.
 local function onPlayerAdded(player)
 	task.spawn(function()
 		local waited = 0
-		while player.Parent and not spotOf[player] and not hasProfile(player) and waited < PROFILE_WAIT do
+		while player.Parent and not hasProfile(player) and waited < PROFILE_WAIT do
 			task.wait(0.25)
 			waited = waited + 0.25
 		end
 		if player.Parent then
-			assignSpot(player)
+			scheduleWelcome(player)
 		end
 	end)
 end
@@ -895,11 +1037,8 @@ end
 local function onPlayerRemoving(player)
 	departed[player] = true
 	lastGo[player] = nil
-	local had = spotOf[player] ~= nil
-	freeSpot(player)
-	if had then
-		assignWaiting()
-	end
+	welcomed[player] = nil
+	SpotService.Release(player)
 end
 
 ----------------------------------------------------------------------
@@ -914,7 +1053,27 @@ function SpotService.GetSpot(player)
 	return nil
 end
 
--- Pivot the player's character to their spot (ignored during a match). Returns true on success.
+function SpotService.GetOwner(index)
+	local owner = validIndex(index) and owners[index] or nil
+	if owner and owner.Parent then
+		return owner
+	end
+	return nil
+end
+
+function SpotService.GetSpotByIndex(index)
+	if validIndex(index) then
+		return spots[index]
+	end
+	return nil
+end
+
+function SpotService.GetSpots()
+	return spots
+end
+
+-- Pivots the character home (claimed plot) or, without a plot, to the gate of the suggested free plot.
+-- Ignored during a match. Returns true when the character was moved.
 function SpotService.Teleport(player)
 	if not player or not player.Parent then
 		return false
@@ -922,15 +1081,20 @@ function SpotService.Teleport(player)
 	if player:GetAttribute(Config.Attr.InMatch) == true then
 		return false
 	end
-	local info = SpotService.GetSpot(player)
-	if not info or typeof(info.SpawnCFrame) ~= "CFrame" then
-		return false
-	end
 	local humanoid = Util.GetHumanoid(player)
 	if not humanoid or humanoid.Health <= 0 then
 		return false
 	end
-	return placeCharacter(player.Character, info.SpawnCFrame)
+	local info = SpotService.GetSpot(player)
+	if info and typeof(info.SpawnCFrame) == "CFrame" then
+		return placeCharacter(player.Character, info.SpawnCFrame)
+	end
+	local free = SpotService.SuggestSpot(player)
+	local target = free and gateArrivalCFrame(free)
+	if typeof(target) ~= "CFrame" then
+		return false
+	end
+	return placeCharacter(player.Character, target)
 end
 
 local function onGoToSpot(player)
@@ -943,11 +1107,14 @@ local function onGoToSpot(player)
 	if player:GetAttribute(Config.Attr.InMatch) == true then
 		return
 	end
-	if not spotOf[player] then
-		notify(player, "No free spot right now - hang in there!", "bad", 3)
+	if not spotOf[player] and not SpotService.SuggestSpot(player) then
+		notify(player, "Every home is taken right now - one frees up when a player leaves.", "bad", 3)
 		return
 	end
-	SpotService.Teleport(player)
+	local moved = SpotService.Teleport(player)
+	if moved and not spotOf[player] then
+		notify(player, "Press E at the gate to claim this home!", "info", 4)
+	end
 end
 
 function SpotService.Init(lobbyInfo, deps)
@@ -980,15 +1147,15 @@ function SpotService.Init(lobbyInfo, deps)
 		end
 	end
 
-	-- Assignment hooks: profile loaded (fast path) + a bounded fallback poll per player.
+	-- Join toast once the profile is there (no auto-assignment: plots are claimed with E at the gate).
 	if dataService and dataService.ProfileLoaded and type(dataService.ProfileLoaded.Connect) == "function" then
 		dataService.ProfileLoaded:Connect(function(player)
 			if player and player.Parent then
-				assignSpot(player)
+				scheduleWelcome(player)
 			end
 		end)
 	end
-	-- Pet changes show up on the nameplate / podium immediately.
+	-- Pet changes show up on the podium immediately.
 	if petService and petService.PerksChanged and type(petService.PerksChanged.Connect) == "function" then
 		petService.PerksChanged:Connect(function(player)
 			if player and player.Parent then
