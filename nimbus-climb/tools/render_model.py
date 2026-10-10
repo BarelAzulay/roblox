@@ -467,8 +467,8 @@ class Geometry:
 # ---------------------------------------------------------------------------------------------------
 VIEW_ALIASES = {"3q": "threequarter", "three-quarter": "threequarter", "threequarters": "threequarter",
                 "persp": "threequarter", "right": "side", "profile": "side"}
-VIEWS = ["front", "threequarter", "side", "left", "back", "top"]
-VIEW_LABEL = {"front": "FRONT", "threequarter": "3/4", "side": "SIDE", "left": "LEFT", "back": "BACK", "top": "TOP"}
+VIEWS = ["front", "threequarter", "side", "left", "back", "top", "hero"]
+VIEW_LABEL = {"front": "FRONT", "threequarter": "3/4", "side": "SIDE", "left": "LEFT", "back": "BACK", "top": "TOP", "hero": "HERO"}
 
 
 def _norm(v):
@@ -494,6 +494,10 @@ def view_basis(view, facing):
         cam = -right_m
     elif view == "threequarter":
         az, el = math.radians(38), math.radians(24)
+        horiz = math.cos(az) * f + math.sin(az) * right_m
+        cam = math.cos(el) * horiz + math.sin(el) * world_up
+    elif view == "hero":  # lower and more from the side: the evolved sheet's showcase angle
+        az, el = math.radians(52), math.radians(13)
         horiz = math.cos(az) * f + math.sin(az) * right_m
         cam = math.cos(el) * horiz + math.sin(el) * world_up
     elif view == "top":
@@ -774,7 +778,7 @@ def render_sheet(model, views, size, ss=2, outline=0.04, box=None):
     return sheet, geom
 
 
-def render_grid(models, view, cell, ss=2, outline=0.04):
+def render_grid(models, view, cell, ss=2, outline=0.04, margin=0.84):
     n = len(models)
     cols = max(1, min(8, int(math.ceil(math.sqrt(n * 1.5)))))
     rows = (n + cols - 1) // cols
@@ -787,7 +791,7 @@ def render_grid(models, view, cell, ss=2, outline=0.04):
         facing = m.get("facing", [0, 0, -1])
         lo, hi = geom.bounds()
         extent = max(float(np.max(hi - lo)), 1e-3) if geom.count_visible else 1.0
-        scale, centres = fit(geom, [view], facing, cell, cell, margin=0.84)
+        scale, centres = fit(geom, [view], facing, cell, cell, margin=margin)
         im = render_view(geom, view, facing, cell, cell, scale, centres[view], ss, outline, extent)
         x, y = (i % cols) * cell, (i // cols) * (cell + label_h)
         sheet.paste(im, (x, y))
@@ -800,7 +804,7 @@ def render_grid(models, view, cell, ss=2, outline=0.04):
                  fill=(196, 40, 52), anchor="md")
             print("  %s: %s" % (m.get("label", "?"), sub))
         else:
-            small = "  ".join(s for s in sub.split("  ") if s and s not in ("High", "Low"))
+            small = "  ".join(s for s in sub.split("  ") if s and s not in ("High", "Low", "EvoHigh", "EvoLow"))
             text(draw, (x + cell // 2, y + cell + label_h - 3), "%s  %d parts" % (small, m.get("total", geom.count_all)),
                  max(9, cell // 24), fill=(84, 96, 122), anchor="md")
         stats.append((m.get("label", "?"), m.get("total", geom.count_all)))
@@ -863,6 +867,7 @@ def main():
     ap.add_argument("--box", help="world crop x0,y0,z0,x1,y1,z1 (parts touching the box are kept)")
     ap.add_argument("--grid", action="store_true", help="contact sheet of every catalog pet (target: pets[:Low] or species[:Low])")
     ap.add_argument("--cell", type=int, default=240, help="--grid cell size in pixels (default 240)")
+    ap.add_argument("--margin", type=float, default=0.84, help="--grid: how much of a cell the model may fill (0.84)")
     ap.add_argument("--ss", type=int, default=2, help="supersampling factor (default 2)")
     ap.add_argument("--outline", type=float, default=0.04, help="outline depth threshold as a fraction of the model size")
     ap.add_argument("--json", metavar="FILE", help="also write the part dump as JSON")
@@ -917,7 +922,7 @@ def main():
     out = args.out or ("render_%s.png" % "".join(c if c.isalnum() or c in "-_" else "_" for c in target))
     if args.grid:
         sheet, stats = render_grid(dump.get("models", []), views[0] if args.views != ap.get_default("views") else "threequarter",
-                                   max(96, args.cell), args.ss, args.outline)
+                                   max(96, args.cell), args.ss, args.outline, args.margin)
         for label, count in stats:
             print("  %-22s %4d parts" % (label, count))
         print("%d models" % len(stats))

@@ -286,13 +286,18 @@ local function detailOf(value)
 		return "Low"
 	elseif v == "high" then
 		return "High"
+	elseif v == "evolved" or v == "evo" then
+		return "EvoHigh"
+	elseif v == "evolvedlow" or v == "evolved-low" or v == "evolved_low" or v == "evolow" then
+		return "EvoLow"
 	end
 	fail("detail must be High or Low, got '" .. tostring(value) .. "'")
 end
 
 local function petModel(def, detail, label, sub)
 	local PetBuilder = req("shared/PetBuilder")
-	local model = PetBuilder.Build(def, { Detail = detail })
+	local evolved = detail:sub(1, 3) == "Evo"
+	local model = PetBuilder.Build(def, { Detail = evolved and detail:sub(4) or detail, Evolved = evolved })
 	if not isInstance(model) then
 		fail("PetBuilder.Build returned no model for " .. tostring(def.Id))
 	end

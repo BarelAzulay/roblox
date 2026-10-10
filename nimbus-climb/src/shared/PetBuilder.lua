@@ -3,7 +3,9 @@
 -- Usable on the server, on the client and inside ViewportFrames. Plain Lua 5.1-compatible syntax only.
 --
 -- API (ARCHITECTURE_V2.md section 2 + ARCHITECTURE_V3.md)
---   PetBuilder.Build(petDef, opts) -> Model   opts: { Scale = 1, Detail = "High" (default) | "Low" }
+--   PetBuilder.Build(petDef, opts) -> Model   opts: { Scale = 1, Detail = "High" (default) | "Low", Evolved = false }
+--                                             Evolved = true: the pet's evolved form (bigger, four-legged, fan wings,
+--                                             gold jewellery; see "Evolved forms" below): High <= ~2500 parts, Low <= ~460
 --                                             High: <= ~350 parts (viewports, podiums, NPCs, your own pets)
 --                                             Low:  <= ~120 parts (other players' followers, far away)
 --   PetBuilder.Animate(model, t, opts)        opts: { Flap = 1 (speed multiplier), Excited = 0..1 }
@@ -75,7 +77,17 @@ local FLAP_AMP = math.rad(35)
 local BUDGET = {
 	High = { Total = 344, Cap = 350, Body = 216, Wing = 32, Tail = 20, Halo = 10 },
 	Low = { Total = 116, Cap = 120, Body = 70, Wing = 11, Tail = 7, Halo = 4 },
+	-- evolved forms (bigger, more detailed: PetBuilder.Build(def, { Evolved = true }))
+	EvoHigh = { Total = 2400, Cap = 2500, Body = 1750, Wing = 280, Tail = 110, Halo = 40 },
+	EvoLow = { Total = 440, Cap = 460, Body = 300, Wing = 52, Tail = 20, Halo = 8 },
 }
+
+local function budgetOf(look, detail)
+	if look.Evolved then
+		return BUDGET[(detail == "Low") and "EvoLow" or "EvoHigh"]
+	end
+	return BUDGET[detail] or BUDGET.High
+end
 
 local TAU = math.pi * 2
 local floor, max, min, abs, sin = math.floor, math.max, math.min, math.abs, math.sin
@@ -389,7 +401,7 @@ end
 local function lookSignature(look)
 	return table.concat({
 		look.Id, tostring(look.Rarity), look.Species, look.WingStyle, tostring(look.Accessory), hex(look.Primary),
-		hex(look.Secondary), hex(look.Eye), hex(look.WingColor), tostring(look.Glow),
+		hex(look.Secondary), hex(look.Eye), hex(look.WingColor), tostring(look.Glow), tostring(look.Evolved),
 	}, "|")
 end
 
@@ -2180,6 +2192,1463 @@ ACCESSORIES.Flower = function(ctx)
 end
 
 ----------------------------------------------------------------------
+-- Evolved forms: PetBuilder.Build(petDef, { Evolved = true }) sculpts a bigger, grander version of the pet
+-- (about 1.5x as tall) after the player's evolved reference sheet: four-legged and proud (birds stand tall, the
+-- slime stays a blob), big fanned wings, and gold jewellery set with the pet's gems (necklaces and pendants,
+-- tiaras, crowns, anklets, chest plates). Same groups, rig and animation as the normal form; bigger budgets.
+-- Design units are still voxels at High (0.1 stud); the evolved ground is y = EVO.Ground.
+----------------------------------------------------------------------
+local EVO = { Species = {}, Wings = {}, Pets = {}, Ground = -18 }
+
+-- the evolved eye (High, sculpted at 1.6x): 10 x 11 voxels, lash line on top, a big highlight top left, a small one
+-- lower right, the pupil in a coloured iris that lightens towards the bottom
+EYE_MASKS.Evo = {
+	". . . L L L L L . . .",
+	". L L P P P P P L L .",
+	"L P S S S P P P P P L",
+	"P S S S S S P P P P P",
+	"P S S S S S P P P P I",
+	"P S S S S P P P P I I",
+	"P P S S P P P P I I I",
+	"I P P P P P P I I I I",
+	"I I P P P I I I S S I",
+	"I I I I I I I I S S I",
+	". I I G G G G G I I .",
+	". . I I G G G I I . .",
+}
+-- the fierce evolved eye (dragons, Stormfang): the upper edge slants down towards the nose
+EYE_MASKS.EvoFierce = {
+	"L L L L . . . . . .",
+	"L L L L L L . . . .",
+	"P S S L L L L L . .",
+	"P S S S P P L L L L",
+	"P S S P P P P P P I",
+	"I P P P P P P I I I",
+	"I I P P P I I S S I",
+	". I I G G G I S I .",
+	". . I G G G I I . .",
+}
+EYE_MASKS.EvoFierceLow = {
+	"L L L . .",
+	"S S L L L",
+	"S P P P I",
+	". I G I .",
+}
+EYE_MASKS.EvoLow = {
+	". L L L .",
+	"S S P P P",
+	"S S P P I",
+	"I P P S I",
+	". I G G .",
+}
+
+local function evoRGB(t)
+	return rgb(t[1], t[2], t[3])
+end
+
+-- per pet: gem colours (Gem / GemB), wing colours (Wing = main, Tip = light tips) and extras (see EVO.Pets below)
+EVO.Look = {
+	biscuit_bear = { Gem = { 226, 40, 58 }, GemB = { 255, 210, 90 }, Wing = { 150, 98, 60 }, Tip = { 244, 222, 190 } },
+	honey_bunny = { Gem = { 236, 52, 96 }, GemB = { 80, 196, 250 }, Wing = { 226, 176, 92 }, Tip = { 255, 244, 214 } },
+	pip_penguin = { Gem = { 64, 170, 255 }, GemB = { 150, 230, 255 }, Wing = { 44, 60, 108 }, Tip = { 206, 228, 255 } },
+	twilight_dragon = { Gem = { 255, 84, 170 }, GemB = { 255, 210, 90 }, Wing = { 112, 70, 200 }, Tip = { 236, 130, 214 } },
+}
+
+----------------------------------------------------------------------
+-- evolved anatomy
+----------------------------------------------------------------------
+-- Four-legged body: chest, barrel and haunch, tapered legs with round paws, a thick neck rising to the head.
+-- o: W (width), L (length), Leg (leg length, 1 = normal), LegKey, PawKey, BellyKey (false = none), Toes (false)
+function EVO.Quad(ctx, o)
+	local g = ctx.Body
+	o = o or {}
+	local W, L, leg = (o.W or 1) * 1.08, (o.L or 1) * 0.88, (o.Leg or 1) * 0.84
+	local G0 = EVO.Ground
+	local legK, pawK = o.LegKey or "Fur", o.PawKey or "Belly"
+	local by = -6.5 + (leg - 1) * 5 -- barrel centre height
+	ell(g, "Fur", { 0, by, 2 * L }, { 8.2 * W, 7.2, 10.6 * L })
+	ell(g, "Fur", { 0, by + 1.8, -4.8 * L }, { 8.8 * W, 8, 7.2 })
+	ell(g, "Fur", { 0, by + 0.6, 9.2 * L }, { 8.6 * W, 7.6, 7 })
+	if o.BellyKey ~= false then
+		local bk = o.BellyKey or "Belly"
+		paint(g, bk, { Kind = "Ellipsoid", Center = { 0, by + 1.2, -11 * L }, Radius = { 5.8 * W, 6.8, 3.6 } }, "Fur")
+		paint(g, bk, { Kind = "Ellipsoid", Center = { 0, by - 6.6, 1.5 * L }, Radius = { 5.2 * W, 2.2, 9.5 * L } }, "Fur")
+	end
+	local fz, hz = -6.4 * L, 10.4 * L
+	local top = by - 1.5
+	pair(function(s)
+		cap(g, legK, { s * 5.1 * W, top, fz }, { s * 5.3 * W, G0 + 3, fz - 0.4 }, 3.8, 3.3)
+		ell(g, pawK, { s * 5.3 * W, G0 + 1.7, fz - 1.4 }, { 3.6, 1.9, 4.1 })
+		ell(g, legK, { s * 5.8 * W, by - 0.8, hz }, { 4.3, 6, 5.8 })
+		cap(g, legK, { s * 6 * W, by - 4.5, hz + 1.8 }, { s * 5.8 * W, G0 + 3, hz - 0.2 }, 3.5, 3.2)
+		ell(g, pawK, { s * 5.8 * W, G0 + 1.7, hz - 1.2 }, { 3.6, 1.9, 4.1 })
+		if ctx.Fine and o.Toes ~= false then
+			local toe = o.ToeKey or "Toe"
+			for _, p in ipairs({ { s * 5.3 * W, fz - 1.3 }, { s * 5.8 * W, hz - 1.1 } }) do
+				for _, dx in ipairs({ -1, 1 }) do
+					box(g, toe, { p[1] + dx, G0 + 1.4, p[2] - 3 }, { 0.6, 2.4, 1.6 }, { Op = "Paint", OnlyKeys = pawK })
+				end
+			end
+		end
+	end)
+	cap(g, "Fur", { 0, by + 2.5, -6.6 * L }, { 0, by + 10, -9 * L }, 6.6 * W, 6.2)
+	if o.Tufts and ctx.Fine then
+		for i = 0, 6 do
+			local z = -4 * L + i * 3.2 * L
+			local x = ((i % 2 == 0) and 1.6 or -1.6)
+			cone(g, "Fur", { x, by + 6, z }, { x * 1.4, by + 9.6, z + 1.8 }, 1.6, 0.3)
+		end
+		pair(function(s)
+			for i = 0, 3 do
+				local z = -7 * L + i * 4.2 * L
+				cone(g, "Fur", { s * 7.4 * W, by + 2.5 - i * 0.4, z }, { s * 10 * W, by + 3.6 - i * 0.4, z + 2 }, 1.5, 0.3)
+			end
+			cone(g, "Fur", { s * 7.6 * W, by - 1, hz + 2 }, { s * 10 * W, by - 3, hz + 4.6 }, 1.6, 0.3)
+		end)
+	end
+	ctx.NeckY, ctx.NeckZ, ctx.NeckR = by + 6.5, -8.2 * L, { 6.6 * W, 6.4 }
+	ctx.WingHinge = { 7.6 * W, by + 7.2, -2.6 * L }
+	ctx.TailHinge = { 0, by + 2.6, 15.6 * L }
+	ctx.Legs = { Front = { 5.3 * W, fz }, Hind = { 5.8 * W, hz } }
+	ctx.EvoBelly = by
+	return by
+end
+
+-- big round head on the neck (design centre relative to the barrel), remembered for faces and jewellery
+function EVO.Head(ctx, r, key, dy, dz)
+	local by = ctx.EvoBelly or -6.5
+	local c = { 0, by + 15.8 + (dy or 0), -11.5 + (dz or 0) }
+	head(ctx, key or "Fur", c, r)
+	shape(ctx.Body, { Kind = "RoundBox", Center = { c[1], c[2] + 0.3, c[3] + 0.6 }, Size = { r[1] * 1.78, r[2] * 1.72, r[3] * 1.7 }, Round = math.min(r[1], r[2]) * 0.5, Key = key or "Fur" })
+	ctx.HeadTop = c[2] + r[2]
+	ctx.EarX = r[1] * 0.7
+	return c
+end
+
+-- the evolved face: big sparkly eyes, a soft nose, a smile and blush. o: EyeX (outer column), EyeY (top row)
+
+function EVO.Face(ctx, c, o)
+	o = o or {}
+	addEyes(ctx, (o.EyeX or 8) + 0.6, c[2] + (o.EyeY or 3.5) + 0.6, o.Fierce and "EvoFierce" or "Evo", o.Fierce)
+	cuteEyes(ctx)
+	if o.Blush ~= false then
+		local r = ctx.HeadR
+		pair(function(s)
+			paint(ctx.Body, "Blush", { Kind = "Ellipsoid", Center = { s * ((o.EyeX or 8) - 1.5), c[2] - 3.6, c[3] - r[3] + 0.5 }, Radius = { 2.4, 1.1, 3.2 } })
+		end)
+	end
+end
+
+-- upright bird body (penguin, owl, phoenix): a tall egg on two feet. Returns the head centre.
+function EVO.Bird(ctx, o)
+	local g = ctx.Body
+	o = o or {}
+	local G0 = EVO.Ground
+	ell(g, "Fur", { 0, -4, 0.5 }, { 11.6, 13.8, 10.6 })
+	if o.BellyKey ~= false then
+		paint(g, o.BellyKey or "Belly", { Kind = "Ellipsoid", Center = { 0, -5, -5 }, Radius = { 8.4, 11.4, 6 } }, "Fur")
+	end
+	pair(function(s)
+		cap(g, "Feet", { s * 4.6, G0 + 4, 0 }, { s * 4.8, G0 + 1.6, -1 }, 1.6, 1.4)
+		for _, dx in ipairs({ -1.8, 0, 1.8 }) do
+			cap(g, "Feet", { s * 4.8 + dx * 0.4, G0 + 1, -1 }, { s * 4.8 + dx, G0 + 0.8, -5.2 }, 1.1, 0.8)
+		end
+	end)
+	ctx.NeckY, ctx.NeckZ, ctx.NeckR = 6.5, -0.5, { 9.4, 8.6 }
+	ctx.WingHinge = { 6.4, 4, 2.2 }
+	ctx.TailHinge = { 0, G0 + 6, 9 }
+	ctx.EvoBelly = -6.5
+	local c = { 0, 12.5, -1 }
+	head(ctx, "Fur", c, o.HeadR or { 10.4, 9, 9.4 })
+	ctx.HeadTop = c[2] + (o.HeadR or { 10.4, 9, 9.4 })[2]
+	return c
+end
+
+----------------------------------------------------------------------
+-- evolved jewellery (gold set with the pet's gems)
+----------------------------------------------------------------------
+-- a gold chain around the neck, drooping at the front, with a pendant: gold setting + gem + glint
+function EVO.Necklace(ctx, o)
+	local g = ctx.Body
+	o = o or {}
+	local y, z, r = ctx.NeckY + (o.DY or 0), ctx.NeckZ, ctx.NeckR
+	local tilt = o.Tilt or 0.42
+	local R = (o.R or r[1]) + 0.5
+	shape(g, { Kind = "Torus", Center = { 0, y, z }, Radius = R, Thickness = 1.05, Key = "Gold", Rotation = CFrame.Angles(-tilt, 0, 0), Pivot = { 0, y, z } })
+	if o.Double then
+		shape(g, { Kind = "Torus", Center = { 0, y - 2.2, z - 0.6 }, Radius = R + 0.6, Thickness = 0.6, Key = "GoldDeep", Rotation = CFrame.Angles(-tilt - 0.15, 0, 0), Pivot = { 0, y - 2.2, z - 0.6 } })
+	end
+	local fy, fz = y - R * math.sin(tilt), z - R * math.cos(tilt)
+	if o.Pendant ~= false then
+		local s = (o.Size or 1) * 1.3
+		ell(g, "GoldDeep", { 0, fy - 2 * s, fz - 0.6 }, { 2.4 * s, 2.8 * s, 1.1 })
+		ell(g, "Gold", { 0, fy - 2 * s, fz - 1.1 }, { 1.9 * s, 2.3 * s, 0.9 })
+		ell(g, o.Gem or "Gem", { 0, fy - 2 * s, fz - 1.8 }, { 1.3 * s, 1.6 * s, 0.8 })
+		cone(g, "Gold", { 0, fy - 4.4 * s, fz - 0.9 }, { 0, fy - 6 * s, fz - 1 }, 0.9, 0.2)
+		set(g, vx(-0.5), vx(fy - 1.4 * s), vx(fz - 2.6), "Spark")
+	end
+	-- little gem drops along the chain
+	for i = 1, (o.Drops or 0) do
+		local a = (i - (o.Drops + 1) / 2) * 0.42
+		local x, zz = math.sin(a) * R, z - math.cos(a) * R * math.cos(tilt)
+		local yy = y - math.cos(a) * R * math.sin(tilt)
+		ell(g, (i % 2 == 0) and (o.Gem or "Gem") or "GemB", { x, yy - 1.2, zz - 0.5 }, { 0.8, 0.9, 0.7 })
+	end
+	ctx.Pendant = { 0, fy - 2, fz - 1.8 }
+end
+
+-- a gold circlet around the head with a jewelled peak over the forehead
+function EVO.Tiara(ctx, o)
+	local g = ctx.Body
+	o = o or {}
+	local c, r = ctx.HeadC, ctx.HeadR
+	local h = o.H or 4.2
+	local ry = h / r[2]
+	local R = r[1] * math.sqrt(math.max(0.05, 1 - ry * ry)) + 0.3
+	local y = c[2] + h
+	shape(g, { Kind = "Torus", Center = { 0, y, c[3] + 0.4 }, Radius = R, Thickness = 0.8, Key = "Gold", Rotation = CFrame.Angles(0.18, 0, 0), Pivot = { 0, y, c[3] + 0.4 } })
+	local fz = c[3] - r[3] * math.sqrt(math.max(0.05, 1 - ry * ry)) - 0.2
+	local fy = y + 0.6
+	ell(g, "GoldDeep", { 0, fy + 1.4, fz }, { 3.2, 3.6, 1.1 })
+	ell(g, "Gold", { 0, fy + 1.4, fz - 0.4 }, { 2.5, 2.9, 1 })
+	ell(g, o.Gem or "Gem", { 0, fy + 1.4, fz - 1.1 }, { 1.7, 2, 0.9 })
+	cone(g, "Gold", { 0, fy + 3.4, fz + 0.4 }, { 0, fy + 6.4, fz + 0.8 }, 1, 0.2)
+	pair(function(s)
+		cone(g, "Gold", { s * 2.6, fy + 1.6, fz + 0.4 }, { s * 4.2, fy + 4, fz + 0.9 }, 0.8, 0.2)
+		if o.Side ~= false then
+			ell(g, "GemB", { s * 4.6, fy + 0.2, fz + 1.4 }, { 0.8, 0.8, 0.7 })
+		end
+	end)
+	set(g, vx(-0.6), vx(fy + 1.8), vx(fz - 1.8), "Spark")
+end
+
+-- a tall gold crown on top of the head: band, points with gold balls, gems around the band
+function EVO.Crown(ctx, o)
+	local g = ctx.Body
+	o = o or {}
+	local c = ctx.HeadC
+	local top = ctx.HeadTop - (o.Sink or 2.2)
+	local R = o.R or 5.6
+	local n = o.Points or 7
+	shape(g, { Kind = "Torus", Center = { 0, top + 0.8, c[3] }, Radius = R, Thickness = 1.2, Key = "GoldDeep" })
+	shape(g, { Kind = "Torus", Center = { 0, top + 2.4, c[3] }, Radius = R + 0.2, Thickness = 1.1, Key = "Gold" })
+	for i = 0, n - 1 do
+		local a = (i / n) * TAU - math.pi / 2
+		local x, z = math.cos(a) * (R + 0.2), c[3] + math.sin(a) * (R + 0.2)
+		local hgt = (i == 0) and 6 or 4.4
+		cone(g, "Gold", { x, top + 2.6, z }, { x * 1.08, top + 2.6 + hgt, z + (z - c[3]) * 0.08 }, 1.3, 0.3)
+		ell(g, "GoldLight", { x * 1.08, top + 3 + hgt, z + (z - c[3]) * 0.08 }, { 0.8, 0.8, 0.8 })
+		if i % 2 == 1 then
+			ell(g, "GemB", { x * 1.12, top + 1.6, z + (z - c[3]) * 0.12 }, { 0.8, 0.9, 0.8 })
+		end
+	end
+	ell(g, o.Gem or "Gem", { 0, top + 2, c[3] - R - 1.1 }, { 1.4, 1.7, 0.8 })
+	set(g, vx(-0.6), vx(top + 2.6), vx(c[3] - R - 2), "Spark")
+end
+
+-- gold anklets above the paws (with a small gem in front)
+function EVO.Anklets(ctx, o)
+	local g = ctx.Body
+	o = o or {}
+	local L = ctx.Legs
+	if not L then
+		return
+	end
+	local y = EVO.Ground + (o.Y or 4.2)
+	pair(function(s)
+		for _, p in ipairs({ L.Front, L.Hind }) do
+			shape(g, { Kind = "Torus", Center = { s * p[1], y, p[2] + 0.1 }, Radius = 2.7, Thickness = 0.65, Key = "Gold" })
+			if o.Gem ~= false then
+				ell(g, o.Gem or "Gem", { s * p[1], y, p[2] - 3.3 }, { 0.7, 0.8, 0.6 })
+			end
+		end
+	end)
+end
+
+-- a gold breast plate on the chest with a big gem
+function EVO.ChestPlate(ctx, o)
+	local g = ctx.Body
+	o = o or {}
+	local by = ctx.EvoBelly or -6.5
+	paint(g, "GoldDeep", { Kind = "Ellipsoid", Center = { 0, by + 1.5, -12.5 }, Radius = { 6.4, 6, 3.4 } })
+	paint(g, "Gold", { Kind = "Ellipsoid", Center = { 0, by + 1.7, -13.2 }, Radius = { 5.4, 5.2, 3 } })
+	ell(g, o.Gem or "Gem", { 0, by + 2, -13.4 }, { 1.7, 2, 1 })
+	set(g, vx(-0.6), vx(by + 2.8), vx(-14.6), "Spark")
+end
+
+----------------------------------------------------------------------
+-- evolved wings (the LEFT wing in its hinge frame, reaching towards -X; the hinge sweeps it back so the fan rises
+-- from the shoulders up and back over the body)
+----------------------------------------------------------------------
+
+local function evoFeather(w, key, a, b, width, z, extra)
+	local dx, dy = b[1] - a[1], b[2] - a[2]
+	local len = math.sqrt(dx * dx + dy * dy)
+	local c = { (a[1] + b[1]) / 2, (a[2] + b[2]) / 2, z }
+	local t = { Kind = "Ellipsoid", Center = c, Radius = { len / 2, width, 0.75 }, Key = key, Rotation = CFrame.Angles(0, 0, math.atan2(dy, dx)), Pivot = c }
+	if extra then
+		for k, v in pairs(extra) do
+			t[k] = v
+		end
+	end
+	return shape(w, t)
+end
+
+-- big raised wing of long pointed feathers (the LEFT wing in its hinge frame, reaching towards -X; 90 deg = up,
+-- 180 = out): a back row of long primaries fanning from A0 to A1 with light tips, a front row of shorter
+-- secondaries, scalloped coverts over the roots and a light leading edge. o: N, A0, A1, L0, L1, W, Sweep, Tilt
+function EVO.Fan(ctx, w, o)
+	o = o or {}
+	local S = o.Size or 0.8
+	local a0, a1 = o.A0 or 80, o.A1 or 186 -- left wing frame: 90 = up, 180 = straight out (the hinge turns it back)
+	local fw = o.Width or 2.7
+	local function quill(key, deg, r0, ln, wd, z, tip)
+		local ang = math.rad(deg)
+		local dx, dy = math.cos(ang), math.sin(ang)
+		local a = { dx * r0, dy * r0 }
+		local b = { dx * (r0 + ln), dy * (r0 + ln) }
+		evoFeather(w, key, a, b, wd, z)
+		if tip and ctx.Fine then
+			local tc = { b[1] - dx * ln * 0.2, b[2] - dy * ln * 0.2, z }
+			shape(w, { Kind = "Ellipsoid", Center = tc, Radius = { ln * 0.26, wd + 0.6, 1.2 }, Key = tip, Op = "Paint", OnlyKeys = { [key] = true }, Rotation = CFrame.Angles(0, 0, ang), Pivot = tc })
+		end
+	end
+	-- back layer: long flight feathers fanning from up to out, broad and overlapping, light tips
+	local n = 8
+	for i = n - 1, 0, -1 do
+		local t = i / (n - 1)
+		local ln = 12 + 15 * math.sin(math.pi * (0.22 + 0.62 * (1 - math.abs(t - 0.38) / 0.62) * 0.8))
+		if t > 0.38 then
+			ln = 12 + (ln - 12) * (1 - (t - 0.38) / 0.62 * 0.55)
+		end
+		quill((i % 2 == 0) and "Wing" or "WingTrim", a0 + (a1 - a0) * t, 2.5, ln * S * (o.Long or 1), fw, 0, "WingTip")
+	end
+	-- middle layer: shorter, lighter feathers
+	for i = 6, 0, -1 do
+		local t = i / 6
+		quill((i % 2 == 0) and "WingCov" or "WingCov2", a0 + 6 + (a1 - a0 - 12) * t, 2, (9.5 + 3 * (1 - math.abs(t - 0.4))) * S, 3, 1, "WingTip")
+	end
+	-- coverts: small rounded feathers over the roots
+	for i = 5, 0, -1 do
+		local t = i / 5
+		quill((i % 2 == 0) and "WingCov2" or "WingCov", a0 + 8 + (a1 - a0 - 16) * t, 1.5, 5.6 * S, 2.7, 1.8, nil)
+	end
+	ell(w, "WingCov2", { -1.2, 1.4, 1.8 }, { 3.4, 3.4, 0.75 })
+	-- a light leading edge along the top feather
+	local ae = math.rad(a0 + 3)
+	evoFeather(w, "WingEdge", { math.cos(ae) * 2, math.sin(ae) * 2 }, { math.cos(ae) * 14 * S, math.sin(ae) * 14 * S }, 1.3, 1.6)
+	ctx.WingSweep = o.Sweep or 0.95
+	ctx.WingTilt = o.Tilt or 0.42
+end
+
+
+-- dragon / bat wing for the evolved dragons: an arm bone up to a clawed wrist, four long finger bones fanning up
+-- and back, a membrane between them (point-in-polygon fill) with a scalloped trailing edge, lighter near the edge
+function EVO.BatWing(ctx, w, o)
+	o = o or {}
+	local wrist = { -7, 13 }
+	curve(w, "WingBone", { { 0, 0, 0.5 }, { -3.6, 7, 0.5 }, { wrist[1], wrist[2], 0.5 } }, 1.6, 1.2)
+	ell(w, "Claw", { wrist[1] + 0.6, wrist[2] + 2, 0.5 }, { 1, 2, 1 })
+	local tips = o.Tips or { { -22, 27 }, { -32, 15 }, { -31, 2 }, { -22, -8 } }
+	for _, tp in ipairs(tips) do
+		curve(w, "WingBone", { { wrist[1], wrist[2], 0.5 }, { (wrist[1] + tp[1]) / 2, (wrist[2] + tp[2]) / 2 + 1.4, 0.5 }, { tp[1], tp[2], 0.5 } }, 1.1, 0.5)
+		cone(w, "WingBone", { tp[1], tp[2], 0.5 }, { tp[1] - 1.6, tp[2] + 1.6, 0.5 }, 0.7, 0.2)
+	end
+	local poly = { { 0, 0 }, { -3.6, 7 }, wrist }
+	for _, tp in ipairs(tips) do
+		poly[#poly + 1] = tp
+	end
+	poly[#poly + 1] = { -7, -6 }
+	local scallops = {}
+	local chain = {}
+	for _, tp in ipairs(tips) do
+		chain[#chain + 1] = tp
+	end
+	chain[#chain + 1] = { -7, -6 }
+	for i = 1, #chain - 1 do
+		local a, b = chain[i], chain[i + 1]
+		local mx, my = (a[1] + b[1]) / 2, (a[2] + b[2]) / 2
+		local dx, dy = b[1] - a[1], b[2] - a[2]
+		local d = math.sqrt(dx * dx + dy * dy)
+		local nx, ny = -dy / d, dx / d
+		if (wrist[1] - mx) * nx + (wrist[2] - my) * ny > 0 then
+			nx, ny = -nx, -ny
+		end
+		scallops[#scallops + 1] = { mx + nx * d * 0.32, my + ny * d * 0.32, d * 0.5 }
+	end
+	local function inside(x, y)
+		local c = false
+		local j = #poly
+		for i = 1, #poly do
+			local xi, yi, xj, yj = poly[i][1], poly[i][2], poly[j][1], poly[j][2]
+			if ((yi > y) ~= (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi) + xi) then
+				c = not c
+			end
+			j = i
+		end
+		return c
+	end
+	box(w, "Wing", { -16, 9, 0.5 }, { 36, 42, 1.4 }, { KeepExisting = true, Pattern = function(x, y)
+		if not inside(x, y) then
+			return false
+		end
+		for _, sc in ipairs(scallops) do
+			if (x - sc[1]) ^ 2 + (y - sc[2]) ^ 2 < sc[3] ^ 2 then
+				return false
+			end
+		end
+		local r = math.sqrt((x - wrist[1]) ^ 2 + (y - wrist[2]) ^ 2)
+		if r > 17 then
+			return "WingTip"
+		end
+		return nil
+	end })
+	ctx.Pal.WingBone = ctx.Pal.WingBone or darken(ctx.Look.WingColor, 0.35)
+	ctx.WingSweep = o.Sweep or 1.32
+	ctx.WingTilt = o.Tilt or 0.22
+end
+
+-- palette for the evolved wings and jewellery
+function EVO.Palette(ctx)
+	local pal, look = ctx.Pal, ctx.Look
+	local st = EVO.Look[look.Id] or {}
+	local W = st.Wing and evoRGB(st.Wing) or look.WingColor
+	local tip = st.Tip and mix(evoRGB(st.Tip), W, 0.25) or lighten(W, 0.45)
+	pal.Wing = W
+	pal.WingTrim = darken(W, 0.24)
+	pal.WingTip = tip
+	pal.WingCov = mix(W, tip, 0.18)
+	pal.WingCov2 = mix(W, tip, 0.4)
+	pal.WingEdge = mix(tip, rgb(255, 255, 255), 0.4)
+	pal.Gold = rgb(250, 200, 70)
+	pal.GoldDeep = rgb(214, 146, 40)
+	pal.GoldLight = rgb(255, 232, 150)
+	pal.Gem = st.Gem and evoRGB(st.Gem) or rgb(232, 60, 100)
+	pal.GemB = st.GemB and evoRGB(st.GemB) or rgb(84, 172, 238)
+	if look.Glow then
+		pal.Gem = { Color = pal.Gem, Material = NEON }
+	end
+	pal.Toe = darken(asColor(pal.Belly, look.Primary), 0.3)
+	return st
+end
+
+----------------------------------------------------------------------
+-- evolved species
+----------------------------------------------------------------------
+EVO.Species.Bear = function(ctx)
+	local g = ctx.Body
+	ctx.Pal.Nose = rgb(58, 40, 40)
+	EVO.Quad(ctx, { W = 1.12, L = 0.95, PawKey = "Muzzle", ToeKey = "Toe" })
+	local c = EVO.Head(ctx, { 10.8, 9.6, 9.8 })
+	pair(function(s)
+		ell(g, "Fur", { s * 6, c[2] - 3, c[3] - 3.4 }, { 4.6, 3.8, 4.4 }) -- cheeks
+		roundEar(ctx, s, { 7.4, c[2] + 7.6, c[3] + 0.8 }, 3.6, "Fur", "Muzzle")
+	end)
+	ell(g, "Muzzle", { 0, c[2] - 3.8, c[3] - 8.8 }, { 5.4, 4, 3.9 })
+	ell(g, "Nose", { 0, c[2] - 1.6, c[3] - 12.4 }, { 2.4, 1.4, 1.3 })
+	ell(g, "Nose", { 0, c[2] - 2.8, c[3] - 12.1 }, { 1.1, 0.9, 1 })
+	if ctx.Fine then
+		shine(ctx, -1, c[2] - 1.4)
+		face(ctx, "Mouth", { { 0, c[2] - 4 }, { 1, c[2] - 4.8 }, { -1, c[2] - 4.8 }, { 2, c[2] - 4.4 }, { -2, c[2] - 4.4 } })
+	end
+	EVO.Face(ctx, c, { EyeX = 8, EyeY = 3.6 })
+	shadeMain(ctx, { "Fur" })
+	local t = newTail(ctx, ctx.TailHinge, 0.2)
+	ell(t, "Fur", { 0, 0.5, 1.5 }, { 2.8, 2.8, 2.8 })
+end
+
+EVO.Species.Bunny = function(ctx)
+	local g = ctx.Body
+	EVO.Quad(ctx, { W = 0.98, L = 0.92, PawKey = "Muzzle" })
+	-- big hind haunches
+	pair(function(s)
+		ell(g, "Fur", { s * 6, ctx.EvoBelly + 0.4, 9 }, { 4.6, 7, 6.6 })
+	end)
+	local c = EVO.Head(ctx, { 10, 9.2, 9.4 }, nil, -0.5)
+	pair(function(s)
+		ell(g, "Fur", { s * 5.6, c[2] - 3.2, c[3] - 3.6 }, { 4.4, 3.6, 4.2 })
+		-- long upright ears, slightly apart, with pink insides
+		local bx = s * 3.6
+		curve(g, "Fur", { { bx, c[2] + 6.5, c[3] + 1 }, { s * 4.6, c[2] + 13, c[3] + 1.8 }, { s * 5.6, c[2] + 19, c[3] + 2.8 }, { s * 6.2, c[2] + 23, c[3] + 3.6 } }, 2.7, 1.6, { Smooth = true })
+		paint(g, "Inner", { Kind = "Curve", Points = { { s * 3.8, c[2] + 8, c[3] - 0.8 }, { s * 4.7, c[2] + 14, c[3] }, { s * 5.6, c[2] + 20, c[3] + 1.2 } }, Radius = 1.4, RadiusB = 0.9, Smooth = true }, "Fur")
+	end)
+	ell(g, "Muzzle", { 0, c[2] - 3.4, c[3] - 7.6 }, { 4, 3, 2.8 })
+	ell(g, "Nose", { 0, c[2] - 1.8, c[3] - 10 }, { 1.4, 0.8, 0.8 })
+	if ctx.Fine then
+		face(ctx, "Mouth", { { 0, c[2] - 3.2 }, { 1, c[2] - 4 }, { -1, c[2] - 4 } })
+		face(ctx, "Tooth", { { 0, c[2] - 5 }, { -1, c[2] - 5 } })
+	end
+	EVO.Face(ctx, c, { EyeX = 7.6, EyeY = 3.4 })
+	shadeMain(ctx, { "Fur" })
+	local t = newTail(ctx, ctx.TailHinge, 0.3)
+	ell(t, "Belly", { 0, 1, 1.5 }, { 3.2, 3.2, 3.2 })
+end
+
+EVO.Species.Penguin = function(ctx)
+	local g = ctx.Body
+	local c = EVO.Bird(ctx, { HeadR = { 10.4, 9, 9.4 } })
+	paint(g, "Belly", { Kind = "Ellipsoid", Center = { 0, c[2] - 2.6, c[3] - 5.5 }, Radius = { 7.4, 5.4, 5 } }, "Fur")
+	-- beak: orange wedge with a lighter tip
+	cone(g, "Beak", { 0, c[2] - 2.2, c[3] - 8.6 }, { 0, c[2] - 3, c[3] - 14 }, 2.3, 0.4)
+	paint(g, "Feet", { Kind = "Box", Center = { 0, c[2] - 3.6, c[3] - 11 }, Size = { 6, 1.4, 8 } }, "Beak")
+	EVO.Face(ctx, c, { EyeX = 8.2, EyeY = 3.2 })
+	shadeMain(ctx, { "Fur", "Belly" })
+	-- flippers at the sides
+	pair(function(s)
+		ell(g, "Fur", { s * 11, -4, 0.5 }, { 2.4, 9, 5 }, { Rotation = CFrame.Angles(0, 0, s * 0.25), Pivot = { s * 11, -4, 0.5 } })
+	end)
+	local t = newTail(ctx, ctx.TailHinge, 0.15)
+	cone(t, "Fur", { 0, 0, 0 }, { 0, -1.5, 4 }, 3, 0.8)
+end
+
+
+EVO.Species.Dragon = function(ctx)
+	local g = ctx.Body
+	local pal = ctx.Pal
+	EVO.Quad(ctx, { W = 1.08, L = 0.9, PawKey = "Fur", BellyKey = "Belly", Toes = false })
+	-- a big pale chest plate with ridges
+	paint(g, "Belly", { Kind = "Ellipsoid", Center = { 0, ctx.EvoBelly + 1, -12 }, Radius = { 6.8, 7.8, 3.8 } }, "Fur")
+	if ctx.Fine then
+		for i = 0, 6 do
+			box(g, "AccentDark", { 0, ctx.EvoBelly - 7 + i * 2.6, -4 }, { 14, 0.8, 28 }, { Op = "Paint", OnlyKeys = "Belly" })
+		end
+	end
+	-- golden claws on every paw
+	pal.Claw = rgb(250, 202, 72)
+	pair(function(s)
+		for _, p in ipairs({ ctx.Legs.Front, ctx.Legs.Hind }) do
+			for _, dx in ipairs({ -1.7, 0, 1.7 }) do
+				cone(g, "Claw", { s * p[1] + dx, EVO.Ground + 1.4, p[2] - 3.4 }, { s * p[1] + dx * 1.15, EVO.Ground + 0.4, p[2] - 5.8 }, 1, 0.25)
+			end
+		end
+	end)
+	-- squarish skull, long snout with an open toothy jaw, heavy brows, cheek spikes, fin ears
+	local c = EVO.Head(ctx, { 10, 9, 9.2 }, nil, 0.5)
+	shape(g, { Kind = "RoundBox", Center = { 0, c[2] + 0.6, c[3] + 0.4 }, Size = { 18, 16, 16.4 }, Round = 4.2, Key = "Fur" })
+	shape(g, { Kind = "RoundBox", Center = { 0, c[2] - 3.6, c[3] - 8.8 }, Size = { 10.8, 6.4, 9.4 }, Round = 2.4, Key = "Fur" })
+	shape(g, { Kind = "RoundBox", Center = { 0, c[2] - 8.4, c[3] - 7.8 }, Size = { 9, 2.6, 8 }, Round = 1.2, Key = "Belly" })
+	box(g, "Mouth", { 0, c[2] - 6.9, c[3] - 9.4 }, { 7.4, 1.4, 6.4 })
+	box(g, "Tongue", { 0, c[2] - 7.4, c[3] - 10.4 }, { 4, 0.8, 3.4 })
+	paint(g, "Belly", { Kind = "Box", Center = { 0, c[2] - 5.6, c[3] - 9.4 }, Size = { 12, 1.4, 11 } }, "Fur")
+	for _, x in ipairs({ -3.2, -1.6, 1.6, 3.2 }) do
+		box(g, "Tooth", { x, c[2] - 6.6, c[3] - 12.9 }, { 1, 1.6, 1 })
+	end
+	box(g, "Tooth", { -3.2, c[2] - 7.6, c[3] - 12.4 }, { 1, 1.2, 1 })
+	box(g, "Tooth", { 3.2, c[2] - 7.6, c[3] - 12.4 }, { 1, 1.2, 1 })
+	if ctx.Fine then
+		face(ctx, "Nostril", { { 2.2, c[2] - 1.6 }, { -2.2, c[2] - 1.6 } })
+	end
+	pal.Brow = darken(ctx.Look.Primary, 0.3)
+	pair(function(s)
+		cap(g, "Brow", { s * 2, c[2] + 6.2, c[3] - 9.8 }, { s * 8.8, c[2] + 8, c[3] - 6.6 }, 1.3, 1)
+		cone(g, "Fur", { s * 8.8, c[2] - 2.4, c[3] + 1 }, { s * 13.6, c[2] - 3.4, c[3] + 5.4 }, 2.1, 0.3)
+		cone(g, "Fur", { s * 8.8, c[2] + 1.6, c[3] + 2 }, { s * 13, c[2] + 2, c[3] + 6.8 }, 1.7, 0.3)
+		triEar(ctx, s, { 8.2, c[2] + 4, c[3] + 2 }, { 12.4, c[2] + 9.4, c[3] + 4 }, 2.2, "WingTip")
+	end)
+	EVO.Face(ctx, c, { EyeX = 8.6, EyeY = 5.4, Fierce = true, Blush = false })
+	-- big golden horns: thick at the root, sweeping up and back, ringed
+	pair(function(s)
+		curve(g, "Horn", { { s * 4.6, ctx.HeadTop - 3, c[3] - 1 }, { s * 5.8, ctx.HeadTop + 2.6, c[3] }, { s * 6.8, ctx.HeadTop + 7.4, c[3] + 3 }, { s * 6.4, ctx.HeadTop + 10.6, c[3] + 7.6 } }, 3.1, 0.6, { Smooth = true })
+		if ctx.Fine then
+			for i = 1, 3 do
+				box(g, "HornRing", { s * 5.8, ctx.HeadTop + i * 2.6 - 1, c[3] + i * 1.2 - 0.6 }, { 8, 0.8, 9 }, { Op = "Paint", OnlyKeys = "Horn" })
+			end
+		end
+	end)
+	pal.HornRing = darken(pal.Horn, 0.18)
+	-- forehead jewel
+	ell(g, "Gold", { 0, c[2] + 7.2, c[3] - 8.8 }, { 2.4, 2.6, 1 })
+	ell(g, "Gem", { 0, c[2] + 7.2, c[3] - 9.6 }, { 1.4, 1.7, 0.8 })
+	-- spines down the back
+	for i = 0, 6 do
+		local z = -6 + i * 3.8
+		local y = ctx.EvoBelly + 8 - math.abs(i - 1.5) * 0.5
+		cone(g, "Spine", { 0, y - 1, z }, { 0, y + 3.4 - i * 0.25, z + 1.6 }, 1.6, 0.2)
+	end
+	pal.Spine = pal.Spine or rgb(250, 202, 72)
+	shadeMain(ctx, { "Fur" })
+	-- long tail swinging out to the side with spikes and a spade tip
+	local t = newTail(ctx, ctx.TailHinge, 0.25)
+	curve(t, "Fur", { { 0, 0, 0 }, { 0, -2, 6 }, { 3, -6, 12 }, { 9, -9, 15 }, { 15, -10, 14 } }, 3.8, 1.3, { Smooth = true })
+	cone(t, "Spine", { 15, -10, 14 }, { 20, -10.5, 13 }, 2.6, 0.2)
+	for _, p in ipairs({ { 0, 2.8, 4 }, { 1, 0.8, 9 }, { 4.5, -2.8, 13 }, { 9.5, -5.6, 15.5 } }) do
+		cone(t, "Spine", p, { p[1], p[2] + 2.6, p[3] + 1 }, 1.2, 0.2)
+	end
+end
+
+----------------------------------------------------------------------
+-- per-pet evolved details (after the species, before the eyes are carved)
+----------------------------------------------------------------------
+EVO.Pets.biscuit_bear = function(ctx)
+	local g = ctx.Body
+	-- a big knitted striped scarf with a hanging end and a square gold medallion set with a red gem
+	local y, z, r = ctx.NeckY, ctx.NeckZ, ctx.NeckR
+	local pts = {}
+	for i = 0, 16 do
+		local a = i / 16 * TAU
+		pts[#pts + 1] = { math.cos(a) * (r[1] + 1.2), y - 0.6 + math.sin(a) * 1.2, z + math.sin(a) * (r[2] + 1.2) }
+	end
+	curve(g, "Scarf", pts, 2.2, 2.2, { Smooth = false })
+	cap(g, "Scarf", { 3.6, y - 1.5, z - r[2] - 1.4 }, { 4.6, y - 9, z - r[2] - 1.2 }, 2.1, 2)
+	if ctx.Fine then
+		local stripe = function(x, yy, zz)
+			local a = math.atan2(zz - z, x)
+			if floor((a + math.pi) / TAU * 18) % 2 == 0 then
+				return "ScarfStripe"
+			end
+			return false
+		end
+		paint(g, "ScarfStripe", { Kind = "Box", Center = { 0, y - 0.6, z }, Size = { 2 * r[1] + 8, 6, 2 * r[2] + 8 }, Pattern = stripe }, "Scarf")
+		paint(g, "ScarfStripe", { Kind = "Capsule", A = { 3.6, y - 1.5, z - r[2] - 1.4 }, B = { 4.6, y - 9, z - r[2] - 1.2 }, Radius = 2.3, Pattern = function(x, yy)
+			if floor(yy + 0.5) % 3 == 0 then
+				return "ScarfStripe"
+			end
+			return false
+		end }, "Scarf")
+	end
+	local fy, fz = y - 1.4, z - r[2] - 3
+	box(g, "GoldDeep", { 0, fy - 1, fz }, { 5, 5, 1.6 })
+	box(g, "Gold", { 0, fy - 1, fz - 0.6 }, { 4, 4, 1.2 })
+	ell(g, "Gem", { 0, fy - 1, fz - 1.4 }, { 1.4, 1.4, 0.8 })
+	set(g, vx(-0.5), vx(fy - 0.4), vx(fz - 2.2), "Spark")
+end
+
+EVO.Pets.honey_bunny = function(ctx)
+	EVO.Tiara(ctx, { H = 4.6 })
+	EVO.Necklace(ctx, { Double = true, Drops = 4 })
+	EVO.Anklets(ctx, { Gem = false })
+end
+
+EVO.Pets.pip_penguin = function(ctx)
+	local g = ctx.Body
+	local c = ctx.HeadC
+	-- a crest of blue ice crystals rising from a small gold crown
+	shape(g, { Kind = "Torus", Center = { 0, ctx.HeadTop - 1.2, c[3] + 0.5 }, Radius = 3.4, Thickness = 0.9, Key = "Gold" })
+	ell(g, "Gem", { 0, ctx.HeadTop - 0.6, c[3] - 3.4 }, { 1.2, 1.4, 0.8 })
+	local crys = { { 0, 9, 0 }, { 2.4, 6.5, 0.8 }, { -2.4, 6.5, 0.8 }, { 1, 5, 2.6 }, { -1.2, 5.5, 2.4 } }
+	for i, p in ipairs(crys) do
+		local base = { p[1] * 0.6, ctx.HeadTop - 1, c[3] + p[3] * 0.5 }
+		cone(g, (i == 1) and "Crystal" or "CrystalDeep", base, { p[1], ctx.HeadTop + p[2], c[3] + p[3] }, 1.6, 0.25)
+	end
+	ctx.Pal.Crystal = rgb(150, 220, 255)
+	ctx.Pal.CrystalDeep = rgb(90, 170, 240)
+	EVO.Necklace(ctx, { R = 8.6, DY = -1, Tilt = 0.3, Drops = 4 })
+end
+
+EVO.Pets.twilight_dragon = function(ctx)
+	EVO.ChestPlate(ctx)
+	EVO.Necklace(ctx, { Pendant = false })
+	EVO.Anklets(ctx)
+end
+
+-- gem and wing colours of the other evolved pets (after the player's evolved reference sheet)
+local EVO_LOOKS = {
+	mallow_kitten = { Gem = { 255, 84, 168 }, GemB = { 200, 150, 255 }, Wing = { 242, 156, 194 }, Tip = { 255, 236, 244 } },
+	pebble_pup = { Gem = { 236, 64, 108 }, GemB = { 255, 210, 90 }, Wing = { 166, 124, 84 }, Tip = { 246, 228, 200 } },
+	puddle_frog = { Gem = { 60, 196, 220 }, GemB = { 255, 210, 90 }, Wing = { 92, 184, 88 }, Tip = { 206, 244, 170 } },
+	bamboo_panda = { Gem = { 80, 200, 110 }, GemB = { 255, 210, 90 }, Wing = { 112, 186, 104 }, Tip = { 214, 244, 196 } },
+	bubble_axolotl = { Gem = { 255, 76, 146 }, GemB = { 90, 200, 255 }, Wing = { 136, 198, 236 }, Tip = { 236, 250, 255 } },
+	maple_fox = { Gem = { 236, 48, 52 }, GemB = { 255, 210, 90 }, Wing = { 222, 106, 44 }, Tip = { 255, 212, 146 } },
+	mochi_slime = { Gem = { 232, 36, 88 }, GemB = { 255, 210, 90 }, Wing = { 244, 156, 188 }, Tip = { 255, 236, 244 } },
+	sleepy_owl = { Gem = { 226, 52, 72 }, GemB = { 255, 210, 90 }, Wing = { 134, 98, 72 }, Tip = { 236, 214, 180 } },
+	waffle_corgi = { Gem = { 255, 84, 148 }, GemB = { 90, 200, 255 }, Wing = { 222, 168, 92 }, Tip = { 255, 240, 204 } },
+	blossom_bunny = { Gem = { 255, 96, 168 }, GemB = { 255, 210, 90 }, Wing = { 238, 164, 204 }, Tip = { 255, 236, 246 } },
+	cherry_panda = { Gem = { 255, 92, 156 }, GemB = { 255, 210, 90 }, Wing = { 234, 146, 178 }, Tip = { 255, 226, 236 } },
+	frostling_penguin = { Gem = { 226, 36, 56 }, GemB = { 120, 210, 255 }, Wing = { 124, 186, 236 }, Tip = { 236, 250, 255 } },
+	shroomie_frog = { Gem = { 226, 44, 56 }, GemB = { 255, 210, 90 }, Wing = { 224, 116, 66 }, Tip = { 255, 230, 190 } },
+	storm_tabby = { Gem = { 255, 76, 138 }, GemB = { 120, 200, 255 }, Wing = { 66, 74, 104 }, Tip = { 170, 180, 214 } },
+	aurora_fox = { Gem = { 255, 104, 188 }, GemB = { 170, 240, 255 }, Wing = { 104, 198, 194 }, Tip = { 226, 252, 248 } },
+	candy_unicorn = { Gem = { 84, 196, 255 }, GemB = { 255, 104, 176 }, Wing = { 244, 172, 206 }, Tip = { 255, 244, 250 } },
+	moonlit_owl = { Gem = { 168, 84, 240 }, GemB = { 255, 220, 120 }, Wing = { 58, 70, 132 }, Tip = { 200, 210, 250 } },
+	nebula_axolotl = { Gem = { 255, 96, 188 }, GemB = { 130, 240, 255 }, Wing = { 126, 96, 216 }, Tip = { 245, 240, 255 } },
+	ember_phoenix = { Gem = { 255, 56, 36 }, GemB = { 255, 210, 90 }, Wing = { 238, 104, 36 }, Tip = { 255, 226, 96 } },
+	sunbeam_bear = { Gem = { 226, 36, 66 }, GemB = { 76, 176, 255 }, Wing = { 234, 176, 66 }, Tip = { 255, 244, 200 } },
+	cloudy_dragon = { Gem = { 64, 156, 255 }, GemB = { 255, 210, 90 }, Wing = { 222, 234, 250 }, Tip = { 255, 255, 255 } },
+	starlight_unicorn = { Gem = { 168, 116, 255 }, GemB = { 255, 220, 120 }, Wing = { 198, 172, 250 }, Tip = { 250, 246, 255 } },
+	stormfang = { Gem = { 76, 228, 255 }, GemB = { 170, 110, 255 }, Wing = { 66, 136, 228 }, Tip = { 170, 240, 255 } },
+	eclipse_dragon = { Gem = { 255, 66, 168 }, GemB = { 76, 228, 216 }, Wing = { 104, 56, 186 }, Tip = { 232, 96, 212 } },
+	obsidian_phoenix = { Gem = { 255, 56, 156 }, GemB = { 88, 208, 255 }, Wing = { 206, 64, 196 }, Tip = { 255, 186, 116 } },
+	phantom_kitsune = { Gem = { 176, 116, 255 }, GemB = { 140, 255, 220 }, Wing = { 146, 116, 228 }, Tip = { 236, 226, 255 } },
+}
+for k, v in pairs(EVO_LOOKS) do
+	EVO.Look[k] = v
+end
+
+-- a 5-petal flower facing the front (-Z)
+function EVO.Flower(ctx, c, size, petal, centre)
+	local g = ctx.Body
+	size = size or 1
+	for i = 0, 4 do
+		local a = i / 5 * TAU + 0.3
+		ell(g, (i % 2 == 0) and (petal or "Petal") or "PetalDeep", { c[1] + math.cos(a) * 1.7 * size, c[2] + math.sin(a) * 1.7 * size, c[3] }, { 1.3 * size, 1.3 * size, 0.9 })
+	end
+	ell(g, centre or "Pollen", { c[1], c[2], c[3] - 0.6 }, { 0.9 * size, 0.9 * size, 0.8 })
+end
+
+-- a pointed leaf from a (base) to b (tip), flattened, with a darker midrib
+function EVO.Leaf(ctx, a, b, w, key, rib)
+	local g = ctx.Body
+	local dx, dy, dz = b[1] - a[1], b[2] - a[2], b[3] - a[3]
+	local len = math.sqrt(dx * dx + dy * dy + dz * dz)
+	local c = { (a[1] + b[1]) / 2, (a[2] + b[2]) / 2, (a[3] + b[3]) / 2 }
+	if math.abs(dx) + math.abs(dz) < 0.01 then
+		dz = 0.05
+	end
+	local rot = CFrame.lookAt(Vector3.new(0, 0, 0), Vector3.new(dx, dy, dz))
+	ell(g, key or "Leaf", c, { w, 0.8, len / 2 }, { Rotation = rot, Pivot = c })
+	if ctx.Fine and rib ~= false then
+		cap(g, rib or "LeafDeep", a, { a[1] + dx * 0.8, a[2] + dy * 0.8, a[3] + dz * 0.8 }, 0.45, 0.3, { Op = "Paint", OnlyKeys = key or "Leaf" })
+	end
+end
+
+-- bushy tail on a new tail grid (hinge-local, reaching back / up): pts, radii, tip key
+function EVO.BushyTail(ctx, pts, r0, r1, tipKey, key)
+	local t = ctx.Tail or newTail(ctx, ctx.TailHinge, 0.3)
+	curve(t, key or "Fur", pts, r0, r1, { Smooth = true })
+	if tipKey then
+		local n = #pts
+		local tp = pts[n]
+		ell(t, tipKey, tp, { r1 + 1.6, r1 + 1.6, r1 + 1.6 }, { Op = "Paint", OnlyKeys = key or "Fur" })
+	end
+	return t
+end
+
+----------------------------------------------------------------------
+-- the other evolved species
+----------------------------------------------------------------------
+EVO.Species.Cat = function(ctx)
+	local g = ctx.Body
+	EVO.Quad(ctx, { W = 0.95, L = 0.98, PawKey = "Belly", Tufts = true })
+	local c = EVO.Head(ctx, { 10.6, 9, 9.2 })
+	pair(function(s)
+		ell(g, "Fur", { s * 6, c[2] - 3, c[3] - 3.2 }, { 4.6, 3.6, 4.4 })
+		cone(g, "Fur", { s * 9.6, c[2] - 3.4, c[3] - 1.6 }, { s * 13.4, c[2] - 5.6, c[3] - 0.6 }, 2, 0.35)
+		cone(g, "Fur", { s * 9.4, c[2] - 1, c[3] - 1.6 }, { s * 12.8, c[2] - 1.6, c[3] - 0.6 }, 1.6, 0.35)
+		triEar(ctx, s, { 5.8, c[2] + 6.6, c[3] + 0.6 }, { 8.4, c[2] + 15.2, c[3] + 1.4 }, 3.9)
+		ell(g, "Muzzle", { s * 1.7, c[2] - 3.8, c[3] - 8.3 }, { 2.5, 1.9, 1.5 })
+	end)
+	if ctx.Fine then
+		face(ctx, "Nose", { { 0, c[2] - 2 }, { -1, c[2] - 2 }, { 1, c[2] - 2 }, { 0, c[2] - 3 } })
+		face(ctx, "Mouth", { { 0, c[2] - 4 }, { 1, c[2] - 5 }, { -1, c[2] - 5 }, { 2, c[2] - 4.4 }, { -2, c[2] - 4.4 } })
+		-- tabby marks: forehead and back stripes
+		for _, x in ipairs({ -2.4, 0, 2.4 }) do
+			box(g, "Stripe", { x, c[2] + 8, c[3] - 4 }, { 1, 3.4, 8 }, { Op = "Paint", OnlyKeys = "Fur" })
+		end
+		for i = 0, 3 do
+			box(g, "Stripe", { 0, ctx.EvoBelly + 6.5, -4 + i * 4.6 }, { 22, 3, 1.2 }, { Op = "Paint", OnlyKeys = "Fur" })
+		end
+	end
+	if luminance(ctx.Look.Primary) > 0.7 then
+		ctx.Pal.Stripe = mix(darken(ctx.Look.Primary, 0.08), ctx.Look.Secondary, 0.6)
+	end
+	EVO.Face(ctx, c, { EyeX = 8, EyeY = 3.6 })
+	shadeMain(ctx, { "Fur" })
+	local t = newTail(ctx, ctx.TailHinge, 0.32)
+	curve(t, "Fur", { { 0, 0, 0 }, { 0, 2, 6 }, { 0, 8, 10 }, { 0, 15, 9 }, { 0, 19, 6 } }, 2.3, 1.7, { Smooth = true })
+	if ctx.Fine then
+		for i = 1, 4 do
+			box(t, "Stripe", { 0, 1 + i * 3.8, 8 }, { 8, 1.2, 16 }, { Op = "Paint", OnlyKeys = "Fur" })
+		end
+	end
+end
+
+EVO.Species.Dog = function(ctx)
+	local g = ctx.Body
+	local corgi = ctx.Look.Id == "waffle_corgi"
+	EVO.Quad(ctx, { W = corgi and 1.04 or 1, L = corgi and 1.08 or 1, Leg = corgi and 0.86 or 1, PawKey = "Belly", Tufts = true })
+	local c = EVO.Head(ctx, { 10.6, 9.2, 9.4 }, nil, corgi and -1 or 0)
+	pair(function(s)
+		ell(g, "Fur", { s * 6, c[2] - 3.2, c[3] - 3.2 }, { 4.6, 3.8, 4.4 })
+		if corgi then
+			triEar(ctx, s, { 5.4, c[2] + 6.4, c[3] + 0.6 }, { 8.6, c[2] + 16.4, c[3] + 1.6 }, 4.4)
+		else
+			ctx.Pal.Ear = darken(ctx.Look.Primary, 0.2)
+			ell(g, "Ear", { s * 10.4, c[2] - 0.5, c[3] + 1 }, { 2.6, 7.6, 4.6 }, { Rotation = CFrame.Angles(0, 0, s * 0.3), Pivot = { s * 10.4, c[2] - 0.5, c[3] + 1 } })
+			ell(g, "Ear", { s * 8.4, c[2] + 6, c[3] + 1 }, { 3.6, 2.6, 4 })
+		end
+	end)
+	-- a white blaze up the face, a long muzzle and a big shiny nose
+	paint(g, "Muzzle", { Kind = "Ellipsoid", Center = { 0, c[2] + 1.5, c[3] - 7.5 }, Radius = { 2.2, 5.5, 3 } }, "Fur")
+	ell(g, "Muzzle", { 0, c[2] - 3.8, c[3] - 9 }, { 5.4, 4.2, 4.4 })
+	ell(g, "Nose", { 0, c[2] - 1.6, c[3] - 13 }, { 2.6, 1.6, 1.4 })
+	ctx.Pal.Nose = rgb(46, 34, 36)
+	if ctx.Fine then
+		shine(ctx, -1, c[2] - 1.4)
+		face(ctx, "Mouth", { { 0, c[2] - 4.2 }, { 1, c[2] - 5 }, { -1, c[2] - 5 }, { 2, c[2] - 4.6 }, { -2, c[2] - 4.6 } })
+		face(ctx, "Tongue", { { 0, c[2] - 6 }, { 1, c[2] - 6 } })
+	end
+	EVO.Face(ctx, c, { EyeX = 8, EyeY = 3.4 })
+	shadeMain(ctx, { "Fur" })
+	local t = newTail(ctx, ctx.TailHinge, 0.45)
+	if corgi then
+		ell(t, "Fur", { 0, 1.5, 2 }, { 3.2, 3.6, 3.6 })
+		ell(t, "Belly", { 0, 2.5, 3.6 }, { 2.4, 2.4, 2.4 })
+	else
+		curve(t, "Fur", { { 0, 0, 0 }, { 0, 4, 3 }, { 0, 8, 3.6 }, { 0, 10, 2 } }, 2.4, 1.6, { Smooth = true })
+		ell(t, "Belly", { 0, 10.2, 1.8 }, { 2, 2, 2 })
+	end
+end
+
+EVO.Species.Fox = function(ctx)
+	local g = ctx.Body
+	local id = ctx.Look.Id
+	EVO.Quad(ctx, { W = 0.94, L = 1, PawKey = (id == "maple_fox") and "Patch" or "Belly", LegKey = "Fur", Tufts = true })
+	if id == "maple_fox" then
+		ctx.Pal.Patch = rgb(64, 40, 34)
+		pair(function(s)
+			for _, p in ipairs({ ctx.Legs.Front, ctx.Legs.Hind }) do
+				paint(g, "Patch", { Kind = "Box", Center = { s * p[1], EVO.Ground + 4.5, p[2] }, Size = { 7, 9, 8 } }, "Fur")
+			end
+		end)
+	end
+	local c = EVO.Head(ctx, { 10.2, 8.8, 9 })
+	pair(function(s)
+		ell(g, "Belly", { s * 6.2, c[2] - 3.6, c[3] - 3.4 }, { 4.6, 3.6, 4.4 })
+		cone(g, "Belly", { s * 9.6, c[2] - 3.6, c[3] - 1.4 }, { s * 13.6, c[2] - 6.2, c[3] }, 2.3, 0.35)
+		triEar(ctx, s, { 5.4, c[2] + 6, c[3] + 0.8 }, { 8.6, c[2] + 16.6, c[3] + 1.8 }, 4.4, nil, "Patch")
+	end)
+	if not ctx.Pal.Patch or id ~= "maple_fox" then
+		ctx.Pal.Patch = darken(ctx.Look.Primary, 0.45)
+	end
+	-- pointed muzzle, light below
+	cone(g, "Fur", { 0, c[2] - 2.4, c[3] - 6 }, { 0, c[2] - 3.4, c[3] - 13 }, 3.8, 1.4)
+	paint(g, "Belly", { Kind = "Ellipsoid", Center = { 0, c[2] - 5, c[3] - 8.6 }, Radius = { 4.4, 2.4, 5 } }, "Fur")
+	ell(g, "Nose", { 0, c[2] - 3, c[3] - 13.6 }, { 1.5, 1.2, 1.1 })
+	ctx.Pal.Nose = rgb(46, 32, 34)
+	if ctx.Fine then
+		face(ctx, "Mouth", { { 0, c[2] - 5 }, { 1, c[2] - 5.6 }, { -1, c[2] - 5.6 } })
+	end
+	-- fluffy chest ruff
+	ell(g, "Belly", { 0, ctx.NeckY - 2, ctx.NeckZ - 5 }, { 6, 5, 3.4 })
+	for _, x in ipairs({ -3, 0, 3 }) do
+		cone(g, "Belly", { x, ctx.NeckY - 4, ctx.NeckZ - 6 }, { x * 1.1, ctx.NeckY - 8.4, ctx.NeckZ - 7 }, 2, 0.3)
+	end
+	EVO.Face(ctx, c, { EyeX = 8, EyeY = 3.6 })
+	shadeMain(ctx, { "Fur" })
+	if id == "phantom_kitsune" then
+		-- five ghostly tails fanning up behind
+		local t = newTail(ctx, ctx.TailHinge, 0.25)
+		for i = -2, 2 do
+			local a = i * 0.42
+			local sx, sy = math.sin(a), math.cos(a)
+			curve(t, "Tail", { { 0, 0, 0 }, { sx * 6, sy * 5, 4 }, { sx * 13, sy * 13, 6 }, { sx * 17, sy * 19, 4 } }, 2.4, 3.4, { Smooth = true })
+			ell(t, "TailTip", { sx * 17.5, sy * 19.8, 3.8 }, { 3.2, 3.4, 3 }, { Op = "Paint", OnlyKeys = "Tail" })
+		end
+		ctx.Pal.Tail = rgb(132, 104, 214)
+		ctx.Pal.TailTip = { Color = rgb(206, 186, 255), Material = NEON }
+	else
+		EVO.BushyTail(ctx, { { 0, 0, 0 }, { 0, 2, 6 }, { 0, 7, 11 }, { 0, 13, 12 }, { 0, 17, 9 } }, 3, 4.4, "Belly")
+	end
+end
+
+EVO.Species.Panda = function(ctx)
+	local g = ctx.Body
+	ctx.Pal.Patch = (luminance(ctx.Look.Secondary) < 0.3) and ctx.Look.Secondary or darken(ctx.Look.Secondary, 0.2)
+	EVO.Quad(ctx, { W = 1.12, L = 0.95, LegKey = "Patch", PawKey = "Patch", BellyKey = false, ToeKey = "Lash" })
+	-- dark shoulder band
+	paint(g, "Patch", { Kind = "Box", Center = { 0, ctx.EvoBelly + 1, -4.5 }, Size = { 24, 18, 5 } }, "Fur")
+	local c = EVO.Head(ctx, { 11, 9.8, 10 })
+	pair(function(s)
+		ell(g, "Fur", { s * 6.2, c[2] - 3, c[3] - 3.2 }, { 4.6, 3.8, 4.4 })
+		roundEar(ctx, s, { 7.6, c[2] + 7.8, c[3] + 0.8 }, 3.7, "Patch", "Patch")
+		-- eye patches, tilted teardrops
+		paint(g, "Patch", { Kind = "Ellipsoid", Center = { s * 5.3, c[2] + 0.6, c[3] - 8 }, Radius = { 3.4, 4.4, 3 }, Rotation = CFrame.Angles(0, 0, s * 0.5), Pivot = { s * 5.3, c[2] + 0.6, c[3] - 8 } }, "Fur")
+	end)
+	ell(g, "Fur", { 0, c[2] - 3.8, c[3] - 8.8 }, { 5.2, 3.9, 3.8 })
+	ell(g, "Nose", { 0, c[2] - 1.8, c[3] - 12.4 }, { 2.3, 1.3, 1.3 })
+	ctx.Pal.Nose = rgb(40, 36, 44)
+	if ctx.Fine then
+		shine(ctx, -1, c[2] - 1.8)
+		face(ctx, "Mouth", { { 0, c[2] - 4.4 }, { 1, c[2] - 5 }, { -1, c[2] - 5 } })
+	end
+	EVO.Face(ctx, c, { EyeX = 8, EyeY = 3.8 })
+	shadeMain(ctx, { "Fur", "Patch" })
+	local t = newTail(ctx, ctx.TailHinge, 0.2)
+	ell(t, "Fur", { 0, 0.6, 1.4 }, { 2.6, 2.6, 2.6 })
+end
+
+EVO.Species.Owl = function(ctx)
+	local g = ctx.Body
+	local c = EVO.Bird(ctx, { HeadR = { 11, 9.6, 9.6 } })
+	-- facial disc, ear tufts, little hooked beak, gold eye rings
+	paint(g, "Belly", { Kind = "Ellipsoid", Center = { 0, c[2] - 0.5, c[3] - 7 }, Radius = { 9, 6.4, 4 } }, "Fur")
+	pair(function(s)
+		cone(g, "Fur", { s * 6.6, c[2] + 6.5, c[3] }, { s * 9.4, c[2] + 13.5, c[3] + 1.4 }, 2.6, 0.4)
+		paint(g, "EyeRing", { Kind = "Ellipsoid", Center = { s * 4.8, c[2] + 0.4, c[3] - 8.4 }, Radius = { 4.3, 4.6, 2.4 } }, "Belly")
+	end)
+	cone(g, "Beak", { 0, c[2] - 1.8, c[3] - 9 }, { 0, c[2] - 4.4, c[3] - 11.4 }, 1.7, 0.3)
+	-- speckled chest
+	if ctx.Fine then
+		for i = 0, 11 do
+			local x = (i % 4) * 3.2 - 4.8 + ((floor(i / 4) % 2) * 1.6)
+			local y = -1 - floor(i / 4) * 3.4
+			box(g, "Stripe", { x, y, -10 }, { 1.2, 1, 10 }, { Op = "Paint", OnlyKeys = "Belly" })
+		end
+	end
+	ctx.Pal.EyeRing = rgb(250, 196, 70)
+	EVO.Face(ctx, c, { EyeX = 8.2, EyeY = 3.8, Blush = false })
+	if luminance(ctx.Look.Eye) < 0.45 then
+		ctx.Pal.EyeIris = rgb(236, 170, 40)
+		ctx.Pal.EyeGlint = rgb(255, 222, 120)
+	end
+	shadeMain(ctx, { "Fur" })
+	local t = newTail(ctx, ctx.TailHinge, 0.15)
+	cone(t, "Fur", { 0, 0, 0 }, { 0, -1.5, 5 }, 3.4, 1)
+end
+
+EVO.Species.Phoenix = function(ctx)
+	local g = ctx.Body
+	local c = EVO.Bird(ctx, { HeadR = { 10.2, 9, 9.2 } })
+	cone(g, "Beak", { 0, c[2] - 2, c[3] - 8.6 }, { 0, c[2] - 4, c[3] - 12.6 }, 2, 0.3)
+	-- flame crest: tall tongues of fire, hot core
+	local crest = { { 0, 12, 1 }, { 3, 9, 2.6 }, { -3, 9, 2.6 }, { 1.5, 7, 5 }, { -1.6, 7.4, 5 }, { 0, 6, 7 } }
+	for i, p in ipairs(crest) do
+		cone(g, (i % 2 == 1) and "Flame" or "FlameHot", { p[1] * 0.4, ctx.HeadTop - 2, c[3] + p[3] * 0.4 }, { p[1], ctx.HeadTop + p[2], c[3] + p[3] }, 2, 0.3)
+	end
+	pair(function(s)
+		cone(g, "Flame", { s * 8, c[2] + 1, c[3] + 2 }, { s * 13, c[2] + 3, c[3] + 6 }, 1.8, 0.3)
+	end)
+	EVO.Face(ctx, c, { EyeX = 7.8, EyeY = 3.2 })
+	shadeMain(ctx, { "Fur" })
+	-- long flame tail plumes
+	local t = newTail(ctx, ctx.TailHinge, 0.2)
+	for i = -1, 1 do
+		curve(t, (i == 0) and "FlameHot" or "Flame", { { 0, 0, 0 }, { i * 3, -2, 6 }, { i * 6, -3, 12 }, { i * 8, -1, 17 } }, 2.6, 0.8, { Smooth = true })
+	end
+end
+
+EVO.Species.Slime = function(ctx)
+	local g = ctx.Body
+	local G0 = EVO.Ground
+	ell(g, "Fur", { 0, G0 + 10, 0 }, { 14.5, 10.5, 13.5 })
+	ell(g, "Fur", { 0, G0 + 15, -0.5 }, { 11.8, 10.5, 11 })
+	ell(g, "Fur", { 0, G0 + 22.5, -1 }, { 7, 6.5, 6.5 })
+	paint(g, "Belly", { Kind = "Ellipsoid", Center = { 0, G0 + 20, -6 }, Radius = { 7, 5, 5 } }, "Fur")
+	-- glossy top
+	paint(g, "Shine", { Kind = "Ellipsoid", Center = { -4, G0 + 24, -5 }, Radius = { 2.4, 2, 2 } }, { Fur = true, Belly = true })
+	ctx.Pal.Shine = lighten(ctx.Look.Primary, 0.5)
+	local c = { 0, G0 + 14, -0.5 }
+	ctx.HeadC, ctx.HeadR = c, { 11.8, 10.5, 11 }
+	ctx.HeadTop = G0 + 29
+	ctx.NeckY, ctx.NeckZ, ctx.NeckR = G0 + 6, 0, { 14, 13 }
+	ctx.WingHinge = { 7, G0 + 17, 3 }
+	ctx.TailHinge = { 0, G0 + 8, 12 }
+	-- sprout on top
+	cap(g, "Fur", { 0, ctx.HeadTop - 1, -1 }, { 1.4, ctx.HeadTop + 3, 0 }, 1.4, 0.6)
+	addEyes(ctx, 8, c[2] + 3, "Evo")
+	cuteEyes(ctx)
+	blush(ctx, 7, c[2] - 3, 3)
+	if ctx.Fine then
+		face(ctx, "Mouth", { { 0, c[2] - 3 }, { 1, c[2] - 3.6 }, { -1, c[2] - 3.6 }, { 2, c[2] - 3.2 }, { -2, c[2] - 3.2 } })
+	end
+	shadeMain(ctx, { "Fur" })
+end
+
+EVO.Species.Unicorn = function(ctx)
+	local g = ctx.Body
+	ctx.Pal.Mane = ctx.Look.Secondary
+	ctx.Pal.Mane2 = mix(ctx.Look.Secondary, rgb(255, 255, 255), 0.45)
+	ctx.Pal.Mane3 = mix(ctx.Look.Secondary, rgb(255, 160, 210), 0.5)
+	EVO.Quad(ctx, { W = 0.92, L = 1.02, Leg = 1.3, PawKey = "Gold", Toes = false })
+	local c = EVO.Head(ctx, { 9, 8.8, 9 }, nil, 1.5, 1)
+	-- long horse snout, small ears
+	ell(g, "Fur", { 0, c[2] - 3, c[3] - 7.6 }, { 5.2, 5.4, 5.6 })
+	paint(g, "Muzzle", { Kind = "Ellipsoid", Center = { 0, c[2] - 5, c[3] - 10 }, Radius = { 4.8, 3.6, 3.6 } }, "Fur")
+	if ctx.Fine then
+		face(ctx, "Nostril", { { 2, c[2] - 4 }, { -2, c[2] - 4 } })
+		face(ctx, "Mouth", { { 0, c[2] - 6.6 }, { 1, c[2] - 7 }, { -1, c[2] - 7 } })
+	end
+	pair(function(s)
+		triEar(ctx, s, { 4.4, c[2] + 6.4, c[3] + 1.6 }, { 5.8, c[2] + 12.2, c[3] + 2.4 }, 2.4)
+	end)
+	-- golden spiral horn
+	cone(g, "Horn", { 0, c[2] + 6.8, c[3] - 3.4 }, { 0, c[2] + 20, c[3] - 6.2 }, 2.3, 0.3)
+	if ctx.Fine then
+		for i = 0, 5 do
+			local y = c[2] + 8 + i * 2
+			box(g, "GoldLight", { 0, y, c[3] - 4 - i * 0.4 }, { 6, 0.8, 6 }, { Op = "Paint", OnlyKeys = "Horn" })
+		end
+	end
+	-- flowing mane down the neck and a forelock
+	local keys = { "Mane", "Mane2", "Mane3" }
+	for i = 0, 7 do
+		local t = i / 7
+		ell(g, keys[i % 3 + 1], { -1.2, c[2] + 6 - t * 15, c[3] + 6 + t * 5.5 }, { 3.4, 3.8, 3.4 })
+	end
+	ell(g, "Mane", { 1.5, c[2] + 6.6, c[3] - 5.4 }, { 3.2, 2.4, 2.4 })
+	ell(g, "Mane2", { -1.8, c[2] + 6, c[3] - 4.4 }, { 2.6, 2.2, 2.2 })
+	EVO.Face(ctx, c, { EyeX = 8.4, EyeY = 5.2, Blush = false })
+	shadeMain(ctx, { "Fur" })
+	local t = newTail(ctx, ctx.TailHinge, 0.3)
+	for i = -1, 1 do
+		curve(t, keys[i + 2], { { i * 1.2, 0, 0 }, { i * 1.6, 1, 5 }, { i * 2.2, -4, 10 }, { i * 2.8, -11, 12 } }, 2.4, 1.2, { Smooth = true })
+	end
+end
+
+EVO.Species.Frog = function(ctx)
+	local g = ctx.Body
+	local G0 = EVO.Ground
+	-- crouched: wide body low on its legs, the head merged into it
+	ell(g, "Fur", { 0, G0 + 9, 2 }, { 12, 8.5, 11 })
+	paint(g, "Belly", { Kind = "Ellipsoid", Center = { 0, G0 + 7, -6 }, Radius = { 8.6, 7, 4 } }, "Fur")
+	pair(function(s)
+		-- folded hind legs at the sides, short front legs, wide webbed feet
+		ell(g, "Fur", { s * 10.5, G0 + 6, 6 }, { 4.6, 5.6, 7.4 })
+		ell(g, "Belly", { s * 10, G0 + 1.4, 1.5 }, { 3.6, 1.5, 4.6 })
+		cap(g, "Fur", { s * 7, G0 + 7, -6 }, { s * 7.6, G0 + 2.5, -8 }, 2.8, 2.4)
+		ell(g, "Belly", { s * 7.6, G0 + 1.4, -9.4 }, { 3.4, 1.5, 3 })
+	end)
+	local c = { 0, G0 + 17, -3.5 }
+	ell(g, "Fur", c, { 11.4, 8.2, 9.6 })
+	ctx.HeadC, ctx.HeadR = c, { 11.4, 8.2, 9.6 }
+	-- bulging eyes on top
+	pair(function(s)
+		ell(g, "Fur", { s * 5.6, c[2] + 6, c[3] - 3.6 }, { 4.6, 4.4, 4.4 })
+	end)
+	ctx.HeadTop = c[2] + 9.4
+	ctx.NeckY, ctx.NeckZ, ctx.NeckR = G0 + 11.5, -3, { 10.6, 9.6 }
+	ctx.WingHinge = { 6.4, G0 + 15.5, 4 }
+	ctx.TailHinge = { 0, G0 + 8, 12 }
+	ctx.EvoBelly = G0 + 9
+	addEyes(ctx, 8.6, c[2] + 9, "Evo")
+	cuteEyes(ctx)
+	blush(ctx, 7.5, c[2] - 1, 3)
+	if ctx.Fine then
+		-- a wide smile
+		local cells = {}
+		for x = -5, 5 do
+			cells[#cells + 1] = { x, c[2] - 3.4 + ((math.abs(x) >= 4) and 1 or 0) }
+		end
+		face(ctx, "Mouth", cells)
+		face(ctx, "Nostril", { { 1.5, c[2] + 0.8 }, { -1.5, c[2] + 0.8 } })
+	end
+	shadeMain(ctx, { "Fur" })
+end
+
+EVO.Species.Axolotl = function(ctx)
+	local g = ctx.Body
+	ctx.Pal.Gill = ctx.Look.Secondary
+	ctx.Pal.GillTip = lighten(ctx.Look.Secondary, 0.3)
+	EVO.Quad(ctx, { W = 1.02, L = 1.08, Leg = 0.8, PawKey = "Fur", Toes = false })
+	local c = EVO.Head(ctx, { 11.4, 8.6, 9.4 }, nil, -2.5)
+	-- feathery gills: three branches each side, beaded
+	pair(function(s)
+		for i = 0, 2 do
+			local y = c[2] + 4.6 - i * 4
+			local a = { s * 9.6, y, c[3] + 2 }
+			local b = { s * (15 + (i == 1 and 1.5 or 0)), y + 3 - i * 1.6, c[3] + 4 }
+			curve(g, "Gill", { a, { (a[1] + b[1]) / 2, (a[2] + b[2]) / 2 + 1, c[3] + 3 }, b }, 1.2, 0.8)
+			for k = 1, 3 do
+				local t = k / 3.4
+				local p = { a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t + 1, a[3] + (b[3] - a[3]) * t }
+				ell(g, "GillTip", { p[1], p[2] + 1.6, p[3] }, { 0.9, 1.4, 0.9 })
+			end
+		end
+	end)
+	if ctx.Fine then
+		local cells = {}
+		for x = -4, 4 do
+			cells[#cells + 1] = { x, c[2] - 4 + ((math.abs(x) >= 3) and 1 or 0) }
+		end
+		face(ctx, "Mouth", cells)
+	end
+	EVO.Face(ctx, c, { EyeX = 9.2, EyeY = 3 })
+	shadeMain(ctx, { "Fur" })
+	-- tail with a fin
+	local t = newTail(ctx, ctx.TailHinge, 0.3)
+	curve(t, "Fur", { { 0, 0, 0 }, { 0, -1, 6 }, { 1.5, -2, 12 }, { 3, -2, 17 } }, 3.4, 1.4, { Smooth = true })
+	ell(t, "Gill", { 1, 1.6, 10 }, { 1, 2.4, 8.4 })
+	ell(t, "Gill", { 1, -5, 10 }, { 1, 2.2, 7.4 })
+end
+
+EVO.Species.Stormfang = function(ctx)
+	local g = ctx.Body
+	local pal = ctx.Pal
+	pal.Fur = rgb(58, 62, 76)
+	pal.Plate = rgb(226, 232, 242)
+	pal.PlateDark = rgb(150, 158, 176)
+	pal.Belly = rgb(96, 102, 120)
+	pal.Neon = { Color = rgb(76, 228, 255), Material = NEON }
+	pal.NeonB = { Color = rgb(170, 110, 255), Material = NEON }
+	EVO.Quad(ctx, { W = 1.06, L = 1.05, PawKey = "Plate", Toes = false })
+	-- armour plates: shoulders, back ridge, glowing seams
+	pair(function(s)
+		ell(g, "Plate", { s * 7.6, ctx.EvoBelly + 3.5, -4.5 }, { 3.4, 5.4, 5.4 })
+		ell(g, "Plate", { s * 7.2, ctx.EvoBelly + 2.5, 9.5 }, { 3.2, 5, 5 })
+		box(g, "Neon", { s * 8.4, ctx.EvoBelly + 3.4, -4.5 }, { 2, 0.8, 8 })
+		for _, p in ipairs({ ctx.Legs.Front, ctx.Legs.Hind }) do
+			box(g, "Neon", { s * p[1], EVO.Ground + 6, p[2] - 2.6 }, { 1, 4, 1 })
+		end
+	end)
+	for i = 0, 5 do
+		cone(g, (i % 2 == 0) and "Plate" or "PlateDark", { 0, ctx.EvoBelly + 6.5, -6 + i * 3.8 }, { 0, ctx.EvoBelly + 10.5, -4.6 + i * 3.8 }, 1.6, 0.3)
+	end
+	local c = EVO.Head(ctx, { 9.6, 8.4, 9.4 })
+	-- wolf muzzle with a white plate, tall angular ears with glowing edges, a visor line
+	cone(g, "Fur", { 0, c[2] - 2.4, c[3] - 6 }, { 0, c[2] - 3.6, c[3] - 13.4 }, 4.4, 2)
+	paint(g, "Plate", { Kind = "Ellipsoid", Center = { 0, c[2] - 1, c[3] - 10 }, Radius = { 3.6, 2.6, 5 } }, "Fur")
+	ell(g, "Nose", { 0, c[2] - 3, c[3] - 13.8 }, { 1.6, 1.2, 1 })
+	pal.Nose = rgb(24, 26, 34)
+	pair(function(s)
+		triEar(ctx, s, { 5, c[2] + 5.6, c[3] + 1 }, { 8, c[2] + 17, c[3] + 2.4 }, 3.8, "NeonB", "Neon")
+		ell(g, "Plate", { s * 6.4, c[2] - 3.4, c[3] - 3.6 }, { 4, 3.2, 4 })
+	end)
+	pal.EyeIris = { Color = rgb(90, 230, 255), Material = NEON }
+	pal.EyeGlint = { Color = rgb(220, 255, 255), Material = NEON }
+	addEyes(ctx, 8, c[2] + 3.2, "Evo")
+	shadeMain(ctx, { "Fur", "Plate" })
+	local t = newTail(ctx, ctx.TailHinge, 0.3)
+	curve(t, "Fur", { { 0, 0, 0 }, { 0, 3, 5 }, { 0, 8, 9 }, { 0, 12, 13 } }, 3, 2.4, { Smooth = true })
+	ell(t, "Plate", { 0, 12.4, 13.4 }, { 3, 3, 3 })
+	box(t, "Neon", { 0, 9, 10 }, { 1.2, 1.2, 4 })
+end
+
+-- crystal shard wings (Stormfang): long glowing-edged blades fanning up and back
+function EVO.ShardWing(ctx, w)
+	local shards = { { -4, 20, 2.6 }, { -11, 18, 2.4 }, { -16, 13, 2.2 }, { -19, 6, 2 }, { -18, -1, 1.8 } }
+	for i, s in ipairs(shards) do
+		local a = { -1.5, 1.5, 0.5 }
+		local b = { s[1], s[2], 0.5 }
+		local dx, dy = b[1] - a[1], b[2] - a[2]
+		local len = math.sqrt(dx * dx + dy * dy)
+		local cc = { (a[1] + b[1]) / 2, (a[2] + b[2]) / 2, 0.5 }
+		ell(w, (i % 2 == 0) and "WingTrim" or "Wing", cc, { len / 2, s[3], 0.75 }, { Rotation = CFrame.Angles(0, 0, math.atan2(dy, dx)), Pivot = cc })
+		ell(w, "WingEdge", { b[1] - dx * 0.12, b[2] - dy * 0.12, 0.5 }, { 2, 1.6, 1 }, { Op = "Paint", OnlyKeys = { Wing = true, WingTrim = true } })
+	end
+	ctx.Pal.Wing = rgb(70, 140, 230)
+	ctx.Pal.WingTrim = rgb(140, 100, 236)
+	ctx.Pal.WingEdge = { Color = rgb(150, 240, 255), Material = NEON }
+	ctx.WingSweep = 1.35
+	ctx.WingTilt = 0.15
+end
+
+----------------------------------------------------------------------
+-- per-pet details of the other evolved pets
+----------------------------------------------------------------------
+local function evoScarf(ctx, medallion)
+	local g = ctx.Body
+	local y, z, r = ctx.NeckY, ctx.NeckZ, ctx.NeckR
+	local pts = {}
+	for i = 0, 16 do
+		local a = i / 16 * TAU
+		pts[#pts + 1] = { math.cos(a) * (r[1] + 1), y - 0.6 + math.sin(a) * 1.2, z + math.sin(a) * (r[2] + 1) }
+	end
+	curve(g, "Scarf", pts, 2.1, 2.1, { Smooth = false })
+	cap(g, "Scarf", { 3.4, y - 1.4, z - r[2] - 1.2 }, { 4.6, y - 8.6, z - r[2] - 1 }, 2, 1.9)
+	if ctx.Fine then
+		paint(g, "ScarfStripe", { Kind = "Box", Center = { 0, y - 0.6, z }, Size = { 2 * r[1] + 8, 6, 2 * r[2] + 8 }, Pattern = function(x, yy, zz)
+			if floor((math.atan2(zz - z, x) + math.pi) / TAU * 18) % 2 == 0 then
+				return "ScarfStripe"
+			end
+			return false
+		end }, "Scarf")
+		paint(g, "ScarfStripe", { Kind = "Capsule", A = { 3.4, y - 1.4, z - r[2] - 1.2 }, B = { 4.6, y - 8.6, z - r[2] - 1 }, Radius = 2.2, Pattern = function(x, yy)
+			if floor(yy + 0.5) % 3 == 0 then
+				return "ScarfStripe"
+			end
+			return false
+		end }, "Scarf")
+	end
+	if medallion then
+		local fy, fz = y - 1.2, z - r[2] - 2.8
+		box(g, "GoldDeep", { 0, fy - 1, fz }, { 5, 5, 1.6 })
+		box(g, "Gold", { 0, fy - 1, fz - 0.6 }, { 4, 4, 1.2 })
+		ell(g, "Gem", { 0, fy - 1, fz - 1.4 }, { 1.4, 1.4, 0.8 })
+		set(g, vx(-0.5), vx(fy - 0.4), vx(fz - 2.2), "Spark")
+	end
+end
+
+local function evoHalo(ctx, R, lift)
+	local h = Voxel.NewGrid(30)
+	shape(h, { Kind = "Torus", Center = { 0, 0, 0 }, Radius = R or 5.6, Thickness = 0.8, Key = "HaloGlow" })
+	ctx.Halo = h
+	ctx.HaloAt = { 0, ctx.HeadTop + (lift or 3.4), ctx.HeadC[3] + 1 }
+	ctx.Pal.HaloGlow = { Color = rgb(255, 222, 120), Material = NEON }
+end
+
+local function leafCrest(ctx, n, len)
+	local c = ctx.HeadC
+	-- a spiky crown of leaves: an outer ring leaning out, an inner ring standing up, one in the middle
+	for i = 0, n - 1 do
+		local a = (i / n) * TAU + 0.3
+		local outer = (i % 2 == 0)
+		local base = { math.cos(a) * 2.4, ctx.HeadTop - 1.6, c[3] + 1 + math.sin(a) * 2.4 }
+		local spread = outer and 0.62 or 0.32
+		local tip = { math.cos(a) * len * spread, ctx.HeadTop + len * (outer and 0.72 or 0.95), c[3] + 1 + math.sin(a) * len * spread }
+		EVO.Leaf(ctx, base, tip, outer and 2 or 1.7, outer and "Leaf" or "LeafDeep", outer and "LeafDeep" or "Leaf")
+	end
+	EVO.Leaf(ctx, { 0, ctx.HeadTop - 1.5, c[3] + 1 }, { 0.4, ctx.HeadTop + len * 1.05, c[3] + 1.6 }, 1.8)
+end
+
+EVO.Pets.mallow_kitten = function(ctx)
+	EVO.Tiara(ctx, { H = 4.4 })
+	EVO.Necklace(ctx, { Double = true, Drops = 4 })
+end
+
+EVO.Pets.pebble_pup = function(ctx)
+	EVO.Necklace(ctx, { Size = 1.1, Drops = 2 })
+	local g = ctx.Body
+	ell(g, "Fur", { 0, ctx.HeadTop - 0.5, ctx.HeadC[3] - 2 }, { 2.4, 2, 2.4 }) -- topknot
+end
+
+EVO.Pets.puddle_frog = function(ctx)
+	leafCrest(ctx, 9, 13)
+	EVO.Necklace(ctx, { R = 9.6, DY = 0.5, Tilt = 0.25, Drops = 4 })
+end
+
+EVO.Pets.bamboo_panda = function(ctx)
+	local c = ctx.HeadC
+	for i = 0, 6 do
+		local a = (i / 6) * math.pi
+		local base = { math.cos(a) * 6, ctx.HeadTop - 2, c[3] + 1 - math.sin(a) * 4 }
+		local tip = { math.cos(a) * 10.5, ctx.HeadTop + 2.5, c[3] + 1 - math.sin(a) * 6.5 }
+		EVO.Leaf(ctx, base, tip, 1.4, (i % 2 == 0) and "Leaf" or "LeafDeep")
+	end
+	EVO.Necklace(ctx, { Size = 1.1, Drops = 2 })
+end
+
+EVO.Pets.bubble_axolotl = function(ctx)
+	EVO.Tiara(ctx, { H = 3.8 })
+	EVO.Necklace(ctx, { Drops = 4 })
+end
+
+EVO.Pets.maple_fox = function(ctx)
+	EVO.Tiara(ctx, { H = 4.2, Side = false })
+	local c = ctx.HeadC
+	EVO.Leaf(ctx, { 0, ctx.HeadTop - 1, c[3] + 1 }, { 3.5, ctx.HeadTop + 6, c[3] + 2 }, 2.4)
+	EVO.Leaf(ctx, { 0, ctx.HeadTop - 1, c[3] + 1 }, { -3, ctx.HeadTop + 5, c[3] + 3 }, 2, "LeafDeep", "Leaf")
+	EVO.Necklace(ctx, { Pendant = true, Drops = 2 })
+end
+
+EVO.Pets.mochi_slime = function(ctx)
+	local g = ctx.Body
+	local c = ctx.HeadC
+	-- a tiara sitting on the dome
+	shape(g, { Kind = "Torus", Center = { 0, ctx.HeadTop - 7.4, c[3] - 0.5 }, Radius = 7.6, Thickness = 0.8, Key = "Gold", Rotation = CFrame.Angles(0.25, 0, 0), Pivot = { 0, ctx.HeadTop - 7.4, c[3] - 0.5 } })
+	local fz = c[3] - 8.6
+	local fy = ctx.HeadTop - 6.2
+	ell(g, "GoldDeep", { 0, fy, fz + 0.4 }, { 2.8, 3.2, 1 })
+	ell(g, "Gold", { 0, fy, fz }, { 2.2, 2.6, 0.9 })
+	ell(g, "Gem", { 0, fy, fz - 0.6 }, { 1.5, 1.8, 0.8 })
+	cone(g, "Gold", { 0, fy + 2.4, fz + 0.6 }, { 0, fy + 5.6, fz + 1 }, 1, 0.2)
+	pair(function(s)
+		cone(g, "Gold", { s * 2.8, fy + 0.8, fz + 0.8 }, { s * 4.8, fy + 3.4, fz + 1.4 }, 0.8, 0.2)
+	end)
+end
+
+EVO.Pets.sleepy_owl = function(ctx)
+	EVO.Tiara(ctx, { H = 7.4 })
+	EVO.Necklace(ctx, { R = 9.4, DY = -0.5, Tilt = 0.3, Drops = 2 })
+end
+
+EVO.Pets.waffle_corgi = function(ctx)
+	EVO.Crown(ctx, { R = 4.8, Points = 6, Sink = 2.6 })
+	EVO.Flower(ctx, { -5.4, ctx.HeadTop - 2, ctx.HeadC[3] - 5.4 }, 1.1)
+	EVO.Necklace(ctx, { Drops = 4 })
+end
+
+EVO.Pets.blossom_bunny = function(ctx)
+	EVO.Tiara(ctx, { H = 4.6 })
+	local c = ctx.HeadC
+	EVO.Flower(ctx, { 4.6, ctx.HeadTop + 0.5, c[3] - 3 }, 1.1)
+	EVO.Flower(ctx, { -5, ctx.HeadTop, c[3] - 2.6 }, 0.9, "PetalDeep")
+	EVO.Necklace(ctx, { Double = true, Drops = 4 })
+end
+
+EVO.Pets.cherry_panda = function(ctx)
+	local c = ctx.HeadC
+	for i = 0, 5 do
+		local a = (i / 5) * math.pi
+		EVO.Flower(ctx, { math.cos(a) * 6.6, ctx.HeadTop - 0.8 + math.sin(a) * 0.6, c[3] - math.sin(a) * 5 - 1 }, 1, (i % 2 == 0) and "Petal" or "PetalDeep")
+	end
+	EVO.Necklace(ctx, { Drops = 4 })
+end
+
+EVO.Pets.frostling_penguin = function(ctx)
+	evoScarf(ctx, true)
+	EVO.Crown(ctx, { R = 4.4, Points = 5, Sink = 1.6 })
+end
+
+EVO.Pets.shroomie_frog = function(ctx)
+	local g = ctx.Body
+	local c = ctx.HeadC
+	local top = ctx.HeadTop - 1
+	-- a huge red toadstool cap with white spots, a gold crown band around it
+	cap(g, "CapSpot", { 0, top - 2, c[3] + 1 }, { 0, top + 2, c[3] + 1 }, 2.6, 2.4)
+	ell(g, "Cap", { 0, top + 4.2, c[3] + 1 }, { 8.6, 5.4, 8.2 })
+	carve(g, { Kind = "Box", Center = { 0, top + 0.4, c[3] + 1 }, Size = { 20, 3.6, 20 } }, "Cap")
+	for _, p in ipairs({ { 3.4, top + 7.6, c[3] - 3 }, { -4, top + 6.6, c[3] - 3.6 }, { 0, top + 9, c[3] + 1.5 }, { 6, top + 4.6, c[3] - 2.6 }, { -6.6, top + 4.4, c[3] + 1 }, { 5, top + 6, c[3] + 4 } }) do
+		ell(g, "CapSpot", p, { 1.4, 1.1, 1.4 }, { Op = "Paint", OnlyKeys = "Cap" })
+	end
+	shape(g, { Kind = "Torus", Center = { 0, top + 2.6, c[3] + 1 }, Radius = 8.4, Thickness = 0.8, Key = "Gold" })
+	for i = 0, 4 do
+		local a = -math.pi / 2 + (i - 2) * 0.5
+		cone(g, "Gold", { math.cos(a) * 8.4, top + 3, c[3] + 1 + math.sin(a) * 8.4 }, { math.cos(a) * 8.8, top + 6, c[3] + 1 + math.sin(a) * 8.8 }, 1, 0.2)
+	end
+	ell(g, "Gem", { 0, top + 3, c[3] - 7.8 }, { 1.4, 1.6, 0.8 })
+	EVO.Necklace(ctx, { R = 9.6, DY = 0.5, Tilt = 0.25, Drops = 2 })
+end
+
+EVO.Pets.storm_tabby = function(ctx)
+	EVO.Necklace(ctx, { Drops = 2 })
+end
+
+EVO.Pets.aurora_fox = function(ctx)
+	local g = ctx.Body
+	local top = ctx.HeadTop
+	local z = ctx.HeadC[3]
+	pair(function(s)
+		curve(g, "Antler", { { s * 3, top - 2.5, z }, { s * 4.6, top + 2.6, z + 1 }, { s * 7.4, top + 5.6, z + 2 }, { s * 9, top + 8.4, z + 2.6 } }, 1.3, 0.8)
+		curve(g, "Antler", { { s * 4.8, top + 3, z + 1 }, { s * 3, top + 6, z + 0.6 }, { s * 2.8, top + 7.6, z + 0.6 } }, 0.9, 0.6)
+		EVO.Flower(ctx, { s * 9, top + 9, z + 2.2 }, 0.8)
+		EVO.Flower(ctx, { s * 2.8, top + 8.2, z + 0.4 }, 0.7, "PetalDeep")
+	end)
+	EVO.Tiara(ctx, { H = 4 })
+	EVO.Necklace(ctx, { Double = true, Drops = 4 })
+end
+
+EVO.Pets.candy_unicorn = function(ctx)
+	EVO.ChestPlate(ctx)
+	EVO.Necklace(ctx, { Pendant = false })
+	EVO.Anklets(ctx, { Y = 5.4, Gem = "GemB" })
+	EVO.Flower(ctx, { -4.6, ctx.HeadTop - 1.2, ctx.HeadC[3] - 4.4 }, 1, "PetalDeep")
+end
+
+EVO.Pets.moonlit_owl = function(ctx)
+	evoHalo(ctx, 6, 3)
+	EVO.Necklace(ctx, { R = 9.4, DY = -0.5, Tilt = 0.3, Double = true, Drops = 4 })
+end
+
+EVO.Pets.nebula_axolotl = function(ctx)
+	local g = ctx.Body
+	EVO.Necklace(ctx, { Double = true, Drops = 4 })
+	EVO.Anklets(ctx, { Gem = "GemB" })
+	if ctx.Fine then
+		ctx.Pal.Star = { Color = rgb(240, 236, 255), Material = NEON }
+		for _, p in ipairs({ { 4, 0, 6 }, { -5, 1, 2 }, { 6, -3, 12 }, { -3, -2, 14 }, { 2, 2, -2 } }) do
+			box(g, "Star", { p[1], ctx.EvoBelly + 6 + p[2], p[3] }, { 1, 1, 1 }, { Op = "Paint", OnlyKeys = "Fur" })
+		end
+	end
+end
+
+EVO.Pets.ember_phoenix = function(ctx)
+	EVO.Necklace(ctx, { R = 9.4, DY = -0.5, Tilt = 0.3, Drops = 2 })
+end
+
+EVO.Pets.sunbeam_bear = function(ctx)
+	EVO.Crown(ctx, { R = 5.8, Points = 8 })
+	EVO.ChestPlate(ctx)
+	EVO.Necklace(ctx, { Pendant = false, Drops = 4 })
+	EVO.Anklets(ctx, { Gem = "GemB" })
+end
+
+EVO.Pets.cloudy_dragon = function(ctx)
+	local g = ctx.Body
+	local c = ctx.HeadC
+	pair(function(s)
+		ell(g, "Cloud", { s * 10, c[2] - 2, c[3] + 1 }, { 2.8, 2.6, 2.8 })
+	end)
+	EVO.ChestPlate(ctx)
+	EVO.Necklace(ctx, { Pendant = false })
+	EVO.Anklets(ctx, { Gem = "Gem" })
+end
+
+EVO.Pets.starlight_unicorn = function(ctx)
+	evoHalo(ctx, 6, 9)
+	EVO.ChestPlate(ctx)
+	EVO.Necklace(ctx, { Pendant = false, Drops = 4 })
+	EVO.Anklets(ctx, { Y = 5.4, Gem = "Gem" })
+end
+
+EVO.Pets.stormfang = function(ctx)
+	EVO.Necklace(ctx, { Gem = "Gem", Drops = 0, Size = 1.1 })
+end
+
+EVO.Pets.eclipse_dragon = function(ctx)
+	EVO.ChestPlate(ctx)
+	EVO.Necklace(ctx, { Pendant = false, Drops = 4 })
+	EVO.Anklets(ctx)
+end
+
+EVO.Pets.obsidian_phoenix = function(ctx)
+	EVO.Crown(ctx, { R = 5.2, Points = 7, Sink = 1.2 })
+	EVO.Flower(ctx, { 5.6, ctx.HeadTop + 1, ctx.HeadC[3] - 3.4 }, 1, "Petal")
+	EVO.Necklace(ctx, { R = 9.4, DY = -0.5, Tilt = 0.3, Drops = 4 })
+end
+
+EVO.Pets.phantom_kitsune = function(ctx)
+	evoHalo(ctx, 5.6, 6)
+	EVO.Necklace(ctx, { Drops = 4 })
+	local g = ctx.Body
+	ell(g, "GemB", { 0, ctx.HeadTop - 1.2, ctx.HeadC[3] - 5.8 }, { 1.2, 1.5, 0.8 })
+end
+
+-- colours some evolved species need on top of the normal palette
+local EVO_COLOURS = {
+	ember_phoenix = function(pal)
+		pal.Flame = { Color = rgb(255, 140, 36), Material = NEON }
+		pal.FlameHot = { Color = rgb(255, 222, 90), Material = NEON }
+		pal.WingTip = { Color = rgb(255, 214, 90), Material = NEON }
+	end,
+	obsidian_phoenix = function(pal)
+		pal.Flame = { Color = rgb(236, 70, 200), Material = NEON }
+		pal.FlameHot = { Color = rgb(255, 170, 230), Material = NEON }
+		pal.WingTip = { Color = rgb(255, 176, 120), Material = NEON }
+	end,
+	cloudy_dragon = function(pal)
+		pal.Cloud = rgb(250, 252, 255)
+	end,
+	twilight_dragon = function(pal)
+		pal.Wing = rgb(206, 92, 206)
+		pal.WingTip = rgb(244, 140, 220)
+		pal.WingBone = rgb(96, 64, 178)
+	end,
+	eclipse_dragon = function(pal)
+		pal.Wing = rgb(170, 60, 196)
+		pal.WingTip = rgb(236, 104, 214)
+		pal.WingBone = rgb(52, 36, 104)
+		pal.Spine = rgb(250, 202, 72)
+	end,
+}
+EVO.Colours = EVO_COLOURS
+
+-- builds the evolved body / wings / tail into ctx (called by buildBlueprint for look.Evolved)
+function EVO.Sculpt(ctx)
+	local look = ctx.Look
+	EVO.Palette(ctx)
+	if EVO.Colours[look.Id] then
+		EVO.Colours[look.Id](ctx.Pal)
+	end
+	local fn = EVO.Species[look.Species] or EVO.Species.Bear
+	fn(ctx)
+	local extra = EVO.Pets[look.Id]
+	if extra then
+		extra(ctx)
+	end
+	if ctx.BodyShade then
+		ctx.BodyShade.Noise = 0.42
+		ctx.BodyShade.Seed = 11
+		ctx.BodyShade.Crease = 0.14
+		ctx.BodyShade.Smooth = 1
+		ctx.BodyShade.LightAt = 0.5
+		ctx.BodyShade.DarkAt = -0.12
+	end
+end
+
+function EVO.SculptWing(ctx, w)
+	local look = ctx.Look
+	if look.Species == "Dragon" and look.WingStyle == "Bat" then
+		EVO.BatWing(ctx, w)
+	elseif look.Species == "Stormfang" then
+		EVO.ShardWing(ctx, w)
+	elseif look.Species == "Phoenix" then
+		EVO.Fan(ctx, w, { Size = 0.95, Long = 1.25, Width = 2.1, A0 = 70, A1 = 196 })
+	else
+		EVO.Fan(ctx, w)
+	end
+end
+
+----------------------------------------------------------------------
 -- Secret aura: a ring of floating glowing voxels (orbits)
 ----------------------------------------------------------------------
 local function auraGrid(ctx)
@@ -2218,16 +3687,26 @@ local function buildBlueprint(look, detail, lean)
 	elseif lean == 2 then
 		k = LEAN_HIGH_K
 	end
+	if look.Evolved then
+		k = ((detail == "Low") and 0.8 or 1.6) * (lean and 0.85 or 1)
+	end
 	SK = k
 	local ok, result = pcall(function()
 		local ctx = newContext(look, detail)
 		if lean then
 			ctx.Fine = false
 		end
-		local budget = BUDGET[detail] or BUDGET.High
-		SPECIES[look.Species](ctx)
-		if look.Accessory then
-			ACCESSORIES[look.Accessory](ctx)
+		local budget = budgetOf(look, detail)
+		if look.Evolved then
+			EVO.Sculpt(ctx)
+			if look.Accessory and not EVO.Pets[look.Id] then
+				ACCESSORIES[look.Accessory](ctx)
+			end
+		else
+			SPECIES[look.Species](ctx)
+			if look.Accessory then
+				ACCESSORIES[look.Accessory](ctx)
+			end
 		end
 		carveEyes(ctx)
 		-- (a species may tune its body and tail shading with ctx.BodyShade = Voxel.Shade options)
@@ -2236,9 +3715,13 @@ local function buildBlueprint(look, detail, lean)
 			bodyShade[k] = v
 		end
 		Voxel.Shade(ctx.Body, bodyShade)
-		WINGS[look.WingStyle](ctx, ctx.Wing)
+		if look.Evolved then
+			EVO.SculptWing(ctx, ctx.Wing)
+		else
+			WINGS[look.WingStyle](ctx, ctx.Wing)
+		end
 		if not ctx.WingNoShade then
-			Voxel.Shade(ctx.Wing, { Skip = ctx.NoShade, LightAt = 0.5 })
+			Voxel.Shade(ctx.Wing, { Skip = ctx.NoShade, LightAt = 0.5, Noise = look.Evolved and 0.25 or nil, Seed = 7 })
 		end
 
 		local bp = { Groups = {}, Pal = ctx.Pal, Look = look, Detail = detail, K = k, Pulse = ctx.Pulse }
@@ -2354,7 +3837,7 @@ local function getBlueprint(look, detail)
 		bp = buildBlueprint(look, detail)
 		-- a rare heavy combination (big wings + bushy tail + accessory + aura): sculpt again without the
 		-- optional small details and keep whichever fits
-		local cap = (BUDGET[detail] or BUDGET.High).Cap
+		local cap = budgetOf(look, detail).Cap
 		for level = 1, 2 do
 			if partCount(bp) <= cap then
 				break
@@ -2770,6 +4253,7 @@ function PetBuilder.Build(petDef, opts)
 	local scale = clamp(tonumber(opts.Scale) or 1, 0.05, 40)
 	local detail = (opts.Detail == "Low") and "Low" or "High"
 	local look = readLook(petDef)
+	look.Evolved = (opts.Evolved == true) or (type(petDef) == "table" and petDef.Evolved == true) or nil
 	local bp, bpKey = getBlueprint(look, detail)
 	local tpl = getTemplate(bp, bpKey, scale)
 	local model = tpl:Clone()

@@ -23,6 +23,9 @@ python3 tools/render_model.py lobby+npcs+storm-altar --views top -o village.png
 python3 tools/render_model.py module:server/Services/LobbyBuilder:Build -o any.png   # generic; add :lobby to pass LobbyInfo
 ```
 
+* Evolved forms (`PetBuilder.Build(def, { Evolved = true })`): `pet:<id>:Evolved`, `pet:<id>:EvolvedLow`, and the sheet
+  `python3 tools/render_model.py --grid pets:Evolved --views hero --margin 0.95 -o evolved.png` (the `hero` view is
+  lower and more from the side, `--margin` lets the model fill more of each cell).
 * Targets: `pet:<id>[:High|Low]`, `species:<Species>[:High|Low]`, `lobby`, `npcs`, `storm-altar`, `skydragon`,
   `token[:golden]`, `module:<path>:<func>[:lobby]`, several joined with `+`, or a `.json` dump from `--json`
   (`storm-altar` needs `server/Services/StormAltar.lua`; `npcs` and `storm-altar` build the lobby first).
