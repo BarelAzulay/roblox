@@ -174,14 +174,15 @@ local puff = { First = {}, Last = {}, Age = {}, X = {}, Y = {}, Z = {}, Rot = {}
 local function makePalette()
 	local rgb = Color3.fromRGB
 	return {
-		Scale = rgb(138, 178, 122), Scale_Light = rgb(172, 206, 148), Scale_Dark = rgb(102, 140, 96),
-		Ridge = rgb(86, 122, 86), Ridge_Light = rgb(110, 150, 102),
-		Fin = rgb(84, 152, 128), Fin_Light = rgb(132, 196, 164),
+		-- a fresh jade-sage (cheerful, not grey), lighter on the back, deeper underneath
+		Scale = rgb(128, 188, 114), Scale_Light = rgb(166, 214, 140), Scale_Dark = rgb(94, 148, 92),
+		Ridge = rgb(76, 128, 84), Ridge_Light = rgb(104, 158, 102),
+		Fin = rgb(74, 168, 138), Fin_Light = rgb(128, 210, 174),
 		Belly = rgb(246, 233, 198), BellyLine = rgb(206, 184, 138),
 		Horn = rgb(228, 180, 74), Horn_Light = rgb(250, 218, 124), Horn_Dark = rgb(182, 130, 52),
 		Whisker = rgb(238, 196, 92),
-		Mane = rgb(246, 243, 233), Mane_Light = rgb(255, 255, 250), Mane_Dark = rgb(214, 216, 214),
-		Cloud = rgb(238, 245, 255), Cloud_Light = rgb(255, 255, 255), Cloud_Dark = rgb(204, 220, 242),
+		Mane = rgb(244, 242, 232), Mane_Light = rgb(251, 249, 242), Mane_Dark = rgb(212, 216, 214),
+		Cloud = rgb(236, 243, 253), Cloud_Light = rgb(248, 251, 255), Cloud_Dark = rgb(202, 218, 242),
 		Claw = rgb(244, 236, 214), Claw_Light = rgb(255, 250, 236),
 		Eye = { Color = rgb(255, 176, 52), Material = Enum.Material.Neon },
 		Pupil = rgb(46, 26, 16),

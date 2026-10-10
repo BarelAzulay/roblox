@@ -16,21 +16,24 @@
 --   * SHOP ISLAND    at Config.Lobby.ShopOffset: four voxel gacha machines (Model Roulette_<Id>, built in
 --                    the roulette colour), the striped item stall (Model ItemShop), a rarity board, a token
 --                    statue and an entrance arch, joined to the plaza by a short stone neck.
---   * HOME PLOTS     Config.Lobby.SpotCount cloud islands on Config.Lobby.SpotRingRadius. Each has a flat
---                    PlotSize x PlotSize mowed lawn yard (kept EMPTY for the phase-2 home), fence posts and
---                    rails, a gate facing the ring street, a mailbox with the nameplate, the pet podium.
+--   * HOME PLOTS     Config.Lobby.SpotCount cloud islands on Config.Lobby.SpotRingRadius: a puffy cloud body
+--                    (billows along the sides and back, a hanging cumulus underneath, a soft rim of puffs on the
+--                    outer margins) under a flat PlotSize x PlotSize mowed lawn yard (kept EMPTY for the
+--                    phase-2 home), fence posts and rails, a gate facing the ring street, a mailbox with the
+--                    nameplate, the pet podium.
 --   * RING STREET    a stone street along the front of every plot; wooden bridges join neighbouring plots
 --                    at the junctions. Wooden spoke bridges (supported by cloud puffs) join the plaza to every
 --                    other junction; two garden islands hang off the street; one junction slot stays free for
 --                    the Storm Altar (LobbyInfo.AltarSite).
---   * SKY            voxel cumulus clouds around the village and a cloud sea far below.
+--   * SKY            voxel cumulus clouds around the village and one far below it.
 --
 -- LobbyBuilder.Build() -> LobbyInfo (ARCHITECTURE.md / _V2 / _V3 contract):
 --   Folder, SpawnCFrame, Portals[id] = PortalInfo (+ Model), Spots[i] = SpotInfo, Shop = { Roulettes[id], ItemShop },
 --   NpcSpots = { CFrame x6 }   ground-level CFrames on the plaza lawn beside the walkways, LookVector = towards
 --                              the walkway / court, each with ~5 studs of free space for an NPC pedestal
 --   AltarSite = CFrame | nil   reserved, empty spot inside the ring for the Storm Altar island (faces the plaza)
---   AltarDock = Vector3 | nil  inner edge of the street junction in front of it (where a bridge can dock)
+--   AltarDock = Vector3 | nil  inner edge of the street junction in front of it (where a bridge can dock; that
+--                              junction's inner rope rail is left open for the altar's bridge and gate)
 -- SpotInfo also carries PlotCFrame (centre of the flat yard surface, LookVector = towards the gate),
 -- PlotSize (= Config.Lobby.PlotSize), GateCFrame (gate, on the ground) and Accent (the plot colour).
 -- Spot folders are named Spot_NN and carry the attribute SpotIndex; portal / roulette models are named
@@ -38,9 +41,11 @@
 --
 -- Walkability: every walking surface is a flat collidable part at the plaza height (TOP); layers that meet
 -- differ by at most 0.3 studs (no gaps, no jumps, no z-fighting: overlapping layers are offset in height).
+-- Decor stands on the surface under it: props on the lawn sit LAWN studs under TOP (nothing hovers), pennants
+-- hang from their rope, puffs under bridges stop at the deck, and no cloud rises over a path or an exit.
 -- No server-side animation (v3 replication rule): life comes from ParticleEmitters and lights only.
 --
--- Part budget: <= ~6000 parts after the greedy voxel merge. Repeated decor (trees, lamps, benches, flower beds,
+-- Part budget: <= ~6500 parts after the greedy voxel merge. Repeated decor (trees, lamps, benches, flower beds,
 -- the whole plot with its island, fence and gate, cloud puffs, sky clouds) is sculpted once and :Clone()d.
 -- No external assets: Parts, built-in particle textures and Theme-styled GUI text. Deterministic (seeded).
 -- ProximityPrompts are NOT created here: PetService / ItemService attach them to the PromptParts.
@@ -82,6 +87,7 @@ local Voxel = loadShared("Voxel")
 local LOBBY = Config.Lobby
 local ORIGIN = LOBBY.Origin
 local TOP = ORIGIN.Y -- y of every walking surface
+local LAWN = 0.4 -- the lawn layer's top sits this far under TOP (paths 0, borders -0.1, patches -0.3)
 local OX, OZ = ORIGIN.X, ORIGIN.Z
 local PLAZA_R = (LOBBY.PlazaRadius or 110) + 6 -- walkable radius of the plaza ground
 local PORTAL_R = LOBBY.PortalRingRadius or 88
@@ -1054,7 +1060,7 @@ function Props.Puff(size)
 				{ -5 * s, -2, -1 * s, 5.5 * s, 4.5 * s, 5 * s },
 				{ 0, -4, 0, 6 * s, 5 * s, 6 * s },
 			},
-			MaxParts = 22,
+			MaxParts = 12,
 			Seed = 3,
 		}
 		return VX.CloudModel(spec, CFrame.new(), nil, "CloudPuff", false)
@@ -1072,26 +1078,29 @@ local function bunting(parent, a, b, colors, sag)
 	sag = sag or math.min(2, len * 0.06)
 	local dir = span.Unit
 	local count = math.max(2, math.floor(len / 4))
-	local prev = a
 	local pieces = 3
-	for i = 1, pieces do
+	local knots = {}
+	for i = 0, pieces do
 		local t = i / pieces
-		local p = a + span * t - Vector3.new(0, sag * 4 * t * (1 - t), 0)
-		local seg = p - prev
+		knots[i] = a + span * t - Vector3.new(0, sag * 4 * t * (1 - t), 0)
+	end
+	for i = 1, pieces do
+		local p, prev = knots[i], knots[i - 1]
 		local mid = (p + prev) * 0.5
-		box(m, "Rope", CFrame.lookAt(mid, p), Vector3.new(0.18, 0.18, seg.Magnitude + 0.1), C.PlankDark, { Shadow = false })
-		prev = p
+		box(m, "Rope", CFrame.lookAt(mid, p), Vector3.new(0.18, 0.18, (p - prev).Magnitude + 0.1), C.PlankDark, { Shadow = false })
 	end
 	local flat = Vector3.new(dir.X, 0, dir.Z)
 	if flat.Magnitude < 1e-3 then
 		flat = Vector3.new(1, 0, 0)
 	end
 	for i = 1, count do
+		-- on the straight rope piece (not the parabola through its knots), so every pennant hangs from it
 		local t = (i - 0.5) / count
-		local p = a + span * t - Vector3.new(0, sag * 4 * t * (1 - t), 0)
+		local k = math.min(pieces - 1, math.floor(t * pieces))
+		local p = knots[k]:Lerp(knots[k + 1], t * pieces - k)
 		local color = colors[(i - 1) % #colors + 1]
 		local cf = CFrame.lookAt(p, p + flat) * CFrame.Angles(0, math.rad(90), 0)
-		box(m, "Pennant", cf * CFrame.new(0, -0.45, 0), Vector3.new(0.12, 0.7, 1.3), color, { Shadow = false })
+		box(m, "Pennant", cf * CFrame.new(0, -0.4, 0), Vector3.new(0.12, 0.8, 1.3), color, { Shadow = false })
 		box(m, "Pennant", cf * CFrame.new(0, -1.05, 0), Vector3.new(0.12, 0.6, 0.6), color, { Shadow = false })
 	end
 	return m
@@ -1262,6 +1271,9 @@ local function plazaCell(x, z, L)
 	local ang = math.deg(atan2(z, x)) % 360
 	local l1, l2, l3
 	local n = vnoise(x + 400, z + 400, 46, 11)
+	if r > PLAZA_R - 3.5 then
+		n = 0.5 -- lawn only at the very edge (no patch faces flush with the lawn's edge)
+	end
 	if n < 0.21 then
 		l1 = "GrassDark"
 	elseif n > 0.79 then
@@ -1295,7 +1307,8 @@ local function plazaCell(x, z, L)
 		local d, t = segDist(x, z, s)
 		if d <= s.half then
 			l2 = l2 or BORDER_KEY[s.kind]
-			if d <= s.half - 2 and not l3 then
+			-- (the surface stops one cell before the island's edge, its border runs on: no two layers end flush)
+			if d <= s.half - 2 and not l3 and r <= PLAZA_R - 2.5 then
 				if s.kind == "Plank" then
 					l3 = (math.floor(t / 4) % 2 == 0) and "Plank" or "PlankLight"
 				else
@@ -1308,7 +1321,7 @@ local function plazaCell(x, z, L)
 	if not l2 and not l3 then
 		local h = hash3(math.floor(x), 0, math.floor(z), 21)
 		local meadow = vnoise(x + 900, z + 900, 26, 5) > 0.84
-		if (r > 101 and r < 111 and h < 0.035) or (meadow and h < 0.08) then
+		if r < PLAZA_R - 3.5 and ((r > 101 and r < 111 and h < 0.035) or (meadow and h < 0.08)) then
 			l1 = "Flower" .. (math.floor(hash3(math.floor(x), 1, math.floor(z), 4) * #FLOWERS) + 1)
 		end
 	end
@@ -1458,6 +1471,13 @@ local function buildPlazaBody(f, L)
 		local d = rng:Float(10, 40)
 		puffs[#puffs + 1] = { math.cos(a) * d, -26, math.sin(a) * d, rng:Float(16, 24), rng:Float(8, 11), rng:Float(16, 24) }
 	end
+	-- the exits through the rim: unit direction + half width kept clear (path + border + a little air)
+	local exits = {}
+	for _, a in ipairs(L.RimGaps) do
+		local d = dirOf(a)
+		local half = ((angleDiff(a, L.ShopAngle) < 1) and G.BoardHalf or G.StubHalf) + 2.5
+		exits[#exits + 1] = { d.X, d.Z, half }
+	end
 	-- rim puffs: one right beside every exit, the arcs between exits filled evenly (<= ~30 degrees apart)
 	local rim = {}
 	local gaps = {}
@@ -1498,9 +1518,22 @@ local function buildPlazaBody(f, L)
 		},
 		Puffs = puffs,
 		Rim = rim,
-		-- keep the walking area clear: nothing of the body may rise above the lawn inside the rim
+		-- keep the walking area clear: nothing of the body may rise above the lawn inside the rim, nor over an
+		-- exit (the spoke bridges and the shop neck dock there)
 		Carve = function(x, y, z)
-			return y > 0 and (x * x + z * z) < (R - 6) * (R - 6)
+			if y <= 0 then
+				return false
+			end
+			if (x * x + z * z) < (R - 6) * (R - 6) then
+				return true
+			end
+			for _, ex in ipairs(exits) do
+				local along = x * ex[1] + z * ex[2]
+				if along > R - 24 and math.abs(-x * ex[2] + z * ex[1]) < ex[3] then
+					return true
+				end
+			end
+			return false
 		end,
 		Seed = 4,
 		MaxParts = 360,
@@ -1573,7 +1606,7 @@ local function buildFountain(f, centre, lookTarget)
 			return
 		end
 		pet.Name = "NimbusStatue"
-		local topY = TOP + 10.5
+		local topY = TOP + 9.4 -- perched on the top bowl's rim (its stone top is TOP + 10)
 		pet:PivotTo(CFrame.new(0, 0, 0))
 		local boxCf, boxSize = pet:GetBoundingBox()
 		local bottom = pet:GetPivot().Position.Y - (boxCf.Position.Y - boxSize.Y * 0.5)
@@ -1659,8 +1692,8 @@ local function buildArch(f, L)
 	-- welcome sign standing on the crown, readable from the spawn (front) and from the portals (back)
 	local crownY = 12.4 * V
 	local boardCf = cf * CFrame.new(0, crownY + 3.4, 0) * CFrame.Angles(0, math.pi, 0)
-	box(m, "SignPostL", cf * CFrame.new(-4.5, crownY + 0.6, 0), Vector3.new(0.8, 2, 0.8), C.PlankDark)
-	box(m, "SignPostR", cf * CFrame.new(4.5, crownY + 0.6, 0), Vector3.new(0.8, 2, 0.8), C.PlankDark)
+	box(m, "SignPostL", cf * CFrame.new(-4.5, crownY + 0.6, 0), Vector3.new(0.9, 2, 0.6), C.PlankDark)
+	box(m, "SignPostR", cf * CFrame.new(4.5, crownY + 0.6, 0), Vector3.new(0.9, 2, 0.6), C.PlankDark)
 	box(m, "SignFrame", boardCf, Vector3.new(19.4, 6.4, 0.8), C.Plank)
 	local board = box(m, "WelcomeSign", boardCf, Vector3.new(18.4, 5.4, 1.0), C.Navy, { Shadow = true })
 	-- 920 x 270 px canvas: the name 2 studs tall, the two script lines 0.72 stud
@@ -1687,7 +1720,7 @@ local function buildBoards(f, L)
 		if not pos then
 			return nil
 		end
-		return faceCentre(pos) -- the board's face (-Z, the Front face) looks at the centre
+		return faceCentre(pos - Vector3.new(0, LAWN, 0)) -- the board's face (-Z, the Front face) looks at the centre
 	end
 	-- 550 x 400 px canvas (11 x 8 studs): a 1.04-stud header, five 0.6-stud rows, a 0.6-stud footer
 	local howCf = spotFor(L.MidAngle - L.PortalStep * 0.5)
@@ -1793,7 +1826,7 @@ local function buildPlazaDecor(f, L)
 	for i, t in ipairs(trees) do
 		local pos = plazaSpot(t[1], t[2], 6, L)
 		if pos then
-			place(Props.Tree(t[3]), CFrame.new(pos) * CFrame.Angles(0, math.rad(i * 77), 0), f, t[3] .. "Tree")
+			place(Props.Tree(t[3]), CFrame.new(pos - Vector3.new(0, LAWN, 0)) * CFrame.Angles(0, math.rad(i * 77), 0), f, t[3] .. "Tree")
 		end
 	end
 
@@ -1812,6 +1845,7 @@ local function buildPlazaDecor(f, L)
 	for _, a in ipairs(courtLamps) do
 		local pos = plazaSpot(a, G.CourtR + 5, 1.5, L)
 		if pos then
+			pos = pos - Vector3.new(0, LAWN, 0) -- (decor stands on the lawn layer)
 			local lamp = place(lampTpl, CFrame.new(pos), f, "CourtLamp")
 			local glass = lamp and lamp:FindFirstChild("LampGlass")
 			if glass then
@@ -1824,12 +1858,12 @@ local function buildPlazaDecor(f, L)
 		local half = (angleDiff(a, L.ShopAngle) < 1) and G.BoardHalf or G.StubHalf
 		local skip = angleIn(a, L.PromFrom, L.PromTo) -- banners mark the exits on the promenade side
 		local side = dirOf(a + 90)
-		local pos = polar(a, PLAZA_R - 6, TOP) + side * (half + 1.8)
+		local pos = polar(a, PLAZA_R - 6, TOP - LAWN) + side * (half + 1.8)
 		if not skip then
 			place(lampTpl, CFrame.new(pos), f, "ExitLamp")
 		end
 		if angleDiff(a, L.ShopAngle) < 1 then
-			local pos2 = polar(a, PLAZA_R - 6, TOP) - side * (half + 1.8)
+			local pos2 = polar(a, PLAZA_R - 6, TOP - LAWN) - side * (half + 1.8)
 			local lamp2 = place(lampTpl, CFrame.new(pos2), f, "ExitLamp")
 			local glass = lamp2 and lamp2:FindFirstChild("LampGlass")
 			if glass then
@@ -1858,7 +1892,7 @@ local function buildPlazaDecor(f, L)
 	for _, b in ipairs(benches) do
 		local pos = plazaSpot(b[1], b[2], 3.5, L)
 		if pos then
-			place(benchTpl, faceCentre(pos), f, "Bench")
+			place(benchTpl, faceCentre(pos - Vector3.new(0, LAWN, 0)), f, "Bench")
 		end
 	end
 
@@ -1867,7 +1901,7 @@ local function buildPlazaDecor(f, L)
 		local a = (L.PortalAngles[i] + L.PortalAngles[i + 1]) / 2
 		local pos = plazaSpot(a, G.PromIn - 7, 4, L)
 		if pos then
-			place(Props.FlowerBed((i - 1) % #FLOWERS + 1), faceCentre(pos), f, "FlowerBed")
+			place(Props.FlowerBed((i - 1) % #FLOWERS + 1), faceCentre(pos - Vector3.new(0, LAWN, 0)), f, "FlowerBed")
 		end
 	end
 
@@ -1886,7 +1920,7 @@ local function buildPlazaDecor(f, L)
 			for _, s in ipairs({ -1, 1 }) do
 				local idx = (s < 0) and (left or right) or (right or left)
 				local color = diffColors[idx or 1] or C.Rose
-				local pos = polar(a, G.PromOut + 3, TOP) + dirOf(a + 90) * (s * (G.StubHalf + 2.2))
+				local pos = polar(a, G.PromOut + 3, TOP - LAWN) + dirOf(a + 90) * (s * (G.StubHalf + 2.2))
 				bannerPole(f, faceCentre(pos) * CFrame.Angles(0, (s < 0) and math.pi or 0, 0), color)
 			end
 		end
@@ -2104,8 +2138,11 @@ local function buildPortal(parent, diff, angleDeg)
 		Size = popSize(0.9),
 	})
 
-	-- Star gems above the keystone: lit gold for the difficulty, dim stone up to five.
+	-- Star gems above the keystone: lit gold for the difficulty, dim stone up to five, set on a gold crest bar
+	-- that a short post carries from the keystone (the keystone's top is 21 studs up)
 	local stars = clamp(diff.Stars or 1, 0, MAX_STARS)
+	box(model, "StarPost", gateCF * CFrame.new(0, 21.6, 0), Vector3.new(0.8, 1.3, 0.6), C.GoldDark, { Shadow = false })
+	box(model, "StarBar", gateCF * CFrame.new(0, 22.45, 0), Vector3.new((MAX_STARS - 1) * 2.6 + 1.2, 0.5, 0.5), C.GoldDark, { Shadow = false })
 	for s = 1, MAX_STARS do
 		local gx = ((MAX_STARS + 1) / 2 - s) * 2.6 -- gate +X is the viewer's left: lit stars first
 		local lit = s <= stars
@@ -2511,6 +2548,9 @@ local function buildShop(root, L)
 				local x, z = local2(wx, wz)
 				Voxel.Set(grids[1], i, 0, k, "Grass")
 				local nz = vnoise(wx + 50, wz + 50, 22, 31)
+				if r > R - 3 then
+					nz = 0.5 -- lawn only at the very edge
+				end
 				if nz < 0.26 then
 					Voxel.Set(grids[2], i, 0, k, "GrassDark")
 				elseif nz > 0.76 then
@@ -2523,7 +2563,7 @@ local function buildShop(root, L)
 				end
 				if r <= 19 or (z < 0 and math.abs(x) <= 5) then
 					Voxel.Set(grids[4], i, 0, k, "Stone")
-				elseif not court and not path and r > R - 7 and hash3(i, 3, k, 8) < 0.07 then
+				elseif not court and not path and r > R - 7 and r < R - 3 and hash3(i, 3, k, 8) < 0.07 then
 					Voxel.Set(grids[2], i, 0, k, "Flower" .. (math.floor(hash3(i, 4, k, 2) * #FLOWERS) + 1))
 				end
 				if r <= 19 then
@@ -2577,7 +2617,7 @@ local function buildShop(root, L)
 	local neckA = polar(L.ShopAngle, PLAZA_R - 4, TOP)
 	local neckB = polar(L.ShopAngle, L.ShopDist - R + 5, TOP)
 	local neckMid = (neckA + neckB) * 0.5
-	box(f, "ShopNeck", flatLook(neckMid, neckB) * CFrame.new(0, -0.2 - 0.6, 0), Vector3.new(G.BoardHalf * 2, 1.2, (neckB - neckA).Magnitude), C.Stone, { Collide = true })
+	box(f, "ShopNeck", flatLook(neckMid, neckB) * CFrame.new(0, -0.2 - 0.6, 0), Vector3.new(G.BoardHalf * 2 - 0.3, 1.2, (neckB - neckA).Magnitude), C.Stone, { Collide = true })
 	place(Props.Puff("S"), CFrame.new(neckMid - Vector3.new(0, 1.4, 0)), f, "NeckPuff")
 
 	-- Roulette machines on an arc across the back, cheapest on the left as the customer walks in.
@@ -2601,14 +2641,14 @@ local function buildShop(root, L)
 	end
 
 	-- Item stall (left of the entrance) and rarity board (right), both facing the centre.
-	local stallPos = at(-21, -8)
-	local stallCF = flatLook(stallPos, S)
+	local stallPos = at(-21, -8) - Vector3.new(0, LAWN, 0) -- on the lawn layer
+	local stallCF = flatLook(stallPos, S - Vector3.new(0, LAWN, 0))
 	local okStall, stall = pcall(buildItemStall, f, stallCF)
 	if not okStall then
 		warn("[LobbyBuilder] item stall failed: " .. tostring(stall))
 		stall = fallbackItemStall(f, stallCF)
 	end
-	local okBoard, errBoard = pcall(buildRarityBoard, f, flatLook(at(21, -8), S))
+	local okBoard, errBoard = pcall(buildRarityBoard, f, flatLook(at(21, -8) - Vector3.new(0, LAWN, 0), S - Vector3.new(0, LAWN, 0)))
 	if not okBoard then
 		warn("[LobbyBuilder] rarity board failed: " .. tostring(errBoard))
 	end
@@ -2619,14 +2659,14 @@ local function buildShop(root, L)
 		local archCF = shopCF * CFrame.new(0, 0, -(R - 5)) * CFrame.Angles(0, math.pi, 0)
 		local arch = newModel(f, "ShopArch")
 		for _, s in ipairs({ -1, 1 }) do
-			box(arch, "Pillar", archCF * CFrame.new(s * 7.6, 0.6, 0), Vector3.new(2.6, 1.2, 2.6), C.StoneDark, { Collide = true })
+			box(arch, "Pillar", archCF * CFrame.new(s * 7.6, 0.35, 0), Vector3.new(2.6, 1.7, 2.6), C.StoneDark, { Collide = true })
 			box(arch, "Pillar", archCF * CFrame.new(s * 7.6, 5.6, 0), Vector3.new(1.8, 8.8, 1.8), C.StoneLight, { Collide = true })
 			box(arch, "PillarCap", archCF * CFrame.new(s * 7.6, 10.3, 0), Vector3.new(2.6, 0.8, 2.6), C.Rose)
 			box(arch, "PillarLamp", archCF * CFrame.new(s * 7.6, 11.2, 0), Vector3.new(1, 1, 1), C.Lamp, { Material = MAT.Neon })
 		end
-		box(arch, "Beam", archCF * CFrame.new(0, 10.3, 0), Vector3.new(13, 0.8, 1.2), C.PlankDark)
-		local sign = box(arch, "ShopSign", archCF * CFrame.new(0, 12.6, 0), Vector3.new(12.4, 3.6, 0.8), C.Navy, { Shadow = true })
-		box(arch, "SignRoof", archCF * CFrame.new(0, 14.7, 0), Vector3.new(14, 0.6, 1.8), C.Rose)
+		box(arch, "Beam", archCF * CFrame.new(0, 10.3, 0), Vector3.new(13, 0.6, 1.2), C.PlankDark)
+		local sign = box(arch, "ShopSign", archCF * CFrame.new(0, 12.38, 0), Vector3.new(12.4, 3.6, 0.8), C.Navy, { Shadow = true })
+		box(arch, "SignRoof", archCF * CFrame.new(0, 14.46, 0), Vector3.new(14, 0.6, 1.8), C.Rose)
 		-- 620 x 180 px canvas: the name 1.6 studs tall, the caption 0.68 stud
 		for _, face in ipairs({ Enum.NormalId.Front, Enum.NormalId.Back }) do
 			local gui = surfaceGui(sign, face)
@@ -2638,16 +2678,18 @@ local function buildShop(root, L)
 		local lampTpl = Props.Lamp()
 		local lampTops = {}
 		for i, p in ipairs({ { -9, -13 }, { 9, -13 }, { -25, 6 }, { 25, 6 } }) do
-			local lamp = place(lampTpl, CFrame.new(at(p[1], p[2])), f, "ShopLamp")
+			local base = at(p[1], p[2]) - Vector3.new(0, (i > 2) and LAWN or 0, 0) -- the outer pair stands on the lawn
+			local lamp = place(lampTpl, CFrame.new(base), f, "ShopLamp")
 			local glass = lamp and lamp:FindFirstChild("LampGlass")
 			if glass and i <= 2 then
 				pointLight(glass, C.Lamp, 0.8, 16)
 			end
-			lampTops[i] = at(p[1], p[2]) + Vector3.new(0, 7.4, 0)
+			lampTops[i] = base + Vector3.new(0, 7.4, 0)
 		end
 		bunting(f, lampTops[1], lampTops[2], { C.Rose, C.Cream, C.Gold, rgb(120, 190, 235) }, 1.2)
-		place(Props.FlowerBed(2), flatLook(at(-10, -21), S) * CFrame.Angles(0, math.rad(90), 0), f, "FlowerBed")
-		place(Props.FlowerBed(4), flatLook(at(10, -21), S) * CFrame.Angles(0, math.rad(90), 0), f, "FlowerBed")
+		local down = Vector3.new(0, LAWN, 0)
+		place(Props.FlowerBed(2), flatLook(at(-11.5, -19) - down, S - down) * CFrame.Angles(0, math.rad(90), 0), f, "FlowerBed")
+		place(Props.FlowerBed(4), flatLook(at(11.5, -19) - down, S - down) * CFrame.Angles(0, math.rad(90), 0), f, "FlowerBed")
 		local flies = anchorPart(f, "Fireflies", S + Vector3.new(0, 5, 0), Vector3.new(R * 1.5, 8, R * 1.5))
 		emitter(flies, {
 			Color = ColorSequence.new(rgb(255, 236, 150), rgb(190, 240, 170)),
@@ -2707,28 +2749,47 @@ local function plotTemplate()
 		local depth = back - front
 		local midZ = (back + front) / 2
 
-		-- cloud island body (top 1.2 under the lawn), lumpy at the corners, bulging towards the neighbours
-		-- a soft cushion profile (the edge bulges out under the lawn, then curls in) + two back puffs
-		local rim = {
-			{ -ix + 2, 0, back - 1, 9, 7, 9 },
-			{ ix - 2, 0, back - 1, 9, 7, 9 },
+		-- cloud island body (top 1.2 under the lawn): a puffy cushion, not a slab. Two flat tiers carry the lawn;
+		-- overlapping billows bulge out along both sides and the back (a scalloped outline from above, round
+		-- bumps from the side), a hanging cumulus of big lumps rounds the underside off, and a soft rim of
+		-- small puffs rises from the outer margins (outside the fence; the yard, verge and street stay clear).
+		local rng = Util.NewRng(SEED + 77)
+		local puffs, rim = {}, {}
+		local sideZ0, sideZ1 = front + 12, back - 8
+		for _, sx in ipairs({ -1, 1 }) do
+			for i = 0, 3 do
+				local z = sideZ0 + i * (sideZ1 - sideZ0) / 3 + rng:Float(-3, 3)
+				puffs[#puffs + 1] = { sx * (ix + rng:Float(1, 3)), rng:Float(-5, -3.5), z, rng:Float(8, 10), rng:Float(5.5, 7), rng:Float(10, 12.5) }
+			end
+			rim[#rim + 1] = { sx * (ix - 1), 0, rng:Float(-12, -4), 6, 4, 8 }
+		end
+		for i = 0, 2 do
+			local x = -ix + 12 + i * (2 * ix - 24) / 2 + rng:Float(-3, 3)
+			puffs[#puffs + 1] = { x, rng:Float(-5, -3.5), back + rng:Float(1, 3), rng:Float(12, 14), rng:Float(5.5, 7), rng:Float(8, 10) }
+		end
+		rim[#rim + 1] = { -ix + 2, 0, back - 1, 10, 6.5, 10 }
+		rim[#rim + 1] = { ix - 2, 0, back - 1, 10, 6.5, 10 }
+		-- the hanging underside (studs below the top of the cloud)
+		local hang = {
+			{ 0, -10, midZ, ix * 0.95, 7.5, depth * 0.48 },
+			{ ix * 0.1, -15, midZ, 20, 6.5, 22 },
 		}
+		for _, h in ipairs(hang) do
+			puffs[#puffs + 1] = h
+		end
+		-- 6-stud voxels: the island is cloned 16 times, so its body must stay cheap (~56 parts)
 		VX.CloudModel({
-			V = 3,
+			V = 6,
 			Tiers = {
 				{ SX = ix * 2 + 4, SZ = depth + 4, Z = midZ, Round = 10, H = 1 },
-				{ SX = ix * 2 + 10, SZ = depth + 10, Z = midZ, Round = 14, H = 1 },
-				{ SX = ix * 2 + 4, SZ = depth + 4, Z = midZ, Round = 16, H = 1 },
-				{ SX = ix * 2 - 10, SZ = depth - 10, Z = midZ, Round = 18, H = 1 },
-				{ SX = ix * 1.4, SZ = depth * 0.7, Z = midZ, Round = 18, H = 1 },
-				{ SX = ix * 0.8, SZ = depth * 0.4, Z = midZ, Round = 12, H = 1 },
 			},
+			Puffs = puffs,
 			Rim = rim,
 			-- nothing may rise above the yard, the verge or the street
 			Carve = function(x, y, z)
 				return y > 0 and ((math.abs(x) < G.PlotHalf + 1.5 and z < G.PlotHalf + 1.5 and z > -G.PlotHalf - G.Verge - 1) or (z <= -G.PlotHalf - G.Verge - 1 and z > front - 3 and math.abs(x) < ix + 6))
 			end,
-			MaxParts = 40,
+			MaxParts = 80,
 			Seed = 9,
 		}, CFrame.new(0, -1.2, 0), m, "Island", true)
 
@@ -2968,7 +3029,7 @@ local function buildSpot(parent, index, angle)
 		box(f, "GateBanner", at(Vector3.new(s * 5.4, 5.4, PLOT_POS.Gate - 0.6)), Vector3.new(1.6, 2, 0.15), accent, { Shadow = false })
 	end
 	local mb = PLOT_POS.Mailbox
-	box(f, "MailFlag", at(Vector3.new(mb.X + 0.85, 4.2, mb.Z + 0.4)), Vector3.new(0.15, 1, 0.8), accent, { Shadow = false })
+	box(f, "MailFlag", at(Vector3.new(mb.X + 0.77, 4.2, mb.Z + 0.4)), Vector3.new(0.15, 1, 0.8), accent, { Shadow = false })
 	local sign = box(f, "NumberSign", at(Vector3.new(0, 7.9, PLOT_POS.Gate)), Vector3.new(4.4, 1.8, 0.5), C.Plank)
 	numberSign(sign, index, accent)
 
@@ -3076,7 +3137,9 @@ local function woodBridge(parent, name, a, b, width, opts)
 		end
 	end
 	for _, t in ipairs(opts.Puffs or {}) do
-		place(Props.Puff(opts.PuffSize or "M"), CFrame.new(a + dir * t - Vector3.new(0, 2.2, 0)) * CFrame.Angles(0, t * 7, 0), m, "BridgePuff")
+		-- the puff's highest voxels reach 3 studs over its anchor: anchored 4 under the deck top, it touches the
+		-- underside of the 1-stud planks and nothing pokes through
+		place(Props.Puff(opts.PuffSize or "M"), CFrame.new(a + dir * t - Vector3.new(0, 4, 0)) * CFrame.Angles(0, t * 7, 0), m, "BridgePuff")
 	end
 	return m
 end
@@ -3089,7 +3152,7 @@ local function buildRoads(root, L)
 	local sw = G.StreetW
 	for j, info in ipairs(L.Junctions) do
 		local a = info.Angle
-		local open = info.Spoke or info.Garden -- something docks on the plaza side here
+		local open = info.Spoke or info.Garden or info.Altar -- something docks on the plaza side here
 		local jf = newModel(f, string.format("Junction_%02d", j))
 		-- half A belongs to the plot before the junction (its local -X side), half B to the plot after it
 		for half = 1, 2 do
@@ -3122,7 +3185,8 @@ local function buildRoads(root, L)
 			-- short inner rails on both sides of the docking bridge
 			local zIn = G.StreetZ - sw / 2 + 0.9
 			local dock = polar(a, G.StreetR / math.cos(math.rad(G.HalfStep)) - sw / 2, TOP)
-			local keep = ((info.Spoke and G.SpokeW) or 8) / 2 + 0.8
+			-- (the Storm Altar's bridge docks with a 14-stud entrance gate whose low walls close the gap)
+			local keep = info.Altar and 7.6 or (((info.Spoke and G.SpokeW) or 8) / 2 + 0.8)
 			for _, p in ipairs({ (plotA * CFrame.new(-ix - 0.8, 0, zIn)).Position, (plotB * CFrame.new(ix + 0.8, 0, zIn)).Position }) do
 				local d = Vector3.new(dock.X - p.X, 0, dock.Z - p.Z)
 				local len = d.Magnitude - keep
@@ -3237,14 +3301,18 @@ local function buildGarden(parent, spec, L)
 		local ring = math.abs(r - 10)
 		local t = x * out.X + z * out.Z
 		local d = math.abs(-x * out.Z + z * out.X)
-		local onPath = t >= 9 and d <= 3.6
-		if ring <= 3.6 or onPath then
+		-- the border reaches 2.2 studs past the sand (more than one 2-stud cell), so the sand never ends flush
+		-- with it on the grid
+		local onPath = t >= 9 and d <= 4.4
+		if ring <= 4.4 or onPath then
 			l2 = "SandDark"
 		end
-		if ring <= 2.2 or (t >= 9 and d <= 2.2) then
+		if ring <= 2.2 or (t >= 9 and d <= 2.2 and r <= R - 2.5) then
 			l3 = "Sand"
 		end
-		if not l2 and r > R - 6 and hash3(math.floor(x), 7, math.floor(z), 3) < 0.09 then
+		if r > R - 3 then
+			l1 = nil -- lawn only at the very edge
+		elseif not l2 and r > R - 6 and hash3(math.floor(x), 7, math.floor(z), 3) < 0.09 then
 			l1 = "Flower" .. (math.floor(hash3(math.floor(x), 8, math.floor(z), 6) * #FLOWERS) + 1)
 		end
 		return l1, l2, l3, nil
@@ -3255,17 +3323,18 @@ local function buildGarden(parent, spec, L)
 		-- deg measured from the outward direction
 		return (cf * CFrame.Angles(0, math.rad(deg), 0) * CFrame.new(0, 0, -dist)).Position
 	end
+	local down = Vector3.new(0, LAWN, 0) -- props stand on the lawn layer
 	if spec.Kind == "Pond" then
 		buildPond(f, c)
-		place(Props.Tree("Round"), CFrame.new(localPos(180, 16)) * CFrame.Angles(0, 1.3, 0), f, "RoundTree")
-		place(Props.FlowerBed(6), flatLook(localPos(140, 16), c) * CFrame.Angles(0, math.rad(90), 0), f, "FlowerBed")
+		place(Props.Tree("Round"), CFrame.new(localPos(180, 16) - down) * CFrame.Angles(0, 1.3, 0), f, "RoundTree")
+		place(Props.FlowerBed(6), flatLook(localPos(140, 16) - down, c - down) * CFrame.Angles(0, math.rad(90), 0), f, "FlowerBed")
 	else
-		place(Props.Tree("Blossom"), CFrame.new(c) * CFrame.Angles(0, 0.7, 0), f, "BlossomTree")
-		place(Props.FlowerBed(1), flatLook(localPos(180, 16), c) * CFrame.Angles(0, math.rad(90), 0), f, "FlowerBed")
+		place(Props.Tree("Blossom"), CFrame.new(c - down) * CFrame.Angles(0, 0.7, 0), f, "BlossomTree")
+		place(Props.FlowerBed(1), flatLook(localPos(180, 16) - down, c - down) * CFrame.Angles(0, math.rad(90), 0), f, "FlowerBed")
 	end
 	for _, deg in ipairs({ 75, -75 }) do
-		local p = localPos(deg, 15.5)
-		place(Props.Bench(), flatLook(p, c), f, "Bench")
+		local p = localPos(deg, 15.5) - down
+		place(Props.Bench(), flatLook(p, c - down), f, "Bench")
 	end
 
 	-- name tag + the bridge to the street junction
@@ -3278,29 +3347,27 @@ local function buildGarden(parent, spec, L)
 end
 
 ----------------------------------------------------------------------
--- Sky: voxel cumulus around the village and a cloud sea far below (never collidable)
+-- Sky: voxel cumulus around the village and one far below it (never collidable)
 ----------------------------------------------------------------------
 
+-- kind: "Big" (96 studs) | "Small" (60 studs)
 local function cumulus(kind)
 	return template("Sky" .. kind, function()
 		local r = Util.NewRng(SEED + #kind * 13)
-		local w = (kind == "Big") and 96 or ((kind == "Sea") and 150 or 60)
-		local V = (kind == "Sea") and 8 or 6
+		local w = (kind == "Big") and 96 or 60
 		local rim = {}
-		local n = (kind == "Sea") and 7 or 5
+		local n = 5
 		for i = 1, n do
 			local x = (i - (n + 1) / 2) / n * w * 0.9 + r:Float(-4, 4)
 			local s = r:Float(0.16, 0.24) * w
-			rim[#rim + 1] = { x, r:Float(0, 6), r:Float(-w * 0.12, w * 0.12), s, s * ((kind == "Sea") and 0.5 or 0.8), s * 0.9 }
+			rim[#rim + 1] = { x, r:Float(0, 6), r:Float(-w * 0.12, w * 0.12), s, s * 0.8, s * 0.9 }
 		end
-		if kind ~= "Sea" then
-			rim[#rim + 1] = { r:Float(-6, 6), w * 0.18, 0, w * 0.22, w * 0.2, w * 0.2 }
-		end
+		rim[#rim + 1] = { r:Float(-6, 6), w * 0.18, 0, w * 0.22, w * 0.2, w * 0.2 }
 		local spec = {
-			V = V,
+			V = 6,
 			Tiers = { { SX = w, SZ = w * 0.55, Round = w * 0.2, H = 1, Key = "Mist" } },
 			Rim = rim,
-			MaxParts = (kind == "Sea") and 26 or 32,
+			MaxParts = 32,
 			Seed = #kind,
 		}
 		return VX.CloudModel(spec, CFrame.new(), nil, "SkyCloud", false)
@@ -3319,11 +3386,8 @@ local function buildSky(root)
 		local pos = polar(ang, dist, y)
 		place(cumulus(kind), CFrame.new(pos) * CFrame.Angles(0, math.rad(rng:Float(0, 360)), 0), f, "SkyCloud")
 	end
-	for i = 1, 2 do
-		local ang = (i - 1) * 180 + rng:Float(40, 80)
-		local dist = rng:Float(120, 460)
-		place(cumulus("Sea"), CFrame.new(polar(ang, dist, TOP - rng:Float(120, 170))) * CFrame.Angles(0, math.rad(rng:Float(0, 360)), 0), f, "CloudSea")
-	end
+	-- far below: one big puffy cumulus (depth under the village), not a flat sheet
+	place(cumulus("Big"), CFrame.new(polar(rng:Float(40, 80), rng:Float(200, 320), TOP - rng:Float(130, 160))) * CFrame.Angles(0, math.rad(rng:Float(0, 360)), 0), f, "CloudSea")
 	local dust = anchorPart(f, "SkyDust", Vector3.new(OX, TOP + 24, OZ), Vector3.new(560, 90, 560))
 	emitter(dust, {
 		Color = ColorSequence.new(rgb(255, 236, 200), rgb(200, 220, 255)),

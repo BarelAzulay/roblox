@@ -9,9 +9,11 @@
 --
 -- The voxel coin (v3, ARCHITECTURE_V3.md "ART DIRECTION"): every piece is a block on one lattice (u studs per
 -- voxel, 11 voxels across). The round silhouette is three overlapping centred blocks (11x5, 9x9, 5x11 voxels: a
--- clean stepped circle), the face sits half a voxel proud of the rim on both sides, the cloud emblem half a voxel
--- proud of the face. Overlapping centred blocks keep the part count tiny (a Saint course holds ~100 coins and
--- the course part budget counts them): 7 parts per coin, 8 for a golden one (octagonal face).
+-- clean stepped circle) in a lighter glowing gold, the gold face sits half a voxel proud of the rim on both sides
+-- (a 7x7 plate; an octagon of two plates on golden coins), and the cream cloud emblem (a 5x2 base under a
+-- centred 3x1 dome: a cloud's rounded top) stands half a voxel proud of the face. Overlapping centred blocks keep
+-- the part count tiny (a Saint course holds ~100 coins and the course part budget counts them, so the coin can
+-- never grow): 7 parts per coin, 8 for a golden one, halo included.
 --
 -- v2: golden bonus tokens. MakeTokenPart(position, parent, value) with value >= Config.Tokens.GoldenValue
 -- builds a bigger (1.5x), paler-gold, brighter-sparkling coin, tagged BOTH Config.Tags.GoldenToken and
@@ -332,9 +334,9 @@ function TokenService.MakeTokenPart(position, parent, value)
 		addBlock(token, "Face", u, 0, 0, 3, 7, 7, look.face, smooth)
 	end
 
-	-- the cloud emblem in relief (both sides): a 5x2 base with a puff rising on one side
+	-- the cloud emblem in relief (both sides): a 5x2 base under a centred 3x1 dome
 	addBlock(token, "CloudBase", u, -0.5, 0, 4, 2, 5, look.cloud, smooth)
-	addBlock(token, "CloudPuff", u, 1, -0.5, 4, 1, 2, look.cloud, smooth)
+	addBlock(token, "CloudPuff", u, 1, 0, 4, 1, 3, look.cloud, smooth)
 
 	-- soft translucent halo so tokens read from far away. A sphere looks the same however the coin turns, so it
 	-- is not welded (TokenFx bobs it along with the coin; it never spins).
