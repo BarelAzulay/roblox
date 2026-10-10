@@ -4,8 +4,10 @@
 --   otherwise the lowest free spot. The index is stored back in the profile and mirrored on the
 --   player attribute Config.Attr.SpotIndex. Spots are freed when the owner leaves; players who
 --   found no free spot are given one as soon as one opens up.
--- * Nameplate: NameLabel = display name, SubLabel = "3 pets • 120 ☁" (refreshed whenever the
---   pets / tokens change); unowned spots read "Free spot" / "Step in to claim".
+-- * Nameplate (LobbyBuilder builds it: a compact PIXEL-sized tag, World text rule): NameLabel = display name,
+--   SubLabel = "3 pets • 120 Cloud Tokens" (refreshed whenever the pets / tokens change), the avatar disc shows
+--   the owner's headshot (Players:GetUserThumbnailAsync in pcall, cached per user; the silhouette built from
+--   frames is the fallback); unowned spots read "Free home" / "Step in to claim" with a "+" on the disc.
 -- * Showcase podium: a slowly turning + bobbing PetBuilder model of the owner's best (highest
 --   rarity) pet with a small name / rarity tag. It is rebuilt only when that pet changes and is
 --   only moved while a player is nearby.
@@ -34,12 +36,21 @@ local Remotes = require(Shared.Remotes)
 
 local SpotService = {}
 
--- "\226\152\129" = cloud sign, "\226\128\162" = bullet (escaped so the file stays plain ASCII).
-local CLOUD_GLYPH = "\226\152\129"
+-- "\226\128\162" = bullet (escaped so the file stays plain ASCII).
 local BULLET = "\226\128\162"
 
-local FREE_NAME = "Free spot"
+local FREE_NAME = "Free home"
 local FREE_SUB = "Step in to claim"
+local TOKENS_NAME = (Theme.Currency and Theme.Currency.Tokens and Theme.Currency.Tokens.Name) or "Cloud Tokens"
+local TOKENS_FULL_BELOW = 100000 -- the info line shows "99,999" in full, then "123K"
+
+-- Showcase tag (World text rule): pixel-sized, names >= 22 px, info >= 18 px, compact solid plate.
+local TAG_W, TAG_H = 300, 96
+local TAG_NAME_PX = 26
+local TAG_RARITY_PX = 18
+local TAG_RANGE = 80
+local TAG_LIFT = -1.2 -- studs: the plate's bottom edge sits ~0.7 stud over the highest point of the bob
+local INK = Theme.Colors.TextStroke or Theme.Colors.Ink
 
 local SHOWCASE_SCALE = 1.4 -- the podium pet is a bit larger than a follower
 local HOVER_HEIGHT = 1.5 -- studs between the podium top and the pet's lowest point
@@ -67,6 +78,8 @@ local conns = {} -- [Player] = { RBXScriptConnection... }
 local shows = {} -- [index] = showcase record (see makeShow)
 local lastSig = {} -- [index] = last nameplate signature
 local lastGo = {} -- [Player] = os.clock() of the last GoToSpot
+local headshots = {} -- [userId] = content string | false (failed) : the GetUserThumbnailAsync cache
+local headshotPending = {} -- [userId] = true while a request runs
 local refreshQueued = {} -- [Player] = true while a deferred refresh is pending
 local notifyRemote = nil
 local departed = setmetatable({}, { __mode = "k" }) -- [Player] = true once PlayerRemoving ran
@@ -167,6 +180,85 @@ local function setLabels(index, name, sub)
 	setText(info.SubLabel, sub)
 end
 
+-- The nameplate's avatar disc (built by LobbyBuilder; a nameplate without one is simply left alone).
+local function avatarOf(index)
+	local info = spots[index]
+	if not info then
+		return nil
+	end
+	local gui = info.Nameplate
+	if typeof(gui) ~= "Instance" and typeof(info.NameLabel) == "Instance" then
+		gui = info.NameLabel:FindFirstAncestorOfClass("BillboardGui")
+	end
+	if typeof(gui) ~= "Instance" then
+		return nil
+	end
+	local disc = gui:FindFirstChild("Avatar", true)
+	if disc and disc:IsA("GuiObject") then
+		return disc
+	end
+	return nil
+end
+
+-- mode: "Free" (the "+"), "Owned" (silhouette) or "Headshot" (image = the thumbnail content).
+local function setAvatar(index, mode, image)
+	local disc = avatarOf(index)
+	if not disc then
+		return
+	end
+	pcall(function()
+		local color = disc:GetAttribute(mode == "Free" and "FreeColor" or "OwnedColor")
+		if typeof(color) == "Color3" then
+			disc.BackgroundColor3 = color
+		end
+		local shot = disc:FindFirstChild("Headshot")
+		local silhouette = disc:FindFirstChild("Silhouette")
+		local free = disc:FindFirstChild("FreeIcon")
+		if free then
+			free.Visible = mode == "Free"
+		end
+		if silhouette then
+			silhouette.Visible = mode == "Owned"
+		end
+		if shot then
+			shot.Image = (mode == "Headshot" and image) or ""
+			shot.Visible = mode == "Headshot"
+		end
+	end)
+end
+
+-- Shows the owner's headshot on their nameplate: cached per user, fetched once in the background (the call
+-- yields and fails for Studio test players, so the silhouette stays as the fallback).
+local function loadHeadshot(player, index)
+	local userId = player.UserId
+	local cached = headshots[userId]
+	if cached then
+		setAvatar(index, "Headshot", cached)
+		return
+	end
+	if cached == false or headshotPending[userId] then
+		return
+	end
+	headshotPending[userId] = true
+	task.spawn(function()
+		local ok, content = pcall(function()
+			return Players:GetUserThumbnailAsync(userId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size150x150)
+		end)
+		headshotPending[userId] = nil
+		if ok and type(content) == "string" and content ~= "" then
+			headshots[userId] = content
+		else
+			headshots[userId] = false
+			return
+		end
+		-- still the owner of that spot? (they may have left while the request ran)
+		local now = spotOf[player]
+		if now and owners[now] == player and player.Parent then
+			setAvatar(now, "Headshot", content)
+		end
+	end)
+end
+
 -- Pivot a character somewhere and kill its momentum.
 local function placeCharacter(char, cframe)
 	if not char or not char.Parent then
@@ -190,7 +282,27 @@ end
 -- Showcase podium
 ----------------------------------------------------------------------
 
--- The tag floating above the pet: dark rounded card, pet name, rarity in the rarity colour.
+-- The tag floating above the pet (World text rule): a PIXEL-sized BillboardGui, so it reads the same at any
+-- distance: the pet name (big, outlined) over a rarity pill in the rarity colour, on a compact navy plate with a
+-- rarity-coloured outline that sizes itself to the text. Its bottom edge sits just over the bobbing pet.
+local function tagLabel(parent, name, text, role, size, order)
+	local label = Theme.Label(text, role, {
+		Size = size,
+		Stroke = 1, -- the glyph outline replaces the classic stroke
+		Outline = 2.5,
+		OutlineColor = INK,
+		Props = {
+			Name = name,
+			AutomaticSize = Enum.AutomaticSize.XY,
+			Size = UDim2.fromOffset(0, size + 4),
+			TextWrapped = false,
+			LayoutOrder = order,
+		},
+	})
+	label.Parent = parent
+	return label
+end
+
 local function buildTag(info)
 	local anchor = Instance.new("Part")
 	anchor.Name = "ShowcaseAnchor"
@@ -206,54 +318,61 @@ local function buildTag(info)
 	local gui = Instance.new("BillboardGui")
 	gui.Name = "ShowcaseTag"
 	gui.Adornee = anchor
-	gui.Size = UDim2.fromScale(9, 2.7)
+	gui.Size = UDim2.fromOffset(TAG_W, TAG_H)
+	gui.SizeOffset = Vector2.new(0, 0.5) -- the bottom edge sits on the anchor (+ TAG_LIFT)
+	gui.StudsOffsetWorldSpace = Vector3.new(0, TAG_LIFT, 0)
 	gui.AlwaysOnTop = false
-	gui.MaxDistance = 90
+	gui.MaxDistance = TAG_RANGE
 	gui.LightInfluence = 0
+	gui.ClipsDescendants = false
 	gui.Enabled = false
 
 	local card = Instance.new("Frame")
 	card.Name = "Card"
-	card.Size = UDim2.new(1, 0, 1, 0)
+	card.AnchorPoint = Vector2.new(0.5, 1)
+	card.Position = UDim2.new(0.5, 0, 1, 0)
+	card.Size = UDim2.fromOffset(140, 0)
+	card.AutomaticSize = Enum.AutomaticSize.XY
 	card.BackgroundColor3 = Color3.fromRGB(255, 255, 255) -- the gradient below sets the real colour
-	card.BackgroundTransparency = 0.18
+	card.BackgroundTransparency = 0.04
 	card.BorderSizePixel = 0
 	card.Parent = gui
-	local gradient = Instance.new("UIGradient")
-	gradient.Color = ColorSequence.new(Theme.Colors.PanelLight, Theme.Colors.Panel)
-	gradient.Rotation = 90
-	gradient.Parent = card
-	local corner = Instance.new("UICorner")
-	corner.CornerRadius = UDim.new(0.2, 0)
-	corner.Parent = card
-	local stroke = Instance.new("UIStroke")
+	Theme.Gradient(card, Theme.Colors.PanelLight, Theme.Colors.Panel, 90)
+	Theme.Corner(card, UDim.new(0, 14))
+	local stroke = Theme.Stroke(card, Theme.Colors.PanelLight, 3.5, 0)
 	stroke.Name = "RarityStroke"
-	stroke.Thickness = 5
-	stroke.Color = Theme.Colors.PanelLight
-	stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-	stroke.Parent = card
+	local pad = Instance.new("UIPadding")
+	pad.PaddingTop = UDim.new(0, 6)
+	pad.PaddingBottom = UDim.new(0, 8)
+	pad.PaddingLeft = UDim.new(0, 16)
+	pad.PaddingRight = UDim.new(0, 16)
+	pad.Parent = card
+	local layout = Instance.new("UIListLayout")
+	layout.FillDirection = Enum.FillDirection.Vertical
+	layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	layout.SortOrder = Enum.SortOrder.LayoutOrder
+	layout.Padding = UDim.new(0, 3)
+	layout.Parent = card
 
-	local nameLabel = Theme.Label("", "Title", {
-		Scaled = true,
-		Stroke = 0.25,
-		Props = {
-			Name = "PetName",
-			Size = UDim2.new(0.94, 0, 0.56, 0),
-			Position = UDim2.new(0.03, 0, 0.06, 0),
-		},
-	})
-	nameLabel.Parent = card
+	local nameLabel = tagLabel(card, "PetName", "", "Title", TAG_NAME_PX, 1)
 
-	local rarityLabel = Theme.Label("", "Heading", {
-		Scaled = true,
-		Stroke = 0.35,
-		Props = {
-			Name = "PetRarity",
-			Size = UDim2.new(0.7, 0, 0.28, 0),
-			Position = UDim2.new(0.15, 0, 0.64, 0),
-		},
-	})
-	rarityLabel.Parent = card
+	local pill = Instance.new("Frame")
+	pill.Name = "RarityPill"
+	pill.Size = UDim2.fromOffset(0, TAG_RARITY_PX + 8)
+	pill.AutomaticSize = Enum.AutomaticSize.XY
+	pill.BackgroundColor3 = Theme.Colors.PanelLight
+	pill.BorderSizePixel = 0
+	pill.LayoutOrder = 2
+	pill.Parent = card
+	Theme.Corner(pill, UDim.new(0, 10))
+	Theme.Stroke(pill, INK, 2.5, 0)
+	local pillPad = Instance.new("UIPadding")
+	pillPad.PaddingTop = UDim.new(0, 2)
+	pillPad.PaddingBottom = UDim.new(0, 3)
+	pillPad.PaddingLeft = UDim.new(0, 10)
+	pillPad.PaddingRight = UDim.new(0, 10)
+	pillPad.Parent = pill
+	local rarityLabel = tagLabel(pill, "PetRarity", "", "Heading", TAG_RARITY_PX, 1)
 
 	anchor.Parent = info.Folder or workspace
 	gui.Parent = anchor
@@ -262,6 +381,7 @@ local function buildTag(info)
 		Gui = gui,
 		NameLabel = nameLabel,
 		RarityLabel = rarityLabel,
+		RarityPill = pill,
 		Stroke = stroke,
 	}
 end
@@ -430,7 +550,7 @@ local function setShowcasePet(index, petId)
 		tag.Anchor.CFrame = CFrame.new(podium.Position + Vector3.new(0, HOVER_HEIGHT + height + BOB_HEIGHT + 1.9, 0))
 		tag.NameLabel.Text = tostring(def.Name or petId)
 		tag.RarityLabel.Text = tostring(def.Rarity or "")
-		tag.RarityLabel.TextColor3 = color
+		tag.RarityPill.BackgroundColor3 = color:Lerp(Theme.Colors.Panel, 0.2)
 		tag.Stroke.Color = color
 		tag.Gui.Enabled = true
 	end
@@ -570,7 +690,11 @@ local function refreshSpot(index)
 	if petTotal == 1 then
 		petsText = "1 pet"
 	end
-	setLabels(index, name, petsText .. " " .. BULLET .. " " .. Util.Commas(tokens) .. " " .. CLOUD_GLYPH)
+	local tokenText = Theme.ShortNumber(tokens, TOKENS_FULL_BELOW) .. " " .. TOKENS_NAME
+	if tokens == 1 then
+		tokenText = "1 " .. (TOKENS_NAME:gsub("s$", ""))
+	end
+	setLabels(index, name, petsText .. " " .. BULLET .. " " .. tokenText)
 	setShowcasePet(index, bestId)
 end
 
@@ -640,6 +764,8 @@ local function claimSpot(player, index, profile)
 	if not shows[index] then
 		shows[index] = makeShow(index)
 	end
+	setAvatar(index, "Owned")
+	loadHeadshot(player, index)
 
 	local list = {}
 	conns[player] = list
@@ -692,6 +818,7 @@ local function freeSpot(player)
 		setShowcasePet(index, nil)
 	end
 	setLabels(index, FREE_NAME, FREE_SUB)
+	setAvatar(index, "Free")
 end
 
 local function lowestFreeSpot()
@@ -841,6 +968,7 @@ function SpotService.Init(lobbyInfo, deps)
 	for index = 1, spotCount do
 		if spots[index] then
 			setLabels(index, FREE_NAME, FREE_SUB)
+			setAvatar(index, "Free")
 		end
 	end
 

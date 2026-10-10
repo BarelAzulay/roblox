@@ -459,97 +459,162 @@ end
 ----------------------------------------------------------------------
 -- GUI helpers (all text goes through Theme font roles)
 ----------------------------------------------------------------------
+-- World text rule (ARCHITECTURE_V3.md, added after the playtest "letters too small"):
+--   * Tags above things are PIXEL-sized BillboardGuis (offset UDim2), so their text keeps one on-screen size at
+--     any distance: names >= 22 px and info lines >= 18 px at 1080p, outlined glyphs on a compact solid plate
+--     that sizes itself to its text, LightInfluence 0 and a MaxDistance of ~60-120 studs.
+--   * Signs on surfaces are SurfaceGuis at SIGN_PPS pixels per stud with FIXED text sizes: titles >= 1 stud,
+--     info lines >= 0.6 stud.
+--   * Never TextScaled in the world: the engine drew the auto-scaled world text tiny in the playtest.
 
--- World-sized billboard: Size in studs, so it shrinks with distance like the thing it labels. The height
--- offset is in WORLD space (StudsOffset is camera-relative and would slide the tag when the camera pitches).
-local function newBillboard(adornee, widthStuds, heightStuds, offsetY, maxDistance)
+local INK = (Theme.Colors and Theme.Colors.TextStroke) or C.Ink
+local TAG_NAME = 28 -- px: the name / title of a tag
+local TAG_INFO = 20 -- px: info lines of a tag
+local TAG_SMALL = 18 -- px: badges and pills (the info-line minimum)
+local TAG_RANGE = 110 -- studs: MaxDistance of an ordinary tag
+local SIGN_PPS = 50 -- pixels per stud on every surface sign
+local SIGN_TITLE = 56 -- px at SIGN_PPS = 1.12 studs
+local SIGN_INFO = 30 -- px at SIGN_PPS = 0.6 stud
+
+-- Pixel-sized tag on `adornee`. The `w` x `h` container is transparent (the plate inside sizes itself to its
+-- text); SizeOffset puts the container's BOTTOM edge on the adornee, raised `lift` studs in world space, so the
+-- tag grows upwards and never sinks into what it labels, whatever the camera distance.
+local function newTag(adornee, name, w, h, lift, maxDistance)
 	local gui = Instance.new("BillboardGui")
-	gui.Name = "Billboard"
-	gui.Size = UDim2.new(widthStuds, 0, heightStuds, 0)
-	gui.StudsOffsetWorldSpace = Vector3.new(0, offsetY or 0, 0)
+	gui.Name = name or "Tag"
+	gui.Size = UDim2.fromOffset(w, h)
+	gui.SizeOffset = Vector2.new(0, 0.5)
+	gui.StudsOffsetWorldSpace = Vector3.new(0, lift or 0, 0)
 	gui.AlwaysOnTop = false
 	gui.LightInfluence = 0
-	gui.MaxDistance = maxDistance or 120
+	gui.MaxDistance = maxDistance or TAG_RANGE
+	gui.ClipsDescendants = false
 	gui.Adornee = adornee
 	gui.Parent = adornee
 	return gui
 end
 
--- Rounded dark card with a coloured outline; fills its parent (text on it always reads).
-local function cardPanel(parent, strokeColor, transparency)
-	local card = Instance.new("Frame")
-	card.Name = "Card"
-	card.Size = UDim2.new(1, 0, 1, 0)
-	card.BackgroundColor3 = Color3.fromRGB(255, 255, 255) -- the gradient below sets the real colour
-	card.BackgroundTransparency = transparency or 0.12
-	card.BorderSizePixel = 0
-	local gradient = Instance.new("UIGradient")
-	gradient.Color = ColorSequence.new(C.Violet, C.Navy)
-	gradient.Rotation = 90
-	gradient.Parent = card
-	local corner = Instance.new("UICorner")
-	corner.CornerRadius = UDim.new(0.14, 0)
-	corner.Parent = card
-	local stroke = Instance.new("UIStroke")
-	stroke.Color = strokeColor
-	stroke.Thickness = 5
-	stroke.Transparency = 0.05
-	stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-	stroke.Parent = card
-	card.Parent = parent
-	return card, stroke
+local function listLayout(parent, direction, gap, hAlign)
+	local layout = Instance.new("UIListLayout")
+	layout.FillDirection = direction or Enum.FillDirection.Vertical
+	layout.HorizontalAlignment = hAlign or Enum.HorizontalAlignment.Center
+	layout.VerticalAlignment = Enum.VerticalAlignment.Center
+	layout.SortOrder = Enum.SortOrder.LayoutOrder
+	layout.Padding = UDim.new(0, gap or 0)
+	layout.Parent = parent
+	return layout
 end
 
--- Theme.Label when the theme provides it; otherwise an equivalent plain label (still Theme fonts).
-local function makeLabel(text, role, opts)
-	opts = opts or {}
-	if type(Theme.Label) == "function" then
-		return Theme.Label(text, role, opts)
-	end
-	local label = Instance.new("TextLabel")
-	label.BackgroundTransparency = 1
-	label.Text = text
-	if type(Theme.Fonts) == "table" and Theme.Fonts[role] then
-		label.Font = Theme.Fonts[role]
-	end
-	label.TextColor3 = opts.Color or C.Text
-	label.TextStrokeColor3 = C.Ink
-	label.TextStrokeTransparency = opts.Stroke or 0.4
-	if opts.Scaled then
-		label.TextScaled = true
-	end
-	if opts.Props then
-		for key, value in pairs(opts.Props) do
-			label[key] = value
+local function padding(parent, top, left, bottom, right)
+	local pad = Instance.new("UIPadding")
+	pad.PaddingTop = UDim.new(0, top)
+	pad.PaddingLeft = UDim.new(0, left)
+	pad.PaddingBottom = UDim.new(0, bottom or top)
+	pad.PaddingRight = UDim.new(0, right or left)
+	pad.Parent = parent
+	return pad
+end
+
+local function rounded(parent, radius)
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = (type(radius) == "number") and UDim.new(0, radius) or radius
+	corner.Parent = parent
+	return corner
+end
+
+local function outline(parent, color, thickness, transparency)
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = color
+	stroke.Thickness = thickness
+	stroke.Transparency = transparency or 0
+	stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	stroke.Parent = parent
+	return stroke
+end
+
+local function vgradient(parent, top, bottom)
+	local g = Instance.new("UIGradient")
+	g.Color = ColorSequence.new(top, bottom)
+	g.Rotation = 90
+	g.Parent = parent
+	return g
+end
+
+local function plainFrame(parent, name, props)
+	local f = Instance.new("Frame")
+	f.Name = name
+	f.BackgroundTransparency = 1
+	f.BorderSizePixel = 0
+	if props then
+		for key, value in pairs(props) do
+			f[key] = value
 		end
 	end
-	return label
+	f.Parent = parent
+	return f
 end
 
--- Auto-scaled text label placed with fractions of its parent (outlined so it reads on any background).
-local function fitLabel(parent, text, role, color, name, x, y, w, h, align)
-	local label = makeLabel(text, role, {
-		Scaled = true,
-		Color = color,
-		Stroke = 0.35,
+-- The compact solid plate of a tag in the HUD card look (navy gradient, rounded, a thick outline in `edge`),
+-- sized to its content and standing on the bottom centre of the tag; its children are laid out by a list.
+local function tagPlate(gui, edge, minW, direction, gap)
+	local plate = plainFrame(gui, "Plate", {
+		AnchorPoint = Vector2.new(0.5, 1),
+		Position = UDim2.new(0.5, 0, 1, 0),
+		Size = UDim2.fromOffset(minW or 0, 0),
+		AutomaticSize = Enum.AutomaticSize.XY,
+		BackgroundColor3 = Color3.fromRGB(255, 255, 255), -- the gradient supplies the colour
+		BackgroundTransparency = 0.04,
+	})
+	rounded(plate, 16)
+	outline(plate, edge or C.TextGold, 3.5)
+	vgradient(plate, (Theme.Colors and Theme.Colors.PanelLight) or C.Violet, (Theme.Colors and Theme.Colors.Panel) or C.Navy)
+	padding(plate, 7, 16, 9)
+	listLayout(plate, direction, gap or 2)
+	return plate
+end
+
+-- Fixed-size outlined text that sizes itself to its text (tags, pills, list layouts).
+local function tagText(parent, name, text, role, size, color, order, thickness)
+	local label = Theme.Label(text, role, {
+		Size = size,
+		Color = color or C.Text,
+		Stroke = 1, -- the glyph outline below replaces the classic text stroke
+		Outline = thickness or 2.5,
+		OutlineColor = INK,
 		Props = {
 			Name = name,
-			Position = UDim2.new(x, 0, y, 0),
-			Size = UDim2.new(w, 0, h, 0),
+			AutomaticSize = Enum.AutomaticSize.XY,
+			Size = UDim2.fromOffset(0, size + 4),
 			TextWrapped = false,
-			TextXAlignment = align or Enum.TextXAlignment.Center,
+			LayoutOrder = order or 0,
 		},
 	})
 	label.Parent = parent
 	return label
 end
 
-local function surfaceGui(part, pixelsPerStud, face)
+-- A rounded colour pill around one short text (status, price, rarity). Returns pill, label.
+local function tagPill(parent, name, text, role, size, fill, order)
+	local pill = plainFrame(parent, name, {
+		Size = UDim2.fromOffset(0, size + 8),
+		AutomaticSize = Enum.AutomaticSize.XY,
+		BackgroundColor3 = fill,
+		BackgroundTransparency = 0,
+		LayoutOrder = order or 0,
+	})
+	rounded(pill, math.floor(size * 0.55))
+	outline(pill, INK, 2.5)
+	padding(pill, 2, math.floor(size * 0.5), 3)
+	local label = tagText(pill, name .. "Label", text, role, size, C.Text, 1, 2)
+	return pill, label
+end
+
+local function surfaceGui(part, face)
 	local gui = Instance.new("SurfaceGui")
 	gui.Name = "SignGui"
 	gui.Face = face or Enum.NormalId.Front
 	gui.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud
-	gui.PixelsPerStud = pixelsPerStud or 40
+	gui.PixelsPerStud = SIGN_PPS
 	gui.LightInfluence = 0
 	gui.AlwaysOnTop = false
 	gui.Adornee = part
@@ -563,21 +628,32 @@ local function signPanel(gui, strokeColor)
 	panel.Size = UDim2.new(1, 0, 1, 0)
 	panel.BackgroundColor3 = Color3.fromRGB(255, 255, 255) -- UIGradient multiplies this
 	panel.BorderSizePixel = 0
-	local gradient = Instance.new("UIGradient")
-	gradient.Color = ColorSequence.new(C.Violet, C.Navy)
-	gradient.Rotation = 90
-	gradient.Parent = panel
-	local corner = Instance.new("UICorner")
-	corner.CornerRadius = UDim.new(0, 24)
-	corner.Parent = panel
-	local stroke = Instance.new("UIStroke")
-	stroke.Color = strokeColor or C.TextGold
-	stroke.Thickness = 6
-	stroke.Transparency = 0.2
-	stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-	stroke.Parent = panel
+	vgradient(panel, C.Violet, C.Navy)
+	rounded(panel, 24)
+	outline(panel, strokeColor or C.TextGold, 6, 0.2)
 	panel.Parent = gui
 	return panel
+end
+
+-- Sign text with a FIXED size (px at SIGN_PPS), placed with fractions of its parent (x, y, w, h).
+local function signText(parent, text, role, size, color, name, x, y, w, h, align, wrap)
+	local label = Theme.Label(text, role, {
+		Size = size,
+		Color = color,
+		Stroke = 1,
+		Outline = math.max(2, math.floor(size / 16 + 0.5)),
+		OutlineColor = INK,
+		Props = {
+			Name = name,
+			Position = UDim2.new(x, 0, y, 0),
+			Size = UDim2.new(w, 0, h, 0),
+			TextWrapped = wrap == true,
+			TextXAlignment = align or Enum.TextXAlignment.Center,
+			TextYAlignment = Enum.TextYAlignment.Center,
+		},
+	})
+	label.Parent = parent
+	return label
 end
 
 local function textGradient(label, keypoints, rotation)
@@ -610,26 +686,19 @@ local function starRow(filled, total)
 	return out
 end
 
--- A key-cap chip + a description, laid out in rows of a sign panel.
+-- A key-cap chip + a description: one row of a notice board (fractions of the 550 x 400 px board canvas).
 local function keyRow(parent, y, rowH, keyText, descText)
 	local chip = Instance.new("Frame")
 	chip.Name = "KeyChip"
-	chip.Size = UDim2.new(0.3, 0, rowH, 0)
-	chip.Position = UDim2.new(0.05, 0, y, 0)
+	chip.Size = UDim2.new(0.27, 0, rowH, 0)
+	chip.Position = UDim2.new(0.045, 0, y, 0)
 	chip.BackgroundColor3 = rgb(58, 66, 100)
 	chip.BorderSizePixel = 0
-	local corner = Instance.new("UICorner")
-	corner.CornerRadius = UDim.new(0, 14)
-	corner.Parent = chip
-	local stroke = Instance.new("UIStroke")
-	stroke.Color = C.TextGold
-	stroke.Thickness = 2
-	stroke.Transparency = 0.3
-	stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-	stroke.Parent = chip
+	rounded(chip, 12)
+	outline(chip, C.TextGold, 2.5, 0.25)
 	chip.Parent = parent
-	fitLabel(chip, keyText, "Heading", C.TextGold, "Key", 0.04, 0.08, 0.92, 0.84)
-	fitLabel(parent, descText, "Body", C.Text, "Desc", 0.39, y, 0.57, rowH, Enum.TextXAlignment.Left)
+	signText(chip, keyText, "Heading", SIGN_INFO, C.TextGold, "Key", 0, 0, 1, 1)
+	signText(parent, descText, "Body", SIGN_INFO, C.Text, "Desc", 0.35, y, 0.62, rowH, Enum.TextXAlignment.Left)
 end
 
 ----------------------------------------------------------------------
@@ -1594,17 +1663,18 @@ local function buildArch(f, L)
 	box(m, "SignPostR", cf * CFrame.new(4.5, crownY + 0.6, 0), Vector3.new(0.8, 2, 0.8), C.PlankDark)
 	box(m, "SignFrame", boardCf, Vector3.new(19.4, 6.4, 0.8), C.Plank)
 	local board = box(m, "WelcomeSign", boardCf, Vector3.new(18.4, 5.4, 1.0), C.Navy, { Shadow = true })
+	-- 920 x 270 px canvas: the name 2 studs tall, the two script lines 0.72 stud
 	for _, face in ipairs({ Enum.NormalId.Front, Enum.NormalId.Back }) do
-		local gui = surfaceGui(board, 30, face)
+		local gui = surfaceGui(board, face)
 		local panel = signPanel(gui, C.TextGold)
-		fitLabel(panel, "~ welcome to the clouds ~", "Script", C.TextGold, "Welcome", 0.05, 0.05, 0.9, 0.2)
-		local title = fitLabel(panel, Config.GameName, "Title", rgb(255, 255, 255), "Title", 0.04, 0.24, 0.92, 0.52)
+		signText(panel, "~ welcome to the clouds ~", "Script", 36, C.TextGold, "Welcome", 0.04, 0.05, 0.92, 0.17)
+		local title = signText(panel, Config.GameName, "Title", 100, rgb(255, 255, 255), "Title", 0.03, 0.23, 0.94, 0.44)
 		textGradient(title, {
 			{ 0, rgb(255, 236, 160) },
 			{ 0.5, rgb(255, 255, 255) },
 			{ 1, rgb(180, 220, 255) },
 		}, 90)
-		fitLabel(panel, Config.Tagline or "", "Script", C.Text, "Tagline", 0.05, 0.77, 0.9, 0.18)
+		signText(panel, Config.Tagline or "", "Script", 36, C.Text, "Tagline", 0.04, 0.72, 0.92, 0.17)
 		gui.Parent = board
 	end
 	return m
@@ -1619,49 +1689,43 @@ local function buildBoards(f, L)
 		end
 		return faceCentre(pos) -- the board's face (-Z, the Front face) looks at the centre
 	end
+	-- 550 x 400 px canvas (11 x 8 studs): a 1.04-stud header, five 0.6-stud rows, a 0.6-stud footer
 	local howCf = spotFor(L.MidAngle - L.PortalStep * 0.5)
 	if howCf then
 		local face = noticeBoard(f, howCf, 11, 8, "HowToBoard")
-		local gui = surfaceGui(face, 40, Enum.NormalId.Front)
+		local gui = surfaceGui(face, Enum.NormalId.Front)
 		local panel = signPanel(gui)
-		fitLabel(panel, "HOW TO PLAY", "Title", C.Gold, "Header", 0.04, 0.03, 0.92, 0.14)
-		keyRow(panel, 0.2, 0.1, "W A S D", "Move around")
-		keyRow(panel, 0.32, 0.1, "SHIFT", "Hold to run")
-		keyRow(panel, 0.44, 0.1, "Q", "Dash over wide gaps")
-		keyRow(panel, 0.56, 0.1, "SPACE", "Jump")
-		keyRow(panel, 0.68, 0.1, "1 - 4", "Use items (in a climb)")
-		local footer = makeLabel("Stand in a glowing PORTAL to form a party, then climb together!", "Body", {
-			Scaled = true,
-			Color = C.TextGold,
-			Stroke = 0.35,
-			Props = { Name = "Footer", Position = UDim2.new(0.05, 0, 0.81, 0), Size = UDim2.new(0.9, 0, 0.15, 0), TextWrapped = true },
-		})
-		footer.Parent = panel
+		signText(panel, "HOW TO PLAY", "Title", 52, C.Gold, "Header", 0.04, 0.025, 0.92, 0.14)
+		local rows = {
+			{ "W A S D", "Move around" },
+			{ "SHIFT", "Hold to run" },
+			{ "Q", "Dash over wide gaps" },
+			{ "SPACE", "Jump" },
+			{ "1 - 4", "Use items (in a climb)" },
+		}
+		for i, row in ipairs(rows) do
+			keyRow(panel, 0.18 + (i - 1) * 0.12, 0.105, row[1], row[2])
+		end
+		signText(panel, "Step into a glowing PORTAL to climb with friends!", "Body", SIGN_INFO, C.TextGold, "Footer", 0.05, 0.785, 0.9, 0.19, nil, true)
 		gui.Parent = face
 	end
 	local guideCf = spotFor(L.MidAngle + L.PortalStep * 0.5)
 	if guideCf then
 		local face = noticeBoard(f, guideCf, 11, 8, "GuideBoard")
-		local gui = surfaceGui(face, 40, Enum.NormalId.Front)
+		local gui = surfaceGui(face, Enum.NormalId.Front)
 		local panel = signPanel(gui, rgb(150, 200, 255))
-		fitLabel(panel, "CLOUD GUIDE", "Title", C.Gold, "Header", 0.04, 0.03, 0.92, 0.14)
+		signText(panel, "CLOUD GUIDE", "Title", 52, C.Gold, "Header", 0.04, 0.025, 0.92, 0.14)
 		local lines = {
-			{ "TOKENS", "Collect " .. GLYPH.Cloud .. " on every climb" },
+			{ "TOKENS", "Collect " .. GLYPH.Cloud .. " on climbs" },
 			{ "SHOP", "Spin roulettes for pets" },
-			{ "PETS", "Pets fly with you + give perks" },
-			{ "HOME", "Your plot waits on the outer ring" },
-			{ "FRIENDS", "Talk to the pets on the plaza" },
+			{ "PETS", "Pets give you perks" },
+			{ "HOME", "Homes: the outer ring" },
+			{ "FRIENDS", "Chat with plaza pets" },
 		}
 		for i, line in ipairs(lines) do
-			keyRow(panel, 0.2 + (i - 1) * 0.12, 0.1, line[1], line[2])
+			keyRow(panel, 0.18 + (i - 1) * 0.12, 0.105, line[1], line[2])
 		end
-		local footer = makeLabel("Harder portals pay more tokens!", "Body", {
-			Scaled = true,
-			Color = C.TextGold,
-			Stroke = 0.35,
-			Props = { Name = "Footer", Position = UDim2.new(0.05, 0, 0.84, 0), Size = UDim2.new(0.9, 0, 0.12, 0), TextWrapped = true },
-		})
-		footer.Parent = panel
+		signText(panel, "Harder portals pay more tokens!", "Body", SIGN_INFO, C.TextGold, "Footer", 0.05, 0.81, 0.9, 0.13)
 		gui.Parent = face
 	end
 end
@@ -1924,6 +1988,30 @@ local function gateBoxes()
 	return gateBoxCache
 end
 
+-- The portal's pixel tag (World text rule): name, stars + "0/4 players", a status pill. Returns the PortalInfo
+-- GUI fields (Billboard + the four labels); PortalService rebuilds the same tag with the live party state.
+local function portalTag(anchor, diff, stars, lift)
+	local color = diff.Color or C.TextGold
+	local gui = newTag(anchor, "PortalBillboard", 380, 150, lift, 120)
+	local plate = tagPlate(gui, color:Lerp(C.Text, 0.15), 200, nil, 3)
+	local title = tagText(plate, "TitleLabel", diff.DisplayName or diff.Id, "Title", 32, color:Lerp(C.Text, 0.6), 1)
+	local row = plainFrame(plate, "InfoRow", { AutomaticSize = Enum.AutomaticSize.XY, LayoutOrder = 2 })
+	listLayout(row, Enum.FillDirection.Horizontal, 12)
+	local starLabel = tagText(row, "StarLabel", "", "Heading", 21, C.TextGold, 1)
+	starLabel.RichText = true
+	starLabel.Text = starRow(stars, MAX_STARS)
+	local countLabel = tagText(row, "CountLabel", "0/" .. tostring(Config.Match.MaxPlayers) .. " players", "Heading", 21, C.Text, 2)
+	local _, statusLabel = tagPill(plate, "StatusPill", "Step in to play", "Display", 24, color:Lerp(C.Navy, 0.25), 3)
+	statusLabel.Name = "StatusLabel"
+	return {
+		Billboard = gui,
+		TitleLabel = title,
+		CountLabel = countLabel,
+		StatusLabel = statusLabel,
+		StarLabel = starLabel,
+	}
+end
+
 local function buildPortal(parent, diff, angleDeg)
 	local model = newModel(parent, "Portal_" .. diff.Id)
 	local outward = dirOf(angleDeg)
@@ -2027,32 +2115,15 @@ local function buildPortal(parent, diff, angleDeg)
 		})
 	end
 
-	-- Billboard: title, stars, player count, status, blurb.
-	local cardW, cardH = 24, 15
+	-- Billboard: a pixel tag above the star gems (PortalService rebuilds it with the live party state).
+	local cardH = 15
 	local anchor = anchorPart(model, "BillboardAnchor", gateBase + Vector3.new(0, 25.2 + cardH / 2, 0))
-	local gui = newBillboard(anchor, cardW, cardH, 0, 240)
-	gui.Name = "PortalBillboard"
-	local card = cardPanel(gui, color, 0.1)
-	local titleLabel = fitLabel(card, diff.DisplayName or diff.Id, "Title", color:Lerp(C.Text, 0.35), "TitleLabel", 0.04, 0.03, 0.92, 0.25)
-	local starLabel = fitLabel(card, "", "Heading", C.TextGold, "StarLabel", 0.04, 0.29, 0.92, 0.12)
-	starLabel.RichText = true
-	starLabel.Text = starRow(stars, MAX_STARS)
-	local countLabel = fitLabel(card, "0 / " .. tostring(Config.Match.MaxPlayers) .. " players", "Display", C.Text, "CountLabel", 0.04, 0.43, 0.92, 0.19)
-	local statusLabel = fitLabel(card, "Waiting for players" .. GLYPH.Ellipsis, "Body", C.TextGold, "StatusLabel", 0.04, 0.63, 0.92, 0.15)
-	local blurb = fitLabel(card, diff.Blurb or "", "Body", C.TextDim, "BlurbLabel", 0.05, 0.8, 0.9, 0.15)
-	blurb.TextWrapped = true
-
-	return {
-		Id = diff.Id,
-		Zone = zone,
-		Center = zone.Position,
-		Billboard = gui,
-		TitleLabel = titleLabel,
-		CountLabel = countLabel,
-		StatusLabel = statusLabel,
-		StarLabel = starLabel,
-		Model = model,
-	}
+	local tag = portalTag(anchor, diff, stars, 1.2 - cardH / 2) -- bottom edge 26.4 studs up, just over the gems
+	tag.Id = diff.Id
+	tag.Zone = zone
+	tag.Center = zone.Position
+	tag.Model = model
+	return tag
 end
 
 -- Bare-minimum portal used only if the full builder throws: the gameplay contract (zone + labels) must
@@ -2070,26 +2141,12 @@ local function fallbackPortal(parent, diff, angleDeg)
 	box(model, "PadGlow", CFrame.new(ground + Vector3.new(0, 0.35, 0)), Vector3.new(4, 0.1, 4), diff.Color, { Material = MAT.Neon })
 	model.PrimaryPart = pad
 	local anchor = anchorPart(model, "BillboardAnchor", ground + Vector3.new(0, 14, 0))
-	local gui = newBillboard(anchor, 20, 9, 0, 200)
-	gui.Name = "PortalBillboard"
-	local card = cardPanel(gui, diff.Color, 0.15)
-	local titleLabel = fitLabel(card, diff.DisplayName or diff.Id, "Title", C.Text, "TitleLabel", 0.04, 0.03, 0.92, 0.3)
-	local starLabel = fitLabel(card, "", "Heading", C.TextGold, "StarLabel", 0.04, 0.33, 0.92, 0.14)
-	starLabel.RichText = true
-	starLabel.Text = starRow(clamp(diff.Stars or 1, 0, MAX_STARS), MAX_STARS)
-	local countLabel = fitLabel(card, "0 / " .. tostring(Config.Match.MaxPlayers) .. " players", "Display", C.Text, "CountLabel", 0.04, 0.5, 0.92, 0.26)
-	local statusLabel = fitLabel(card, "Waiting for players" .. GLYPH.Ellipsis, "Body", C.TextGold, "StatusLabel", 0.04, 0.78, 0.92, 0.18)
-	return {
-		Id = diff.Id,
-		Zone = zone,
-		Center = zone.Position,
-		Billboard = gui,
-		TitleLabel = titleLabel,
-		CountLabel = countLabel,
-		StatusLabel = statusLabel,
-		StarLabel = starLabel,
-		Model = model,
-	}
+	local tag = portalTag(anchor, diff, clamp(diff.Stars or 1, 0, MAX_STARS), 0)
+	tag.Id = diff.Id
+	tag.Zone = zone
+	tag.Center = zone.Position
+	tag.Model = model
+	return tag
 end
 
 ----------------------------------------------------------------------
@@ -2100,6 +2157,17 @@ end
 local MACHINE_CARD_W = 14
 local MACHINE_CARD_H = 7.6
 local machineBoxCache = nil
+
+-- Pixel tag of a roulette machine: the name in the roulette colour + a gold price. The machines stand ~15 studs
+-- apart, so the tags hide beyond 60 studs (constant-size tags of neighbours would overlap on screen from afar).
+local function machineTag(anchor, roulette, lift)
+	local color = roulette.Color or C.Rose
+	local gui = newTag(anchor, "PriceBillboard", 320, 110, lift, 60)
+	local plate = tagPlate(gui, color, 160)
+	tagText(plate, "NameLabel", roulette.DisplayName or roulette.Id, "Title", 26, color:Lerp(C.Text, 0.55), 1)
+	tagText(plate, "PriceLabel", priceText(roulette.Price or 0), "Display", 24, C.TextGold, 2)
+	return gui
+end
 
 -- Rarities (in Config order) that a roulette can actually pay out.
 local function oddsRarities(roulette)
@@ -2233,14 +2301,9 @@ local function buildMachine(parent, cf, roulette)
 		Size = popSize(0.5),
 	})
 
-	-- Big readable name + price billboard.
+	-- Name + price tag standing on the dome.
 	local anchor = anchorPart(model, "PriceAnchor", (cf * CFrame.new(0, 14.2 + MACHINE_CARD_H * 0.5, 0)).Position)
-	local bb = newBillboard(anchor, MACHINE_CARD_W, MACHINE_CARD_H, 0, 150)
-	bb.Name = "PriceBillboard"
-	local card = cardPanel(bb, roulette.Color or C.Rose, 0.08)
-	local nameLabel = fitLabel(card, roulette.DisplayName or roulette.Id, "Title", (roulette.Color or C.Rose):Lerp(C.Text, 0.45), "NameLabel", 0.05, 0.05, 0.9, 0.46)
-	nameLabel.TextWrapped = true
-	fitLabel(card, priceText(roulette.Price or 0), "Display", C.TextGold, "PriceLabel", 0.05, 0.54, 0.9, 0.4)
+	machineTag(anchor, roulette, 0.5 - MACHINE_CARD_H * 0.5)
 
 	-- Invisible spot in front where PetService hangs the ProximityPrompt.
 	local prompt = box(model, "PromptPart", cf * CFrame.new(0, 2, -5.4), Vector3.new(5, 4, 3), roulette.Color or C.Rose, { Transparency = 1, Shadow = false })
@@ -2262,10 +2325,7 @@ local function fallbackMachine(parent, cf, roulette)
 	local model = newModel(parent, "Roulette_" .. roulette.Id)
 	local cabinet = box(model, "Cabinet", cf * CFrame.new(0, 3, 0), Vector3.new(7, 6, 5), roulette.Color or C.Rose, { Collide = true })
 	local anchor = anchorPart(model, "PriceAnchor", (cf * CFrame.new(0, 10, 0)).Position)
-	local bb = newBillboard(anchor, 12, 5, 0, 120)
-	local card = cardPanel(bb, roulette.Color or C.Rose, 0.15)
-	fitLabel(card, roulette.DisplayName or roulette.Id, "Title", C.Text, "NameLabel", 0.04, 0.05, 0.92, 0.45)
-	fitLabel(card, priceText(roulette.Price or 0), "Display", C.TextGold, "PriceLabel", 0.04, 0.52, 0.92, 0.4)
+	machineTag(anchor, roulette, -2.5)
 	local prompt = box(model, "PromptPart", cf * CFrame.new(0, 2, -5), Vector3.new(5, 4, 3), C.Cloud, { Transparency = 1, Shadow = false })
 	model.PrimaryPart = cabinet
 	return { Id = roulette.Id, PromptPart = prompt, Center = cabinet.Position, Model = model }
@@ -2331,12 +2391,12 @@ local function buildItemStall(parent, cf)
 	local lamp = anchorPart(model, "StallLight", (cf * CFrame.new(0, 7.5, 0)).Position)
 	pointLight(lamp, C.Lamp, 0.8, 16)
 
+	-- name tag standing on the awning (bottom edge 13.3 studs up)
 	local anchor = anchorPart(model, "SignAnchor", (cf * CFrame.new(0, 15.5, 0)).Position)
-	local bb = newBillboard(anchor, 12, 5, 0, 110)
-	bb.Name = "ItemShopBillboard"
-	local card = cardPanel(bb, C.Rose, 0.1)
-	fitLabel(card, "Item Shop", "Title", C.Text, "NameLabel", 0.04, 0.06, 0.92, 0.52)
-	fitLabel(card, "Heal " .. GLYPH.Bullet .. " Shield " .. GLYPH.Bullet .. " Revive", "Body", C.TextGold, "SubLabel", 0.04, 0.62, 0.92, 0.3)
+	local bb = newTag(anchor, "ItemShopBillboard", 320, 110, -2.2, 80)
+	local plate = tagPlate(bb, C.Rose, 160)
+	tagText(plate, "NameLabel", "Item Shop", "Title", TAG_NAME, C.Text, 1)
+	tagText(plate, "SubLabel", "Heal " .. GLYPH.Bullet .. " Shield " .. GLYPH.Bullet .. " Revive", "Body", TAG_INFO, C.TextGold, 2, 2)
 
 	local prompt = box(model, "PromptPart", cf * CFrame.new(0, 2, -4.6), Vector3.new(5, 4, 3), C.Cloud, { Transparency = 1, Shadow = false })
 	local counter = model:FindFirstChild("Stall")
@@ -2358,35 +2418,30 @@ end
 
 -- Board that explains the roulettes: price, and which rarities each one can give.
 local function buildRarityBoard(parent, cf)
+	-- 700 x 450 px canvas (14 x 9 studs): a 1.04-stud header, then one row per roulette: the name and the price
+	-- (0.6 stud) over rarity pills that spell out what it can pay (0.6 stud)
 	local face = noticeBoard(parent, cf, 14, 9, "RarityBoard")
-	local gui = surfaceGui(face, 36, Enum.NormalId.Front)
+	local gui = surfaceGui(face, Enum.NormalId.Front)
 	local panel = signPanel(gui)
-	fitLabel(panel, "WINGED PETS", "Title", C.Gold, "Header", 0.04, 0.03, 0.92, 0.14)
-	fitLabel(panel, "Pricier roulette = rarer pets", "Body", C.Text, "Sub", 0.04, 0.17, 0.92, 0.1)
+	signText(panel, "WINGED PETS", "Title", 52, C.Gold, "Header", 0.04, 0.018, 0.92, 0.125)
+	signText(panel, "Pricier roulette = rarer pets", "Body", SIGN_INFO, C.Text, "Sub", 0.04, 0.142, 0.92, 0.08)
+	local H = 450
 	for i, roulette in ipairs(Config.Roulettes) do
-		local y = 0.3 + (i - 1) * 0.145
-		fitLabel(panel, roulette.DisplayName or roulette.Id, "Heading", roulette.Color:Lerp(C.Text, 0.3), "Name" .. i, 0.04, y, 0.4, 0.125, Enum.TextXAlignment.Left)
-		fitLabel(panel, priceText(roulette.Price or 0), "Body", C.TextGold, "Price" .. i, 0.43, y, 0.2, 0.125, Enum.TextXAlignment.Right)
+		local top = 108 + (i - 1) * 80
+		local y = top / H
+		local color = roulette.Color or C.Rose
+		signText(panel, roulette.DisplayName or roulette.Id, "Heading", SIGN_INFO, color:Lerp(C.Text, 0.35), "Name" .. i, 0.04, y, 0.6, 36 / H, Enum.TextXAlignment.Left)
+		signText(panel, priceText(roulette.Price or 0), "Body", SIGN_INFO, C.TextGold, "Price" .. i, 0.6, y, 0.36, 36 / H, Enum.TextXAlignment.Right)
+		local pills = plainFrame(panel, "Rarities" .. i, {
+			Position = UDim2.new(0.04, 0, (top + 40) / H, 0),
+			Size = UDim2.new(0.92, 0, 38 / H, 0),
+		})
+		local layout = listLayout(pills, Enum.FillDirection.Horizontal, 8, Enum.HorizontalAlignment.Left)
+		layout.VerticalAlignment = Enum.VerticalAlignment.Center
 		for k, rarity in ipairs(oddsRarities(roulette)) do
-			local chip = Instance.new("Frame")
-			chip.Name = "Chip"
-			chip.Position = UDim2.new(0.66 + (k - 1) * 0.085, 0, y + 0.01, 0)
-			chip.Size = UDim2.new(0.075, 0, 0.105, 0)
-			chip.BackgroundColor3 = rarity.Color
-			chip.BorderSizePixel = 0
-			local corner = Instance.new("UICorner")
-			corner.CornerRadius = UDim.new(0.3, 0)
-			corner.Parent = chip
-			chip.Parent = panel
-			fitLabel(chip, string.sub(rarity.Id, 1, 1), "Heading", C.Ink, "Initial", 0.1, 0.05, 0.8, 0.9)
+			tagPill(pills, "Rarity_" .. rarity.Id, rarity.Id, "Body", SIGN_INFO, rarity.Color:Lerp(C.Navy, 0.18), k)
 		end
 	end
-	local legend = {}
-	for _, rarity in ipairs(Config.Rarities) do
-		legend[#legend + 1] = string.format('<font color="%s">%s</font>', hex(rarity.Color:Lerp(C.Text, 0.15)), rarity.Id)
-	end
-	local legendLabel = fitLabel(panel, table.concat(legend, "  "), "Body", C.Text, "Legend", 0.03, 0.9, 0.94, 0.07)
-	legendLabel.RichText = true
 	gui.Parent = face
 end
 
@@ -2566,11 +2621,12 @@ local function buildShop(root, L)
 		box(arch, "Beam", archCF * CFrame.new(0, 10.3, 0), Vector3.new(13, 0.8, 1.2), C.PlankDark)
 		local sign = box(arch, "ShopSign", archCF * CFrame.new(0, 12.6, 0), Vector3.new(12.4, 3.6, 0.8), C.Navy, { Shadow = true })
 		box(arch, "SignRoof", archCF * CFrame.new(0, 14.7, 0), Vector3.new(14, 0.6, 1.8), C.Rose)
+		-- 620 x 180 px canvas: the name 1.6 studs tall, the caption 0.68 stud
 		for _, face in ipairs({ Enum.NormalId.Front, Enum.NormalId.Back }) do
-			local gui = surfaceGui(sign, 40, face)
+			local gui = surfaceGui(sign, face)
 			local panel = signPanel(gui, C.TextGold)
-			fitLabel(panel, "CLOUD SHOP", "Title", C.Gold, "Name", 0.04, 0.06, 0.92, 0.58)
-			fitLabel(panel, "pets & items", "Body", C.Text, "Sub", 0.04, 0.64, 0.92, 0.3)
+			signText(panel, "CLOUD SHOP", "Title", 80, C.Gold, "Name", 0.03, 0.05, 0.94, 0.56)
+			signText(panel, "pets & items", "Body", 34, C.Text, "Sub", 0.04, 0.62, 0.92, 0.3)
 			gui.Parent = sign
 		end
 		local lampTpl = Props.Lamp()
@@ -2750,6 +2806,131 @@ local function plotTemplate()
 	end)
 end
 
+-- "No. 7" on both faces of the plot's gate sign: 220 x 90 px, the number 1.12 studs tall, gold on navy.
+local function numberSign(sign, index, accent)
+	for _, face in ipairs({ Enum.NormalId.Front, Enum.NormalId.Back }) do
+		local gui = surfaceGui(sign, face)
+		local plate = plainFrame(gui, "Plate", {
+			Size = UDim2.new(1, 0, 1, 0),
+			BackgroundColor3 = Color3.fromRGB(255, 255, 255),
+			BackgroundTransparency = 0,
+		})
+		vgradient(plate, C.Violet, C.Navy)
+		rounded(plate, 10)
+		outline(plate, accent:Lerp(C.TextGold, 0.5), 4)
+		signText(plate, "No. " .. tostring(index), "Title", SIGN_TITLE, C.TextGold, "Number", 0.03, 0.04, 0.94, 0.92)
+		gui.Parent = sign
+	end
+end
+
+-- Home nameplate over the mailbox (World text rule): a compact pixel tag, readable from ~80 studs. Left: a round
+-- avatar disc with the plot number badge; right: the name (big, outlined) and an info line. The disc holds
+--   Headshot    ImageLabel: SpotService loads the owner's headshot into it (Players:GetUserThumbnailAsync)
+--   Silhouette  the fallback built from frames (head + shoulders) while no headshot is available
+--   FreeIcon    a "+" shown while the home is free
+-- and the attributes OwnedColor / FreeColor (disc colour per state, read by SpotService).
+-- Returns gui, nameLabel, subLabel.
+local AVATAR_PX = 60
+
+local function avatarDisc(parent, index, accent)
+	local holder = plainFrame(parent, "AvatarHolder", { Size = UDim2.fromOffset(AVATAR_PX + 8, AVATAR_PX + 8), LayoutOrder = 1 })
+	local freeColor = (Theme.Buttons and Theme.Buttons.Green) or rgb(96, 196, 108)
+	local ownedColor = accent:Lerp(C.Cloud, 0.45)
+	local disc = plainFrame(holder, "Avatar", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromOffset(AVATAR_PX, AVATAR_PX),
+		BackgroundColor3 = freeColor,
+		BackgroundTransparency = 0,
+	})
+	disc:SetAttribute("OwnedColor", ownedColor)
+	disc:SetAttribute("FreeColor", freeColor)
+	rounded(disc, UDim.new(0.5, 0))
+	outline(disc, INK, 3)
+
+	-- fallback avatar: head + shoulders in a deeper shade of the plot colour (fits inside the circle)
+	local shade = Theme.Darken and Theme.Darken(accent, 0.38) or accent:Lerp(C.Navy, 0.38)
+	local silhouette = plainFrame(disc, "Silhouette", { Size = UDim2.fromScale(1, 1), Visible = false })
+	local head = plainFrame(silhouette, "Head", {
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 10),
+		Size = UDim2.fromOffset(23, 23),
+		BackgroundColor3 = shade,
+		BackgroundTransparency = 0,
+	})
+	rounded(head, UDim.new(0.5, 0))
+	local body = plainFrame(silhouette, "Shoulders", {
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 35),
+		Size = UDim2.fromOffset(36, 19),
+		BackgroundColor3 = shade,
+		BackgroundTransparency = 0,
+	})
+	rounded(body, 10)
+
+	-- free home: a chunky "+"
+	local plus = plainFrame(disc, "FreeIcon", { Size = UDim2.fromScale(1, 1) })
+	for _, size in ipairs({ Vector2.new(30, 9), Vector2.new(9, 30) }) do
+		local bar = plainFrame(plus, "Bar", {
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromScale(0.5, 0.5),
+			Size = UDim2.fromOffset(size.X, size.Y),
+			BackgroundColor3 = C.Text,
+			BackgroundTransparency = 0,
+		})
+		rounded(bar, 4)
+	end
+
+	local shot = Instance.new("ImageLabel")
+	shot.Name = "Headshot"
+	shot.AnchorPoint = Vector2.new(0.5, 0.5)
+	shot.Position = UDim2.fromScale(0.5, 0.5)
+	shot.Size = UDim2.new(1, -4, 1, -4)
+	shot.BackgroundTransparency = 1
+	shot.BorderSizePixel = 0
+	shot.Image = ""
+	shot.ScaleType = Enum.ScaleType.Crop
+	shot.Visible = false
+	rounded(shot, UDim.new(0.5, 0))
+	shot.Parent = disc
+
+	-- plot number badge on the disc's lower-left edge
+	local badge = plainFrame(holder, "NumberBadge", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.new(0, 10, 1, -9),
+		Size = UDim2.fromOffset(26, TAG_SMALL + 6),
+		AutomaticSize = Enum.AutomaticSize.X,
+		BackgroundColor3 = C.Gold,
+		BackgroundTransparency = 0,
+		ZIndex = 3,
+	})
+	rounded(badge, 10)
+	outline(badge, INK, 2.5)
+	padding(badge, 1, 6, 2)
+	local number = tagText(badge, "Number", "#" .. tostring(index), "Display", TAG_SMALL, C.Text, 1, 2)
+	number.ZIndex = 4
+	return holder
+end
+
+local function homeNameplate(anchor, index, accent)
+	-- bottom edge 7.2 studs up: a few studs over the mailbox, under the gate lanterns' glow
+	local gui = newTag(anchor, "Nameplate", 460, 110, -2.4, 100)
+	local plate = tagPlate(gui, accent, 230, Enum.FillDirection.Horizontal, 12)
+	local pad = plate:FindFirstChildOfClass("UIPadding")
+	if pad then -- the avatar disc hugs the left edge
+		pad.PaddingLeft = UDim.new(0, 6)
+		pad.PaddingRight = UDim.new(0, 18)
+		pad.PaddingTop = UDim.new(0, 5)
+		pad.PaddingBottom = UDim.new(0, 5)
+	end
+	avatarDisc(plate, index, accent)
+	local texts = plainFrame(plate, "Texts", { AutomaticSize = Enum.AutomaticSize.XY, LayoutOrder = 2 })
+	listLayout(texts, Enum.FillDirection.Vertical, 0, Enum.HorizontalAlignment.Left)
+	local nameLabel = tagText(texts, "NameLabel", "Free home", "Title", TAG_NAME, C.Text, 1)
+	local subLabel = tagText(texts, "SubLabel", "Step in to claim", "Body", TAG_INFO, C.TextGold, 2, 2)
+	return gui, nameLabel, subLabel
+end
+
 local function buildSpot(parent, index, angle)
 	local accent = ACCENTS[(index - 1) % #ACCENTS + 1]
 	local f = newFolder(parent, string.format("Spot_%02d", index))
@@ -2783,36 +2964,11 @@ local function buildSpot(parent, index, angle)
 	local mb = PLOT_POS.Mailbox
 	box(f, "MailFlag", at(Vector3.new(mb.X + 0.85, 4.2, mb.Z + 0.4)), Vector3.new(0.15, 1, 0.8), accent, { Shadow = false })
 	local sign = box(f, "NumberSign", at(Vector3.new(0, 7.9, PLOT_POS.Gate)), Vector3.new(4.4, 1.8, 0.5), C.Plank)
-	for _, face in ipairs({ Enum.NormalId.Front, Enum.NormalId.Back }) do
-		local gui = surfaceGui(sign, 40, face)
-		local bg = Instance.new("Frame")
-		bg.Name = "Plate"
-		bg.Size = UDim2.new(1, 0, 1, 0)
-		bg.BackgroundColor3 = C.Navy
-		bg.BorderSizePixel = 0
-		bg.Parent = gui
-		fitLabel(bg, "No. " .. tostring(index), "Title", C.TextGold, "Number", 0.06, 0.08, 0.88, 0.84)
-		gui.Parent = sign
-	end
+	numberSign(sign, index, accent)
 
 	-- nameplate over the mailbox
 	local anchor = anchorPart(f, "NameplateAnchor", at(Vector3.new(mb.X, 9.6, mb.Z)).Position)
-	local gui = newBillboard(anchor, 18, 5.6, 0, 170)
-	gui.Name = "Nameplate"
-	local card = cardPanel(gui, accent, 0.1)
-	local badge = Instance.new("Frame")
-	badge.Name = "Badge"
-	badge.Position = UDim2.new(0.03, 0, 0.14, 0)
-	badge.Size = UDim2.new(0.16, 0, 0.72, 0)
-	badge.BackgroundColor3 = accent
-	badge.BorderSizePixel = 0
-	local badgeCorner = Instance.new("UICorner")
-	badgeCorner.CornerRadius = UDim.new(0.3, 0)
-	badgeCorner.Parent = badge
-	badge.Parent = card
-	fitLabel(badge, tostring(index), "Display", C.Ink, "Number", 0.05, 0.1, 0.9, 0.8)
-	local nameLabel = fitLabel(card, "Free spot", "Title", C.Text, "NameLabel", 0.22, 0.06, 0.74, 0.54)
-	local subLabel = fitLabel(card, "Step in to claim", "Body", C.TextGold, "SubLabel", 0.22, 0.6, 0.74, 0.3)
+	local gui, nameLabel, subLabel = homeNameplate(anchor, index, accent)
 
 	local podiumTop = at(PLOT_POS.Podium + Vector3.new(0, 3, 0)).Position
 	local spawnPos = at(PLOT_POS.Spawn).Position
@@ -2823,6 +2979,7 @@ local function buildSpot(parent, index, angle)
 		SpawnCFrame = flatLook(spawnPos, centre + Vector3.new(0, 3, 0) + plotCF.LookVector * -30),
 		NameLabel = nameLabel,
 		SubLabel = subLabel,
+		Nameplate = gui,
 		PodiumCFrame = flatLook(podiumTop, podiumTop + plotCF.LookVector),
 		PlotCFrame = plotCF,
 		PlotSize = PLOT,
@@ -2844,11 +3001,7 @@ local function fallbackSpot(parent, index, angle)
 	box(f, "Yard", plotCF * CFrame.new(0, -0.5, -9), Vector3.new(PLOT + 12, 1, PLOT + 30), C.Grass, { Collide = true })
 	box(f, "PodiumBase", plotCF * CFrame.new(PLOT_POS.Podium + Vector3.new(0, 1.5, 0)), Vector3.new(5, 3, 5), C.Stone, { Collide = true })
 	local anchor = anchorPart(f, "NameplateAnchor", (plotCF * CFrame.new(PLOT_POS.Mailbox + Vector3.new(0, 9.6, 0))).Position)
-	local gui = newBillboard(anchor, 18, 5.6, 0, 160)
-	gui.Name = "Nameplate"
-	local card = cardPanel(gui, C.TextGold, 0.15)
-	local nameLabel = fitLabel(card, "Free spot", "Title", C.Text, "NameLabel", 0.05, 0.06, 0.9, 0.55)
-	local subLabel = fitLabel(card, "Step in to claim", "Body", C.TextGold, "SubLabel", 0.05, 0.62, 0.9, 0.3)
+	local gui, nameLabel, subLabel = homeNameplate(anchor, index, C.TextGold)
 	local podiumTop = (plotCF * CFrame.new(PLOT_POS.Podium + Vector3.new(0, 3, 0))).Position
 	local spawnPos = (plotCF * CFrame.new(PLOT_POS.Spawn)).Position
 	return {
@@ -2858,10 +3011,12 @@ local function fallbackSpot(parent, index, angle)
 		SpawnCFrame = flatLook(spawnPos, centre + Vector3.new(0, 3, 0) + plotCF.LookVector * -30),
 		NameLabel = nameLabel,
 		SubLabel = subLabel,
+		Nameplate = gui,
 		PodiumCFrame = flatLook(podiumTop, podiumTop + plotCF.LookVector),
 		PlotCFrame = plotCF,
 		PlotSize = PLOT,
 		GateCFrame = plotCF * CFrame.new(0, 0, PLOT_POS.Gate),
+		Accent = C.TextGold,
 	}
 end
 
@@ -3109,10 +3264,9 @@ local function buildGarden(parent, spec, L)
 
 	-- name tag + the bridge to the street junction
 	local tag = anchorPart(f, "NameTag", c + Vector3.new(0, 22, 0))
-	local gui = newBillboard(tag, 14, 3.4, 0, 160)
-	gui.Name = "NameTag"
-	local card = cardPanel(gui, rgb(150, 210, 160), 0.15)
-	fitLabel(card, spec.Name, "Title", C.Text, "Text", 0.05, 0.08, 0.9, 0.84)
+	local gui = newTag(tag, "NameTag", 320, 80, -1.7, 120)
+	local plate = tagPlate(gui, rgb(150, 210, 160), 160)
+	tagText(plate, "Text", spec.Name, "Title", TAG_NAME + 2, C.Text, 1)
 	woodBridge(f, "GardenBridge", polar(a, G.GardenR + R - 3, TOP), polar(a, G.SpokeEndR, TOP), 8, { RailInsetA = 3, RailInsetB = 2.6 })
 	return f
 end

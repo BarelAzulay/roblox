@@ -27,6 +27,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CollectionService = game:GetService("CollectionService")
 local Workspace = game:GetService("Workspace")
+local TextService = game:GetService("TextService")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Config = require(Shared:WaitForChild("Config"))
@@ -401,95 +402,111 @@ end
 ----------------------------------------------------------------------
 -- Nameplate
 ----------------------------------------------------------------------
-local PLATE_W, PLATE_H = 270, 86
+-- World text rule (ARCHITECTURE_V3.md): a PIXEL-sized tag (constant on-screen size), the name >= 22 px and the
+-- title >= 18 px at 1080p with FIXED text sizes (never TextScaled), outlined glyphs on compact solid pills that
+-- size themselves to their text. The transparent Plate is the 1080p design box; NpcController scales the tag
+-- and Plate (UIScale "ReadScale") with the screen-height factor (attributes BaseWidth / BaseHeight).
+local PLATE_W, PLATE_H = 300, 96
+local NAME_PX = 28
+local TITLE_PX = 19
+local INK = Theme.Colors.TextStroke or Theme.Colors.Ink
+
+-- Width of a one-line text in px (TextService measures with the real font; a rough estimate if it fails).
+local function textWidth(text, size, font)
+	local ok, bounds = pcall(function()
+		return TextService:GetTextSize(text, size, font, Vector2.new(2000, 400))
+	end)
+	if ok and typeof(bounds) == "Vector2" and bounds.X > 0 then
+		return bounds.X
+	end
+	return string.len(text) * size * 0.56
+end
+
+-- A rounded pill exactly as wide as its (fixed-size, outlined) text plus padding. Returns pill, label.
+local function textPill(parent, name, text, role, size, padX, height, minW, thickness)
+	local font = Theme.Fonts[role] or Theme.Fonts.Body
+	local width = math.min(PLATE_W, math.max(minW, math.ceil(textWidth(text, size, font)) + padX * 2 + 4))
+	local frame = make("Frame", {
+		Name = name,
+		AnchorPoint = Vector2.new(0.5, 1),
+		Size = UDim2.fromOffset(width, height),
+		BackgroundColor3 = Theme.Colors.White,
+		BorderSizePixel = 0,
+	}, parent)
+	local label = Theme.Label(text, role, {
+		Size = size,
+		Stroke = 1, -- the glyph outline replaces the classic stroke
+		Outline = thickness,
+		OutlineColor = INK,
+		Props = {
+			Name = (name == "NamePill") and "Name" or "Title",
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromScale(0.5, 0.5),
+			Size = UDim2.new(1, -padX, 1, 0),
+			TextWrapped = false,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+		},
+	})
+	label.Parent = frame
+	return frame, label
+end
 
 local function buildNameplate(parent, def, accent, offsetY)
 	local gui = make("BillboardGui", {
 		Name = "Nameplate",
 		Size = UDim2.fromOffset(PLATE_W, PLATE_H),
+		SizeOffset = Vector2.new(0, 0.5), -- the bottom edge sits offsetY studs over the pet's head
 		StudsOffsetWorldSpace = Vector3.new(0, offsetY, 0),
 		AlwaysOnTop = false,
 		MaxDistance = 85,
 		LightInfluence = 0,
+		ClipsDescendants = false,
 	}, nil)
 	gui:SetAttribute("BaseWidth", PLATE_W)
 	gui:SetAttribute("BaseHeight", PLATE_H)
 
 	local plate = make("Frame", {
 		Name = "Plate",
-		AnchorPoint = Vector2.new(0.5, 0.5),
-		Position = UDim2.fromScale(0.5, 0.5),
+		AnchorPoint = Vector2.new(0.5, 1),
+		Position = UDim2.fromScale(0.5, 1),
 		Size = UDim2.fromOffset(PLATE_W, PLATE_H),
 		BackgroundTransparency = 1,
 	}, gui)
 
-	-- name pill: dark navy card, accent outline, big outlined title text
-	local pill = make("Frame", {
-		Name = "NamePill",
-		AnchorPoint = Vector2.new(0.5, 0),
-		Position = UDim2.new(0.5, 0, 0, 2),
-		Size = UDim2.new(1, -8, 0, 48),
-		BackgroundColor3 = Theme.Colors.White,
-		BorderSizePixel = 0,
-	}, plate)
-	corner(pill, 16)
-	stroke(pill, accent, 3)
-	Theme.Gradient(pill, Theme.Colors.PanelLight, Theme.Colors.Panel, 90)
-	local name = Theme.Label(def.Name or "Friend", "Title", {
-		Scaled = true,
-		Stroke = 0.2,
-		Outline = 2,
-		Props = {
-			Name = "Name",
-			AnchorPoint = Vector2.new(0.5, 0.5),
-			Position = UDim2.fromScale(0.5, 0.5),
-			Size = UDim2.new(1, -24, 1, -12),
-		},
-	})
-	make("UITextSizeConstraint", { MaxTextSize = 30, MinTextSize = 18 }, name)
-	name.Parent = pill
-
-	-- title pill in the accent colour
-	local titlePill = make("Frame", {
-		Name = "TitlePill",
-		AnchorPoint = Vector2.new(0.5, 0),
-		Position = UDim2.new(0.5, 0, 0, 54),
-		Size = UDim2.new(0.74, 0, 0, 28),
-		BackgroundColor3 = darken(accent, 0.18),
-		BorderSizePixel = 0,
-	}, plate)
+	-- title pill in the accent colour at the bottom; the name pill sits on it (4 px tucked behind)
+	local titleH = TITLE_PX + 10
+	local titlePill, title = textPill(plate, "TitlePill", def.Title or "Lobby Friend", "Label", TITLE_PX, 12, titleH, 110, 2)
+	titlePill.Position = UDim2.new(0.5, 0, 1, 0)
+	titlePill.BackgroundColor3 = darken(accent, 0.3)
+	titlePill.ZIndex = 2
+	title.ZIndex = 2
 	corner(titlePill, 12)
-	stroke(titlePill, Theme.Colors.Navy or Theme.Colors.Ink, 2)
-	local title = Theme.Label(def.Title or "Lobby Friend", "Label", {
-		Size = 18,
-		Stroke = 0.3,
-		Outline = 1.5,
-		Props = {
-			Name = "Title",
-			Size = UDim2.new(1, -12, 1, 0),
-			AnchorPoint = Vector2.new(0.5, 0.5),
-			Position = UDim2.fromScale(0.5, 0.5),
-			TextTruncate = Enum.TextTruncate.AtEnd,
-		},
-	})
-	title.Parent = titlePill
+	stroke(titlePill, Theme.Colors.Navy or Theme.Colors.Ink, 2.5)
 
-	-- "!" badge: new tips here (the client hides it once the player has talked to this NPC)
+	-- name pill: dark navy card, accent outline, big outlined name
+	local namePill = textPill(plate, "NamePill", def.Name or "Friend", "Title", NAME_PX, 18, NAME_PX + 18, 150, 2.5)
+	namePill.Position = UDim2.new(0.5, 0, 1, -(titleH - 4))
+	corner(namePill, 16)
+	stroke(namePill, accent, 3.5)
+	Theme.Gradient(namePill, Theme.Colors.PanelLight, Theme.Colors.Panel, 90)
+
+	-- "!" badge on the name pill's corner: new tips here (the client hides it once the player has talked to this NPC)
 	local badge = make("Frame", {
 		Name = "Badge",
 		AnchorPoint = Vector2.new(0.5, 0.5),
-		Position = UDim2.new(1, -10, 0, 6),
+		Position = UDim2.new(1, -4, 0, 4),
 		Size = UDim2.fromOffset(32, 32),
 		BackgroundColor3 = Theme.Colors.Gold or STONE.Gold,
 		BorderSizePixel = 0,
 		ZIndex = 3,
-	}, plate)
+	}, namePill)
 	corner(badge, 16)
 	stroke(badge, Theme.Colors.Navy or Theme.Colors.Ink, 3)
 	local mark = Theme.Label("!", "Accent", {
 		Size = 26,
-		Stroke = 0.2,
-		Outline = 1.5,
+		Stroke = 1,
+		Outline = 2,
+		OutlineColor = INK,
 		Props = { Name = "Mark", Size = UDim2.fromScale(1, 1), ZIndex = 4 },
 	})
 	mark.Parent = badge
@@ -603,7 +620,7 @@ local function buildNpc(def, spot, index)
 		CFrame = promptPart.CFrame:Inverse() * (spot * CFrame.new(0, PEDESTAL_TOP + 0.9, -(R_CAP * PV - 0.6))),
 	}, promptPart)
 	prompt.Parent = anchor
-	buildNameplate(promptPart, def, accent, topY - centerY + 1.7)
+	buildNameplate(promptPart, def, accent, topY - centerY + 0.9)
 
 	make("PointLight", {
 		Name = "Glow",

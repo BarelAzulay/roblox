@@ -920,9 +920,10 @@ class GuiRenderer:
         s = self.ss
         bx0 = min(p[0] for p in placed) if placed else ax
         bx1 = max(p[0] + p[3] for p in placed) if placed else ax
-        on_screen = True
+        limit = int(tx.get("maxGraphemes", -1))
+        on_screen = limit != 0  # a typewriter at 0 shows nothing yet
         vis = intersect(clip, (0, 0, self.W * s, self.H * s))
-        if vis is not None:
+        if vis is not None and on_screen:
             on_screen = bx1 * s > vis[0] and bx0 * s < vis[2] and (top + total) * s > vis[1] and top * s < vis[3]
         self.texts.append({"size": size, "path": n.get("path", ""), "text": re.sub(r"<[^>]*>", "", raw).strip(),
                            "scaled": bool(tx.get("scaled")), "on_screen": on_screen,
@@ -952,7 +953,6 @@ class GuiRenderer:
         ds = ImageDraw.Draw(stroke) if stroke is not None else None
         sw = max(1, int(round(stroke_w * s)))
         base_col = tuple(tx.get("color", [255, 255, 255]))
-        limit = int(tx.get("maxGraphemes", -1))
         shown = 0
         for lx, base, line, _ in placed:
             x = lx
@@ -1020,12 +1020,11 @@ class GuiRenderer:
             return
         x0, y0, x1, y1 = self.rect(n)
         cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
-        if group:
-            half = int(max(x1 - x0, y1 - y0) / 2.0 + 4)
-            ox, oy, size_w, size_h = int(x0) - 2, int(y0) - 2, int(x1 - x0) + 4, int(y1 - y0) + 4
-        else:
+        if abs(rot) >= 0.01:  # room for everything the turn sweeps over
             half = int(self.subtree_extent(n, cx, cy) + 40 * self.ss)
             ox, oy, size_w, size_h = int(cx) - half, int(cy) - half, 2 * half, 2 * half
+        else:  # a CanvasGroup only shows what lies inside its own box
+            ox, oy, size_w, size_h = int(x0) - 2, int(y0) - 2, int(x1 - x0) + 4, int(y1 - y0) + 4
         size_w, size_h = max(1, min(size_w, 16000)), max(1, min(size_h, 16000))
         sub = Layer(Image.new("RGBA", (size_w, size_h), (0, 0, 0, 0)), ox, oy)
         self.draw_node(n, sub, None)

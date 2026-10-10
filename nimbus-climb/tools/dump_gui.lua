@@ -6,8 +6,10 @@
 -- does that: Mock.Configure + Mock.Boot("client") + src/ mounted where default.project.json says). Globals:
 --   Mock          the booted mock
 --   ROOTS         src directory name -> instance path ("client" -> "StarterPlayer/StarterPlayerScripts/Client", ...)
---   DUMP          { scenario = "lobby", width = 1920, height = 1080, touch = false, out = "file.json" | nil,
---                   walk = true (only walk the PlayerGui as it is now: no boot, no scenario; used by the smoke test) }
+--   DUMP          { scenario = "lobby", width = 1920, height = 1080, touch = false, out = "file.json" | nil }, or for
+--                 tools/smoke_polish_guitool.lua { walk = true (walk the PlayerGui as it is now: no boot, no scenario),
+--                 gallery = true (add the widget gallery first), probe = true (also test the text-measure hook and put
+--                 the mock's own measure back), keep = true (leave the gallery in PlayerGui) }
 --   GUI_MEASURE   optional function(fontName, text) -> advance width in em (render_gui.py passes its real font
 --                 metrics; the mock's own text measure, a flat 0.5 em per character, is then replaced so
 --                 AutomaticSize / TextBounds see the same text widths the renderer draws)
@@ -703,25 +705,26 @@ local function hum()
 	return Mock.GetHumanoid(LocalPlayer)
 end
 
--- a profile like the server's ProfileSync: a few owned pets of different rarities, two equipped, items, stats
+-- a profile like the server's ProfileSync: two owned pets of every rarity (Secrets stay undiscovered), the first
+-- two equipped, items, stats
 local function snapshot()
-	local pets, discovered, equipped = {}, {}, {}
+	local pets, discovered, owned = {}, {}, {}
 	local PetCatalog = req("shared/PetCatalog", true)
-	local seen = {}
+	local perRarity = {}
 	if PetCatalog and type(PetCatalog.Pets) == "table" then
 		for _, def in ipairs(PetCatalog.Pets) do
 			local rarity = tostring(def.Rarity)
-			if rarity ~= "Secret" and (seen[rarity] or 0) < 2 and #equipped < 12 then
-				seen[rarity] = (seen[rarity] or 0) + 1
-				pets[def.Id] = (#equipped % 3) + 1
+			if rarity ~= "Secret" and (perRarity[rarity] or 0) < 2 then
+				perRarity[rarity] = (perRarity[rarity] or 0) + 1
+				pets[def.Id] = (#owned % 3) + 1
 				discovered[def.Id] = true
-				equipped[#equipped + 1] = def.Id
+				owned[#owned + 1] = def.Id
 			end
 		end
 	end
 	local eq = {}
-	for i = 1, min(2, #equipped) do
-		eq[i] = equipped[i]
+	for i = 1, min(2, #owned) do
+		eq[i] = owned[i]
 	end
 	return {
 		Tokens = 1250,
