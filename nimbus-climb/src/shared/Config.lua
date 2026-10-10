@@ -93,6 +93,7 @@ Config.Remotes = {
 	"GoToSpot", -- ()
 	"TutorialEvent", -- (eventName:string)  v3: client-observed tutorial events (window opened, skip)
 	"IndexClaim", -- (groupId:string)  v3: claim a completed Pet Index group reward
+	"DevCommand", -- (command:string, arg:any)  developer tools; the server only obeys allowed players (Config.Dev)
 }
 
 ----------------------------------------------------------------------
@@ -395,6 +396,18 @@ Config.Elements = {
 	},
 	StrongMultiplier = 1.5, -- attacker strong against the defender
 	WeakMultiplier = 0.75, -- the defender's element is strong against the attacker
+}
+
+-- Developer tools (owner only). The game's owner (and the extra UserIds in Admins, and everyone while testing in
+-- Roblox Studio) gets a small DEV button and chat commands: /allpets, /tokens <n>, /reset, /tutorial, /skiptutorial,
+-- /devhelp. Nobody else can use them: the server checks every request.
+Config.Dev = {
+	Enabled = true, -- master switch for the developer tools
+	AllowInStudio = true, -- everyone counts as a developer while playing in Roblox Studio
+	Admins = {}, -- extra Roblox UserIds allowed in the live game (the game's owner is always allowed)
+	StudioAutoGrant = false, -- true: in Studio, start every test with every pet and GrantTokens tokens
+	GrantTokens = 1000000, -- tokens added by the "+ tokens" button and by StudioAutoGrant
+	MaxTokensPerCommand = 100000000,
 }
 
 -- v3: 2D artwork the player uploaded to Roblox (decal/image ids). Used for Stormfang's Pet Index banner and the

@@ -210,6 +210,7 @@ local PortalService = loadService("PortalService")
 local IndexService = loadOptionalService("IndexService")
 local NpcService = loadOptionalService("NpcService")
 local TutorialService = loadOptionalService("TutorialService")
+local DevService = loadOptionalService("DevService") -- owner-only developer tools (Config.Dev)
 local StormAltar = loadOptionalService("StormAltar") -- the player's Stormfang landmark (ARCHITECTURE_V3.md section 10)
 
 ----------------------------------------------------------------------
@@ -323,6 +324,12 @@ if TutorialService then call("TutorialService.Init", TutorialService, "Init", lo
 	PetService = PetService,
 	MatchService = MatchService,
 	SpotService = SpotService,
+	IndexService = IndexService,
+}) end
+if DevService then call("DevService.Init", DevService, "Init", {
+	DataService = DataService,
+	PetService = PetService,
+	TutorialService = TutorialService,
 	IndexService = IndexService,
 }) end
 
