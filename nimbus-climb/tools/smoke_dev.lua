@@ -461,6 +461,31 @@ local function serverScenarios()
 		chat(owner, "hello /allpets")
 		T.eq(#devToasts(owner, mark), 0, "DEV chat: other messages and other '/' commands are left alone")
 
+		-- the restart path itself, with a stand-in TutorialService.Reload(player) hook (the real one is the lead's call)
+		if TS and not reloader then
+			local savedTutorial = DataS.GetTutorial(owner)
+			local reloadedFor = nil
+			TS.Reload = function(player)
+				reloadedFor = player
+			end
+			mark = send(owner, "tutorial")
+			local t = DataS.GetTutorial(owner)
+			T.check(t.Step == 1 and t.Done == false and t.Gifted == false and reloadedFor == owner and lastToast(owner, mark).kind == "good",
+				"DEV tutorial: with a TutorialService.Reload(player) hook the stored progress goes back to step 1 and the hook is called", lastToast(owner, mark).text)
+			TS.Reload = nil
+			local live = prof.Tutorial
+			live.Step, live.Done, live.Gifted = savedTutorial.Step, savedTutorial.Done, savedTutorial.Gifted
+		end
+
+		-- every DEV toast reads in full (NotifyController cuts toasts at 90 characters)
+		local long = {}
+		for _, t in ipairs(devToasts(owner, 0)) do
+			if #t.text > 90 then
+				long[#long + 1] = t.text
+			end
+		end
+		T.check(#long == 0, "DEV: every DEV toast fits in a side toast (<= 90 characters)", table.concat(long, " | "))
+
 		-- logging
 		T.check(printed({ TAG, tostring(OWNER_ID), "allpets", "ok" }, outputMark) ~= nil, "DEV: commands are logged with print('" .. TAG .. " ...') including the UserId")
 		T.check(printed({ TAG, "92001", "refused" }, 0) ~= nil, "DEV: refused commands of other players are logged with their UserId")
@@ -717,6 +742,7 @@ local function clientScenarios()
 		T.check(not overlap(r, b), label .. ": the DEV button stays out of the middle of the screen")
 		local small = smallDevTexts(floorPx)
 		T.check(#small == 0, label .. ": the DEV button text is readable (>= " .. floorPx .. " px)", table.concat(small, "; "))
+		T.info(string.format("%s: DEV button at %d,%d - %d,%d (gui area %dx%d)", label, r.x0, r.y0, r.x1, r.y1, a.X, a.Y))
 	end
 
 	local function checkPanel(label, floorPx)
@@ -732,6 +758,8 @@ local function clientScenarios()
 		T.check(not overlap(r, band()), label .. ": the panel is never in the middle of the screen", string.format("%d,%d - %d,%d", r.x0, r.y0, r.x1, r.y1))
 		local small, measured = smallDevTexts(floorPx)
 		T.check(#small == 0 and measured >= 6, label .. ": every text of the panel is readable (>= " .. floorPx .. " px)", #small .. " small: " .. table.concat(small, "; "))
+		local scale = named(panel, "ReadScale")
+		T.info(string.format("%s: panel at %d,%d - %d,%d, design height %d, scale %.2f", label, r.x0, r.y0, r.x1, r.y1, panel.Size.Y.Offset, scale and scale.Scale or 0))
 	end
 
 	S.client_dev = guarded("client_dev", function()

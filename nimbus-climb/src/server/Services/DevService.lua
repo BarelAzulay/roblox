@@ -2,6 +2,8 @@
 -- add tokens, restart / skip the tutorial and wipe their own data back to a brand-new player.
 --
 --   DevService.Init(deps)                          deps = { DataService, PetService, TutorialService, IndexService }
+--                                                  (PetService is not needed: pets are written into the profile the
+--                                                  way PetService does it, and ProfileRebased refreshes its attributes)
 --   DevService.IsAllowed(player) -> bool           may yield ONCE per player for a group-owned game (group rank)
 --   DevService.Run(player, command, arg, source) -> ok, message
 --                                                  the ONE entry point of the DevCommand remote and of chat:
@@ -23,7 +25,10 @@
 --                   1 .. Config.Dev.MaxTokensPerCommand (chat also takes "50,000", "50k", "1m")
 --   reset           back to a brand-new player: tokens, pets, equipped pets, items, stats, Pet Index progress and
 --                   rewards, Cash, Gems, home, pet levels (the lobby spot stays assigned for this session); the
---                   tutorial restarts too (see "tutorial"). Refused during a match.
+--                   tutorial restarts too when TutorialService has the reload hook (see "tutorial"), otherwise it
+--                   is left as it is (the toast says so). Then DataService.ProfileRebased fires so PetService
+--                   republishes the equipped pets / perks and IndexService forgets the completed groups.
+--                   Refused during a match.
 --   tutorial        restart the tutorial from step 1: the stored progress goes back to a new player's, then
 --                   TutorialService re-reads it through its Reload / Refresh / Restart(player) hook (the first that
 --                   exists). Without such a hook the running tutorial cannot be rewound, so the command is refused
@@ -92,7 +97,6 @@ end
 
 local PetCatalog = loadModule(Shared, "PetCatalog")
 local DataService = nil
-local PetService = nil
 local TutorialService = nil
 local IndexService = nil
 
@@ -419,14 +423,14 @@ local function cmdReset(player, profile)
 	if reload or not TutorialService then
 		rewindTutorial(player, profile, reload)
 	else
-		tutorialNote = " (the tutorial restart is not in this build yet)"
+		tutorialNote = " (tutorial restart not in this build yet)"
 	end
 	-- the profile changed underneath every other service: PetService republishes the equipped pets and perks,
 	-- IndexService forgets the completed groups (execute() then marks it dirty and syncs it to the client)
 	if hasSignal(DataService, "ProfileRebased") then
 		DataService.ProfileRebased:Fire(player, profile)
 	end
-	return true, "your data is reset: you are a brand-new player" .. tutorialNote, true
+	return true, "data reset: you are a brand-new player" .. tutorialNote, true
 end
 
 local function cmdTutorial(player, profile)
@@ -671,7 +675,6 @@ function DevService.Init(deps)
 	deps = type(deps) == "table" and deps or {}
 	local services = script.Parent
 	DataService = deps.DataService or loadModule(services, "DataService")
-	PetService = deps.PetService or loadModule(services, "PetService")
 	TutorialService = deps.TutorialService
 	IndexService = deps.IndexService
 	if not PetCatalog then

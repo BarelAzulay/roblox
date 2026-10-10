@@ -80,7 +80,7 @@ local RING_C, RING_D = 12.2, 3.2 -- stone ring: centre radius and radial depth (
 local RING_N = 22 -- stones around (one centred on the front, one on the back)
 local RIM_R, RIM_D, RIM_H, RIM_N = 6.9, 1.5, 0.8, 16 -- inner portal rim
 local DISC_S = 10.3 -- side of the four turned squares of the portal disc (union radius 6.2 .. 7.3)
-local HOVER = 2.4 -- gap between the walking surface and the showcase's lowest point
+local HOVER = 3.2 -- gap between the walking surface and the showcase's lowest point
 local PROWL = math.rad(-8) -- forward lean of the showcase (nose down)
 local BRIDGE_W = 8
 local STEP_RUN = 1.1
@@ -116,10 +116,10 @@ local C = {
 	RimSide = rgb(58, 66, 102),
 	RimTop = rgb(104, 112, 146),
 	Disc = rgb(26, 32, 64),
-	DiscInner = rgb(38, 48, 96),
+	DiscInner = rgb(33, 42, 84),
 	-- crystals and glow
 	CrystalCore = rgb(63, 200, 255),
-	CrystalGlass = rgb(96, 192, 255),
+	CrystalGlass = rgb(70, 172, 252),
 	Rune = rgb(64, 150, 236),
 	Electric = rgb(70, 170, 255),
 	Violet = rgb(122, 60, 255),
@@ -427,16 +427,16 @@ end
 local BV = 2
 local function sculptRim(gapDeg)
 	local g = Voxel.NewGrid(16)
-	local count = 12
+	local count = 14
 	for i = 1, count do
 		local deg = (i - 0.5) * 360 / count + (hash(i, 3, 9) - 0.5) * 10
 		if angleDiff(deg, gapDeg) > GAP_HALF then
 			local a = math.rad(deg)
-			local r = R_TOP - 0.5 + (hash(i, 4, 9) - 0.5) * 1.6
-			local rx = 3.6 + hash(i, 5, 9) * 1.2
+			local r = R_TOP - 1.2 + (hash(i, 4, 9) - 0.5) * 1.4
+			local rx = 3.4 + hash(i, 5, 9) * 1.2
 			local ry = 2.6 + hash(i, 6, 9) * 1.4
-			if angleDiff(deg, 0) < 50 then
-				ry = 2.3 -- lower in front: the view from the plaza stays open
+			if angleDiff(deg, 0) < 55 then
+				ry = 1.7 -- lower in front: the view from the plaza stays open
 			end
 			ellipsoid(g, math.sin(a) * r / BV, -0.6 / BV, -math.cos(a) * r / BV, rx / BV, ry / BV, rx / BV, "Billow", true)
 			-- piled-up second billows over the back half
@@ -451,7 +451,11 @@ local function sculptRim(gapDeg)
 		if angleDiff(deg, gapDeg) > GAP_HALF + 8 then
 			local a = math.rad(deg)
 			local r = R_TOP + 0.4
-			ellipsoid(g, math.sin(a) * r / BV, 1.3 / BV, -math.cos(a) * r / BV, 2.5 / BV, 1.9 / BV, 2.3 / BV, "Puff")
+			local x, z = math.sin(a) * r, -math.cos(a) * r
+			ellipsoid(g, x / BV, 1.2 / BV, z / BV, 3.0 / BV, 2.0 / BV, 2.6 / BV, "Puff")
+			-- a smaller puff piled on one side
+			local t = Vector3.new(math.cos(a), 0, math.sin(a)) * 2.2
+			ellipsoid(g, (x + t.X) / BV, 2.6 / BV, (z + t.Z) / BV, 1.9 / BV, 1.5 / BV, 1.9 / BV, "Puff")
 		end
 	end
 	-- lighter tops only: the dark undersides belong to the belly
@@ -463,18 +467,20 @@ end
 -- cloud with puffy lumps on the sides and smaller hanging puffs underneath, darker below.
 local function sculptBelly()
 	local g = Voxel.NewGrid(8)
-	ellipsoid(g, 0, -1, 0, 6.9, 1.4, 6.9, "Body")
+	ellipsoid(g, 0, -0.7, 0, 6.6, 1.0, 6.6, "Body")
+	-- side lumps at different heights (a bumpy silhouette from the plaza), then a few hanging puffs
 	local lumps = {
-		{ 5.6, -1.2, 2.4, 2.2, 1.5, 2.2 },
-		{ -5.4, -1.3, -2.6, 2.3, 1.5, 2.2 },
-		{ -2.6, -1.1, 5.6, 2.1, 1.4, 2.2 },
-		{ 2.8, -1.2, -5.5, 2.2, 1.5, 2.1 },
-		{ -4.4, -1.6, 4.2, 1.8, 1.3, 1.8 },
-		{ 4.6, -1.5, -4.0, 1.8, 1.3, 1.8 },
-		{ 0.6, -2.6, 0.4, 4.2, 1.5, 4 },
-		{ 2.4, -3.6, -1.4, 2.2, 1.3, 2 },
-		{ -2, -3.4, 1.8, 2, 1.2, 2 },
-		{ 0, -4.4, 0, 1.4, 1, 1.4 },
+		{ 6.1, -1.0, 1.6, 2.4, 1.4, 2.3 },
+		{ -6.0, -1.2, -1.8, 2.5, 1.5, 2.3 },
+		{ -2.2, -0.9, 6.0, 2.3, 1.3, 2.4 },
+		{ 2.0, -1.1, -6.0, 2.4, 1.5, 2.3 },
+		{ -4.6, -1.5, 4.0, 2.1, 1.3, 2.0 },
+		{ 4.8, -1.6, -3.6, 2.0, 1.3, 2.1 },
+		{ 4.2, -1.3, 4.4, 2.0, 1.2, 2.0 },
+		{ -4.4, -1.2, -4.4, 2.0, 1.2, 2.0 },
+		{ 0.4, -2.0, 0.2, 4.6, 1.3, 4.4 },
+		{ 2.6, -2.6, -1.6, 2.6, 1.1, 2.4 },
+		{ -2.4, -2.5, 1.8, 2.4, 1.1, 2.3 },
 	}
 	for _, p in ipairs(lumps) do
 		ellipsoid(g, p[1], p[2], p[3], p[4], p[5], p[6], "Body", true)
@@ -512,18 +518,8 @@ end
 local function buildIsland(parent, A, gapDeg)
 	local m = newModel(parent, "Island")
 	-- walking top: a 16-gon of storm blue (its points hide in the rim billows), the dark floor inside the ring
-	polygon16(m, "WalkTop", A * CFrame.new(0, -1, 0), 36, 2, C.Walk, { Collide = true })
+	polygon16(m, "WalkTop", A * CFrame.new(0, -1, 0), 32, 2, C.Walk, { Collide = true })
 	polygon16(m, "Floor", A * CFrame.new(0, 0.01, 0), 19.4, 0.04, C.Floor, { Collide = true, Shadow = false })
-	-- lighter cloud tufts on the walking ledge (never on the bridge path)
-	for i = 1, 9 do
-		local deg = i * 40 + hash(i, 1, 31) * 24
-		if angleDiff(deg, gapDeg) > 22 then
-			local r = RING_C + RING_D / 2 + 2.2 + hash(i, 2, 31) * 3.2
-			local len = 2 + math.floor(hash(i, 3, 31) * 2) * 2
-			local cf = polarCF(A, deg, r, 0.12) * CFrame.Angles(0, (hash(i, 4, 31) < 0.5) and 0 or math.rad(90), 0)
-			block(m, "Tuft", cf, Vector3.new(2, 0.24, len), C.StormTop, { Collide = true, Shadow = false })
-		end
-	end
 	if not Voxel then
 		-- no voxel kit: two plain navy slabs under the top
 		block(m, "IslandBody", A * CFrame.new(0, -4, 0), Vector3.new(R_TOP * 1.7, 4, R_TOP * 1.7), C.Storm)
@@ -596,7 +592,7 @@ local STONE_COLORS = { C.Stone, C.StoneB, C.StoneC }
 -- Lean = degrees outwards, Mount = height of the stacked mount stone.
 local HEAD = RING_N / 2
 local CRYSTALS = {
-	[HEAD] = { W = 3.6, H = 5.2, Steps = 4, Tip = 3.8, FootSteps = 2, Foot = 1.4, Lean = 3, Mount = 2.6 },
+	[HEAD] = { W = 3.6, H = 5.8, Steps = 4, Tip = 3.9, FootSteps = 2, Foot = 1.4, Lean = 3, Mount = 2.6 },
 	[HEAD - 3] = { W = 2.4, H = 3.4, Steps = 3, Tip = 2.4, Lean = 9, Mount = 3.2 },
 	[HEAD + 3] = { W = 2.4, H = 3.4, Steps = 3, Tip = 2.4, Lean = 9, Mount = 3.2 },
 	[HEAD - 7] = { W = 2.1, H = 2.6, Steps = 3, Tip = 1.8, Lean = 11, Mount = 2.8 },
@@ -631,7 +627,7 @@ local function buildRing(parent, A)
 			block(m, "Mount", mcf, Vector3.new(width * 0.74, mh, RING_D * 0.74), C.StoneB, { Collide = true })
 			block(m, "MountCap", mcf * CFrame.new(0, mh / 2 + 0.08, 0), Vector3.new(width * 0.74 - 0.4, 0.16, RING_D * 0.74 - 0.4), C.Bevel, { Collide = true, Shadow = false })
 			topY = h + 0.2 + mh + 0.16
-		elseif hash(i, 2, 21) < 0.34 then
+		elseif hash(i, 2, 21) < 0.4 and not (CRYSTALS[(i + 1) % RING_N] or CRYSTALS[(i - 1) % RING_N]) then
 			-- a smaller stone stacked off-centre (the broken, stepped silhouette of the art)
 			local sh = 0.8
 			local off = (hash(i, 3, 21) < 0.5) and -0.55 or 0.55
@@ -639,6 +635,13 @@ local function buildRing(parent, A)
 			block(m, "StoneStack", scf, Vector3.new(width * 0.48, sh, RING_D * 0.56), C.StoneC, { Collide = true, Shadow = false })
 		end
 		tops[key] = topY
+		-- the stones beside a crystal step up towards it (the clustered blocks of the art)
+		if CRYSTALS[(i + 1) % RING_N] or CRYSTALS[(i - 1) % RING_N] then
+			local toward = CRYSTALS[(i + 1) % RING_N] and 1 or -1
+			local sh = 0.7 + hash(i, 4, 21) * 0.6
+			local scf = polarCF(A, deg + toward * step * 0.22, RING_C - 0.3, h + 0.2 + sh / 2)
+			block(m, "StoneStack", scf, Vector3.new(width * 0.5, sh, RING_D * 0.62), C.StoneC, { Collide = true, Shadow = false })
+		end
 	end
 	-- scattered rubble around the outer foot of the ring
 	for i = 1, 6 do
@@ -721,7 +724,7 @@ local function stormPuff()
 		Voxel.Shape(g, { Kind = "Ellipsoid", Center = { 2.2, -0.6, 0.8 }, Radius = { 2, 1.4, 1.8 }, Key = "Body", KeepExisting = true })
 		Voxel.Shape(g, { Kind = "Ellipsoid", Center = { -2.4, -0.4, -0.6 }, Radius = { 2, 1.3, 1.7 }, Key = "Body", KeepExisting = true })
 		Voxel.Shade(g, { Smooth = 2, Seed = 4 })
-		return Voxel.Build(g, { VoxelSize = 1.4, Palette = ISLAND_PALETTE, Name = "StormPuff", MaxParts = 8 })
+		return Voxel.Build(g, { VoxelSize = 1.4, Palette = ISLAND_PALETTE, Name = "StormPuff", MaxParts = 7 })
 	end)
 	if ok and model then
 		puffTemplate = model
@@ -781,7 +784,7 @@ local function buildBridge(parent, A, landing, dock)
 	block(m, "Beam", bcf * CFrame.new(0, -1.4, -total / 2), Vector3.new(BRIDGE_W - 1.6, 0.9, total - 0.4), C.StoneDeep, { Shadow = false })
 
 	-- low parapets with crystal lanterns (they stop short of the dock, where the junction posts stand)
-	local s0, s1 = 1.2, len - 1.6
+	local s0, s1 = 1.2, len - 2.2
 	if s1 - s0 > 4 then
 		local mid = (s0 + s1) / 2
 		for _, side in ipairs({ -1, 1 }) do
@@ -795,8 +798,7 @@ local function buildBridge(parent, A, landing, dock)
 				end
 			end
 			lantern(m, bcf * CFrame.new(x, 0, -s0), false)
-			lantern(m, bcf * CFrame.new(x, 0, -mid), false)
-			lantern(m, bcf * CFrame.new(x, 0, -s1), true)
+			lantern(m, bcf * CFrame.new(x, 0, -mid), true)
 		end
 	end
 
@@ -817,7 +819,8 @@ local function buildBridge(parent, A, landing, dock)
 	for _, t in ipairs({ 0.34, 0.7 }) do
 		placePuff(m, bcf * CFrame.new(0, -3.1, -len * t) * CFrame.Angles(0, t * 5, 0))
 	end
-	return m
+	-- the entrance gate stands over the deck's street end, its panel facing the street
+	return m, bcf * CFrame.new(0, 0, -(len - 0.8))
 end
 
 ----------------------------------------------------------------------
@@ -889,8 +892,9 @@ local function gloss(parent, radiusPx)
 	return g
 end
 
--- Poster content for a SurfaceGui of 320 x 390 px (50 px per stud).
-local function posterGui(board)
+-- Gate panel content: a SurfaceGui of 420 x 240 px (8.4 x 4.8 studs at 50 px per stud) in the chunky cloud UI
+-- style: the player's art in a dark well on the left, "STORM ALTAR", "Secret pets" and "Awakens soon" on the right.
+local function panelGui(board)
 	local gui = Instance.new("SurfaceGui")
 	gui.Name = "PosterGui"
 	gui.Face = Enum.NormalId.Front
@@ -898,25 +902,16 @@ local function posterGui(board)
 	gui.PixelsPerStud = 50
 	gui.LightInfluence = 0
 	gui.AlwaysOnTop = false
-	gui.MaxDistance = 140
+	gui.MaxDistance = 160
 	gui.Adornee = board
 
-	local card = frame(gui, "Card", UDim2.fromOffset(6, 6), UDim2.new(1, -12, 1, -12), C.White)
-	corner(card, 22)
+	local card = frame(gui, "Card", UDim2.fromOffset(5, 5), UDim2.new(1, -10, 1, -10), C.White)
+	corner(card, 20)
 	stroke(card, C.Navy, 6)
 	gradient(card, C.StormTop, C.Storm)
 
-	-- title bar
-	local bar = frame(card, "TitleBar", UDim2.new(0, 12, 0, 12), UDim2.new(1, -24, 0, 64), C.White)
-	corner(bar, 16)
-	stroke(bar, C.Navy, 4)
-	gradient(bar, rgb(84, 196, 255), rgb(40, 112, 214))
-	gloss(bar, 12)
-	label(bar, "STORM ALTAR", "Title", { Name = "Title", Size = 38, Box = UDim2.new(1, -16, 1, -8) }, 3)
-
 	-- the player's art in a dark well
-	local well = frame(card, "ArtWell", UDim2.new(0.5, 0, 0, 86), UDim2.fromOffset(236, 236), C.White)
-	well.AnchorPoint = Vector2.new(0.5, 0)
+	local well = frame(card, "ArtWell", UDim2.fromOffset(14, 14), UDim2.fromOffset(202, 202), C.White)
 	corner(well, 14)
 	stroke(well, C.CrystalCore, 3)
 	gradient(well, rgb(40, 50, 92), rgb(20, 26, 54))
@@ -925,22 +920,30 @@ local function posterGui(board)
 	art.BackgroundTransparency = 1
 	art.AnchorPoint = Vector2.new(0.5, 0.5)
 	art.Position = UDim2.fromScale(0.5, 0.5)
-	art.Size = UDim2.new(1, -12, 1, -12)
+	art.Size = UDim2.new(1, -10, 1, -10)
 	art.Image = Config.Art and Config.Art.StormfangImage or ""
 	art.ScaleType = Enum.ScaleType.Fit
 	art.ZIndex = 3
 	art.Parent = well
 	corner(art, 10)
 
-	-- footer pill
-	local pill = frame(card, "SecretPill", UDim2.new(0.5, 0, 1, -14), UDim2.new(1, -60, 0, 44), C.White)
-	pill.AnchorPoint = Vector2.new(0.5, 1)
-	corner(pill, 22)
+	-- title bar: two big lines
+	local bar = frame(card, "TitleBar", UDim2.fromOffset(228, 14), UDim2.fromOffset(168, 100), C.White)
+	corner(bar, 16)
+	stroke(bar, C.Navy, 4)
+	gradient(bar, rgb(84, 196, 255), rgb(40, 112, 214))
+	gloss(bar, 12)
+	local title = label(bar, "STORM\nALTAR", "Title", { Name = "Title", Size = 40, Box = UDim2.new(1, -12, 1, -8) }, 3)
+	title.LineHeight = 0.88
+
+	-- "Secret pets" pill and the phase 1 caption
+	local pill = frame(card, "SecretPill", UDim2.fromOffset(228, 124), UDim2.fromOffset(168, 42), C.White)
+	corner(pill, 21)
 	stroke(pill, C.Navy, 4)
 	gradient(pill, rgb(150, 98, 255), rgb(88, 46, 204))
-	gloss(pill, 18)
-	local gem = "\226\151\134" -- black diamond
-	label(pill, gem .. " Secret pets " .. gem, "Heading", { Name = "Subtitle", Size = 26, Box = UDim2.new(1, -16, 1, -6) }, 2)
+	gloss(pill, 16)
+	label(pill, "Secret pets", "Heading", { Name = "Subtitle", Size = 21, Box = UDim2.new(1, -10, 1, -4) }, 2)
+	label(card, "Awakens soon", "Body", { Name = "Caption", Size = 20, Color = C.Cyan, AnchorPoint = Vector2.new(0, 0), Position = UDim2.fromOffset(228, 174), Box = UDim2.fromOffset(168, 40) }, 2)
 
 	gui.Parent = board
 	return gui
@@ -971,26 +974,47 @@ local function titleTag(anchor)
 	return gui
 end
 
-local function buildSign(parent, A, landing, outward, titleY)
-	local m = newModel(parent, "StormAltarSign")
-	-- poster beside the bridge landing, turned towards players walking in from the street
-	if landing and outward then
-		local lat = Vector3.new(-outward.Z, 0, outward.X)
-		local base = Vector3.new(landing.X, A.Position.Y, landing.Z) + lat * 8.2 - outward * 2.2
-		local facing = Vector3.new(landing.X, A.Position.Y, landing.Z) + outward * 22
-		local cf = flatLook(base, facing)
-		for _, s in ipairs({ -1, 1 }) do
-			local post = cf * CFrame.new(s * 3.55, 2.5, 0.15)
-			block(m, "PosterPost", post, Vector3.new(0.8, 5, 0.8), C.StoneB, { Collide = true, Shadow = false })
-			local tip = post * CFrame.new(0, 2.5 + 0.55, 0) * CFrame.Angles(0, math.rad(45), 0)
-			block(m, "PosterGemGlass", tip, Vector3.new(0.7, 1.1, 0.7), C.CrystalGlass, { Material = MAT.Glass, Transparency = 0.3, Shadow = false })
-			block(m, "PosterGemCore", tip, Vector3.new(0.4, 1.0, 0.4), C.CrystalCore, { Material = MAT.Neon, Shadow = false })
-		end
-		block(m, "PosterFrame", cf * CFrame.new(0, 5.4, 0.25), Vector3.new(6.9, 8.3, 0.36), C.StoneLight, { Shadow = false })
-		block(m, "PosterBack", cf * CFrame.new(0, 5.4, 0.46), Vector3.new(6.1, 7.5, 0.1), C.StoneB, { Shadow = false })
-		local board = block(m, "PosterBoard", cf * CFrame.new(0, 5.4, 0), Vector3.new(6.4, 7.8, 0.3), C.Storm, { Shadow = false })
-		posterGui(board)
+-- A stone gate whose panel faces the street. cf: ground centre of the gate, LookVector = towards the street.
+local function buildGate(parent, cf, span)
+	local m = newModel(parent, "Gate")
+	local px = span / 2 + 0.5
+	local height = 12.6
+	for _, side in ipairs({ -1, 1 }) do
+		local pillar = cf * CFrame.new(side * px, height / 2 - 1.2, 0)
+		block(m, "GatePillar", pillar, Vector3.new(1.3, height + 1.2, 1.3), C.Stone, { Collide = true })
+		local capCF = cf * CFrame.new(side * px, height - 0.4, 0)
+		block(m, "GateCap", capCF, Vector3.new(1.8, 0.45, 1.8), C.StoneLight, { Collide = true, Shadow = false })
+		local tip = cf * CFrame.new(side * px, height + 0.45, 0) * CFrame.Angles(0, math.rad(45), 0)
+		block(m, "GateGemGlass", tip, Vector3.new(0.8, 1.3, 0.8), C.CrystalGlass, { Material = MAT.Glass, Transparency = 0.25, Shadow = false })
+		local core = block(m, "GateGemCore", tip, Vector3.new(0.46, 1.2, 0.46), C.CrystalCore, { Material = MAT.Neon, Shadow = false })
+		pointLight(core, 0.8, 8)
 	end
+	local panelY = 9.4
+	block(m, "GateFrame", cf * CFrame.new(0, panelY, 0.25), Vector3.new(span + 0.6, 5.3, 0.36), C.StoneLight, { Shadow = false })
+	block(m, "GateBack", cf * CFrame.new(0, panelY, 0.46), Vector3.new(span - 0.4, 4.4, 0.1), C.StoneB, { Shadow = false })
+	block(m, "GateLintel", cf * CFrame.new(0, panelY + 2.95, 0.1), Vector3.new(span + 1.2, 0.6, 1.1), C.Stone, { Shadow = false })
+	local gem = cf * CFrame.new(0, panelY + 3.45, -0.1) * CFrame.Angles(0, 0, math.rad(45))
+	block(m, "GateGemGlass", gem, Vector3.new(1.1, 1.1, 0.5), C.CrystalGlass, { Material = MAT.Glass, Transparency = 0.25, Shadow = false })
+	block(m, "GateGemCore", gem * CFrame.new(0, 0, -0.05), Vector3.new(0.65, 0.65, 0.5), C.CrystalCore, { Material = MAT.Neon, Shadow = false })
+	-- a diamond emblem on the back (seen from the island)
+	local emblem = cf * CFrame.new(0, panelY, 0.56) * CFrame.Angles(0, 0, math.rad(45))
+	block(m, "GateGemGlass", emblem, Vector3.new(1.5, 1.5, 0.3), C.CrystalGlass, { Material = MAT.Glass, Transparency = 0.25, Shadow = false })
+	block(m, "GateGemCore", emblem * CFrame.new(0, 0, 0.06), Vector3.new(0.9, 0.9, 0.3), C.CrystalCore, { Material = MAT.Neon, Shadow = false })
+	local board = block(m, "GatePanel", cf * CFrame.new(0, panelY, 0), Vector3.new(span, 4.8, 0.3), C.Storm, { Shadow = false })
+	panelGui(board)
+	return m
+end
+
+-- gateCF: ground centre of the entrance gate (LookVector = towards the street), or nil.
+local function buildSign(parent, A, gateCF, titleY)
+	local m = newModel(parent, "StormAltarSign")
+	if not gateCF then
+		-- no bridge: a free-standing gate at the island's back edge
+		local back = -A.LookVector
+		local p = A.Position + back * (R_TOP - 5)
+		gateCF = flatLook(p, p + back)
+	end
+	buildGate(m, gateCF, 8.4)
 	-- title tag above the showcase
 	local anchor = invisible(m, "TitleAnchor", A * CFrame.new(0, titleY, 0))
 	titleTag(anchor)
@@ -1204,9 +1228,11 @@ function StormAltar.Build(lobbyInfo)
 	section("crystals", function()
 		buildCrystals(model, A, tops)
 	end)
+	local gateCF = nil
 	if landing and dock then
 		section("bridge", function()
-			buildBridge(model, A, landing, Vector3.new(dock.X, top, dock.Z))
+			local _, g = buildBridge(model, A, landing, Vector3.new(dock.X, top, dock.Z))
+			gateCF = g
 		end)
 	end
 	local showTop = HOVER + 10
@@ -1215,8 +1241,7 @@ function StormAltar.Build(lobbyInfo)
 		showTop = h or showTop
 	end)
 	section("sign", function()
-		local back = -A.LookVector
-		buildSign(model, A, landing or (A.Position + back * (R_TOP - 4)), outward or back, showTop + 4.2)
+		buildSign(model, A, gateCF, showTop + 4.2)
 	end)
 	section("prompt", function()
 		buildPrompt(model, A)

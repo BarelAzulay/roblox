@@ -20,6 +20,7 @@
 --     "Skip tutorial", "Reset my data" (the first tap turns it into "Are you sure?", a second tap within 4 s
 --     sends it) and the note "Only you can see this". It takes the biggest free stretch of the right edge; when
 --     that is short (a phone) the buttons scroll instead of shrinking the text. The tile hides while it is open.
+--     Built on the first open, so a developer who never opens it only carries the small tile.
 -- Input: mouse, touch and gamepad. Both are Selectable TextButtons (Activated covers click, tap and gamepad A);
 -- opening the panel with a gamepad selects its first button; B (ContextActionService, only while open), Esc, the
 -- red X and the tile close it.
@@ -65,7 +66,7 @@ local K = {
 	NOTE_H = 26,
 	LIST_PAD = 10,
 	LIST_GAP = 8,
-	BUMPS = 28, -- room the panel's cloud bumps need above its top edge
+	BUMPS = 30, -- room the panel's cloud bumps (and their outline) need above its top edge
 	MIN_PANEL_H = 230, -- a free stretch shorter than this is not used (the panel may then cover thumb buttons)
 	MIN_SCALE = 0.5, -- only for absurdly small windows
 	POLL = 0.5, -- seconds between two layout checks
@@ -500,8 +501,8 @@ local function build()
 	gui.Enabled = false
 	UI.Gui = gui
 	applied = {}
+	UI.PanelRoot = nil -- the panel is built on first open (a developer who never opens it only pays for the tile)
 	buildTile(gui)
-	buildPanel(gui)
 	gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
 		guard("relayout", DevController.Relayout)
 	end)
@@ -801,12 +802,17 @@ function DevController.IsOpen()
 end
 
 function DevController.Open()
-	if not enabled or not UI.PanelRoot then
+	if not enabled or not UI.Gui then
 		return false
 	end
 	if panelOpen then
 		DevController.Close()
 		return false
+	end
+	if not (UI.PanelRoot and UI.PanelRoot.Parent) then
+		if not guard("build panel", buildPanel, UI.Gui) then
+			return false
+		end
 	end
 	panelOpen = true
 	disarmReset()
