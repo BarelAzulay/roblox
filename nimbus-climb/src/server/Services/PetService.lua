@@ -2,23 +2,35 @@
 --
 --   PetService.Init(lobbyInfo, deps)         deps = { DataService = }
 --   PetService.BuyRoulette(player, rouletteId) -> ok, result|reason
---   PetService.Equip / Unequip(player, petId)  -> ok, reason
---   PetService.GetEquipped(player) -> {petId...}
+--   PetService.Equip / Unequip(player, key)    -> ok, reason
+--   PetService.GetEquipped(player) -> {key...}
 --   PetService.GetPerks(player) -> {MaxHealth, TokenBonus, StaminaRegen, CheckpointHeal}
 --   PetService.GetTokenMultiplier(player) -> number >= 1
 --   PetService.PerksChanged                  Util.Signal, Fire(player)
 --   PetService.Rolled                        Util.Signal, Fire(player, petId) after every successful roll (v3)
+--   Extra (Phase 2): PetService.Refresh(player) -> changed   re-validates the equipped list against what the player
+--                    owns (after FusionService / DevService removed copies: excess or vanished keys are unequipped),
+--                    republishes the attributes and perks, MarkDirty + Sync when something changed.
 --
 -- v3 (ARCHITECTURE_V3.md section 3): every successful roll marks the pet as discovered for the Pet Index
 -- (DataService.MarkDiscovered) before the ProfileSync goes out; RouletteResult.IsNew keeps meaning "first time
 -- owned" and the payload also carries NewDiscovery (first time in the Index). Owned pets are re-checked as
 -- discovered whenever a profile loads or is rebased.
 --
+-- Phase 2 (ARCHITECTURE_V3.md "Pet keys"): a pet COPY is a key (shared/PetKeys.lua): "petId" (Normal),
+-- "petId@Golden", "petId@Rainbow", "hyb:<uid>" (a fused hybrid). Equip / Unequip take keys; an old plain petId is
+-- the Normal key, so old callers keep working (Unequip(petId) also takes off a tier copy of that pet when no Normal
+-- copy is equipped). Perks and the token multiplier sum PetKeys.DefOf(key).Perks x PetKeys.StatMultiplier(tier)
+-- (DataService.ComputePerks), capped as before. The roulette still adds Normal copies (Pets[petId] + 1).
+--
 -- Everything is server authoritative: the client only sends ids, we validate ownership, prices,
 -- stack caps and slot limits, then write to the live profile and Sync it back.
 --
 -- Perk plumbing:
---   * attribute EquippedPets (csv)       -> every client draws that player's followers
+--   * attribute EquippedPets (csv of keys)   -> every client draws that player's followers
+--   * attribute EquippedHybrids              -> the looks of the equipped hybrids (other clients cannot see the
+--                                               owner's profile): "uid=Body/Style/Tier/Rarity[/Seed];..." -- set
+--                                               BEFORE EquippedPets, only once a player ever equips a hybrid
 --   * attribute PerkStaminaRegen         -> MovementController scales its stamina regen
 --   * MaxHealth                          -> PlayerService (Main hands it GetPerks and calls RefreshMaxHealth
 --                                           when PerksChanged fires), so this module never touches Humanoids
@@ -49,6 +61,7 @@ local PROMPT_COOLDOWN = 0.5
 local ANNOUNCE_DELAY = 5 -- seconds before the puller sees their own server-wide announcement
 local MAX_ID_LENGTH = 48
 local PROMPT_NAME = "RoulettePrompt"
+local HYBRID_ATTR = "EquippedHybrids" -- not in Config.Attr (lead-owned): the looks of equipped hybrids, see the header
 
 ----------------------------------------------------------------------
 -- Optional collaborators (written by other modules; every use is guarded)
@@ -69,6 +82,7 @@ local function loadShared(name)
 end
 
 local PetCatalog = loadShared("PetCatalog")
+local PetKeys = loadShared("PetKeys")
 
 ----------------------------------------------------------------------
 -- State
@@ -147,12 +161,99 @@ local function countOf(list, id)
 	return n
 end
 
+-- every owned copy (Normal, tiers, hybrids): the very first pet ever is equipped automatically
 local function totalPets(profile)
 	local n = 0
 	for _, count in pairs(profile.Pets) do
 		n = n + count
 	end
+	for _, entry in pairs(type(profile.Tiers) == "table" and profile.Tiers or {}) do
+		if type(entry) == "table" then
+			for _, count in pairs(entry) do
+				if type(count) == "number" then
+					n = n + count
+				end
+			end
+		end
+	end
+	for _ in pairs(type(profile.Hybrids) == "table" and profile.Hybrids or {}) do
+		n = n + 1
+	end
 	return n
+end
+
+-- PetKeys.Parse(key) or nil (a plain petId when PetKeys is missing)
+local function parseKey(key)
+	if PetKeys and type(PetKeys.Parse) == "function" then
+		local ok, parsed = pcall(PetKeys.Parse, key)
+		if ok then
+			return parsed
+		end
+		return nil
+	end
+	if validId(key) then
+		return { Key = key, PetId = key, Tier = "Normal" }
+	end
+	return nil
+end
+
+-- The definition of a key (PetKeys.DefOf: catalog def, tier def or hybrid def), or nil for unknown keys.
+-- Without PetKeys plain ids resolve through PetCatalog; without either nothing can be called unknown (true).
+local function defOf(key, profile)
+	if PetKeys and type(PetKeys.DefOf) == "function" then
+		local ok, def = pcall(PetKeys.DefOf, key, profile)
+		if ok and type(def) == "table" then
+			return def
+		end
+		return nil
+	end
+	if PetCatalog and type(PetCatalog.Get) == "function" then
+		local ok, def = pcall(PetCatalog.Get, key)
+		if ok and type(def) == "table" then
+			return def
+		end
+		return nil
+	end
+	return true
+end
+
+-- copies of `key` the profile owns
+local function ownedCount(profile, key)
+	if PetKeys and type(PetKeys.Count) == "function" then
+		local ok, n = pcall(PetKeys.Count, profile, key)
+		if ok and type(n) == "number" then
+			return n
+		end
+		return 0
+	end
+	local n = profile.Pets[key]
+	if type(n) == "number" then
+		return n
+	end
+	return 0
+end
+
+-- "uid=Body/Style/Tier/Rarity[/Seed];..." for the equipped hybrids (what other clients need to draw them)
+local function hybridLooks(profile)
+	local parts, seen = {}, {}
+	local hybrids = type(profile.Hybrids) == "table" and profile.Hybrids or {}
+	for _, key in ipairs(profile.Equipped) do
+		local parsed = parseKey(key)
+		local uid = parsed and parsed.HybridId
+		local rec = uid and hybrids[uid]
+		if uid and not seen[uid] and type(rec) == "table" and type(rec.Body) == "string" and type(rec.Style) == "string" then
+			seen[uid] = true
+			local fields = { rec.Body, rec.Style, parsed.Tier, type(rec.Rarity) == "string" and rec.Rarity or "" }
+			if type(rec.Seed) == "number" and rec.Seed == rec.Seed then
+				fields[5] = tostring(math.floor(rec.Seed))
+			end
+			local text = uid .. "=" .. table.concat(fields, "/")
+			if not string.find(text, "[,;]") then
+				parts[#parts + 1] = text
+			end
+		end
+	end
+	return table.concat(parts, ";")
 end
 
 local function copyPerks(perks)
@@ -177,8 +278,16 @@ local function refreshPlayer(player, silent)
 	if not profile then
 		return
 	end
-	local perks = copyPerks(DataService.ComputePerks(profile.Equipped))
+	local perks = copyPerks(DataService.ComputePerks(profile.Equipped, profile))
 	perkState[player] = { Perks = perks }
+	-- the hybrid looks first: a client that sees the new EquippedPets can already draw every hybrid in it
+	local looks = hybridLooks(profile)
+	local currentLooks = player:GetAttribute(HYBRID_ATTR)
+	if looks ~= "" or (currentLooks ~= nil and currentLooks ~= "") then
+		if currentLooks ~= looks then
+			player:SetAttribute(HYBRID_ATTR, looks)
+		end
+	end
 	player:SetAttribute(Config.Attr.EquippedPets, table.concat(profile.Equipped, ","))
 	player:SetAttribute(Config.Attr.PerkStaminaRegen, perks.StaminaRegen)
 	if not silent then
@@ -186,16 +295,21 @@ local function refreshPlayer(player, silent)
 	end
 end
 
--- Drops equipped ids the catalog does not know (removed pets). Returns true if anything changed.
+-- Drops equipped keys that are unknown (pets that left the catalog, hybrids whose record is gone) or owned fewer
+-- times than they are equipped (copies fused away), and trims to the slot limit. Returns true if anything changed.
 local function validateEquipped(profile)
-	if not PetCatalog or type(PetCatalog.Get) ~= "function" then
-		return false
+	if type(profile.Equipped) ~= "table" then
+		profile.Equipped = {}
 	end
 	local kept = {}
-	for _, id in ipairs(profile.Equipped) do
-		local ok, def = pcall(PetCatalog.Get, id)
-		if ok and def then
-			table.insert(kept, id)
+	local used = {}
+	for _, key in ipairs(profile.Equipped) do
+		if type(key) == "string" and #kept < Config.Pets.MaxEquipped and defOf(key, profile) then
+			local n = (used[key] or 0) + 1
+			if n <= ownedCount(profile, key) then
+				used[key] = n
+				table.insert(kept, key)
+			end
 		end
 	end
 	if #kept == #profile.Equipped then
@@ -228,6 +342,12 @@ end
 local function discoverOwned(player, profile)
 	for petId, count in pairs(profile.Pets) do
 		if type(count) == "number" and count > 0 then
+			markDiscovered(player, petId)
+		end
+	end
+	-- tier copies count for their base pet (the Index lists base pets)
+	for petId, entry in pairs(type(profile.Tiers) == "table" and profile.Tiers or {}) do
+		if type(entry) == "table" then
 			markDiscovered(player, petId)
 		end
 	end
@@ -292,24 +412,24 @@ end
 -- Public API: equip / unequip
 ----------------------------------------------------------------------
 
-function PetService.Equip(player, petId)
+function PetService.Equip(player, key)
 	if not isLivePlayer(player) then
 		return false, "Player unavailable"
 	end
 	if inMatch(player) then
 		return false, "Pets are locked during a match"
 	end
-	if not validId(petId) then
+	if not validId(key) or not parseKey(key) then
 		return false, "Unknown pet"
 	end
 	local profile = DataService.GetProfile(player)
 	if not profile then
 		return false, "Your data is still loading"
 	end
-	if PetCatalog and type(PetCatalog.Get) == "function" and not PetCatalog.Get(petId) then
+	if not defOf(key, profile) then
 		return false, "Unknown pet"
 	end
-	local owned = profile.Pets[petId] or 0
+	local owned = ownedCount(profile, key)
 	if owned <= 0 then
 		return false, "You do not own that pet"
 	end
@@ -317,22 +437,24 @@ function PetService.Equip(player, petId)
 	if #equipped >= Config.Pets.MaxEquipped then
 		return false, "All " .. Config.Pets.MaxEquipped .. " pet slots are full"
 	end
-	if countOf(equipped, petId) >= owned then
+	if countOf(equipped, key) >= owned then
 		return false, "All your copies are already equipped"
 	end
-	table.insert(equipped, petId)
+	table.insert(equipped, key)
 	finishEquipChange(player)
 	return true
 end
 
-function PetService.Unequip(player, petId)
+-- Takes one copy of `key` off (the last one equipped). A plain petId also matches a tier copy of that pet when no
+-- Normal copy is equipped (old callers only know pet ids).
+function PetService.Unequip(player, key)
 	if not isLivePlayer(player) then
 		return false, "Player unavailable"
 	end
 	if inMatch(player) then
 		return false, "Pets are locked during a match"
 	end
-	if not validId(petId) then
+	if not validId(key) then
 		return false, "Unknown pet"
 	end
 	local profile = DataService.GetProfile(player)
@@ -341,13 +463,43 @@ function PetService.Unequip(player, petId)
 	end
 	local equipped = profile.Equipped
 	for i = #equipped, 1, -1 do
-		if equipped[i] == petId then
+		if equipped[i] == key then
 			table.remove(equipped, i)
 			finishEquipChange(player)
 			return true
 		end
 	end
+	local parsed = parseKey(key)
+	if parsed and parsed.PetId and parsed.Tier == "Normal" then
+		for i = #equipped, 1, -1 do
+			local other = parseKey(equipped[i])
+			if other and other.PetId == parsed.PetId then
+				table.remove(equipped, i)
+				finishEquipChange(player)
+				return true
+			end
+		end
+	end
 	return false, "That pet is not equipped"
+end
+
+-- Extra: re-validates the equipped list against what the player owns now (FusionService / DevService call it after
+-- removing copies), republishes the attributes and perks. Returns true when the list changed.
+function PetService.Refresh(player)
+	if not isLivePlayer(player) then
+		return false
+	end
+	local profile = DataService.GetProfile(player)
+	if not profile then
+		return false
+	end
+	local changed = validateEquipped(profile)
+	refreshPlayer(player, false)
+	if changed then
+		DataService.MarkDirty(player)
+		DataService.Sync(player)
+	end
+	return changed
 end
 
 ----------------------------------------------------------------------
@@ -391,6 +543,74 @@ local function announcePull(player, def)
 	end)
 end
 
+-- Copies of a pet in any form (Normal + tier copies): IsNew keeps meaning "first time owned".
+local function ownedAnyForm(profile, petId)
+	local n = profile.Pets[petId] or 0
+	local entry = type(profile.Tiers) == "table" and profile.Tiers[petId]
+	if type(entry) == "table" then
+		for _, count in pairs(entry) do
+			if type(count) == "number" and count > 0 then
+				n = n + count
+			end
+		end
+	end
+	return n
+end
+
+-- The roll every way of paying shares (Cloud Tokens today; a gem-priced roulette plugs its own `charge` in here).
+-- Roll first (pure), then check the stack cap, then charge() -> ok, reason (must not yield): a capped pull costs
+-- nothing, which is the same outcome as "charge, refund, fail". Nothing between the charge and the grant yields, so
+-- check + charge + grant is atomic. Grants ONE Normal copy (key = petId). `roll` (optional) replaces
+-- PetCatalog.RollPet(rouletteId, rng) for roulettes the catalog does not list. Returns ok, result|reason.
+local function rollAndGrant(player, profile, rouletteId, charge, roll)
+	local seed = (os.time() + player.UserId + profile.Stats.Spins + math.floor(os.clock() * 1000)) % 2147483647
+	local rolledOk, petId = pcall(roll or PetCatalog.RollPet, rouletteId, Util.NewRng(seed))
+	if not rolledOk or type(petId) ~= "string" then
+		return false, "The roulette jammed, try again"
+	end
+	local def = PetCatalog.Get(petId)
+	if not def then
+		return false, "The roulette jammed, try again"
+	end
+	local owned = profile.Pets[petId] or 0
+	if owned >= Config.Pets.MaxPerStack then
+		return false, "You already own the maximum of " .. def.Name
+	end
+	local everOwned = ownedAnyForm(profile, petId)
+	local charged, reason = charge()
+	if not charged then
+		return false, reason or "Not enough cloud tokens"
+	end
+
+	-- Nothing below yields, so the check + charge + grant is atomic.
+	local firstPetEver = totalPets(profile) == 0
+	profile.Pets[petId] = owned + 1
+	profile.Stats.Spins = profile.Stats.Spins + 1
+	if firstPetEver and #profile.Equipped < Config.Pets.MaxEquipped then
+		table.insert(profile.Equipped, petId)
+	end
+	local newDiscovery = markDiscovered(player, petId) -- before the Sync, so the snapshot shows it in the Index
+	DataService.MarkDirty(player)
+	refreshPlayer(player, false)
+	DataService.Sync(player)
+
+	local result = {
+		Ok = true,
+		RouletteId = rouletteId,
+		PetId = petId,
+		Key = petId, -- the copy's key (a roulette always grants a Normal copy)
+		IsNew = everOwned == 0,
+		NewDiscovery = newDiscovery,
+		Count = owned + 1,
+		Tokens = DataService.GetTokens(player),
+		Strip = buildStrip(rouletteId, petId, seed + 7919),
+	}
+	fireClient("RouletteResult", player, result)
+	announcePull(player, def)
+	PetService.Rolled:Fire(player, petId)
+	return true, result
+end
+
 function PetService.BuyRoulette(player, rouletteId)
 	if not isLivePlayer(player) then
 		return false, "Player unavailable"
@@ -416,52 +636,12 @@ function PetService.BuyRoulette(player, rouletteId)
 	if DataService.GetTokens(player) < price then
 		return false, "Not enough cloud tokens"
 	end
-
-	-- Roll first (pure), then check the stack cap, then charge: a capped pull costs nothing,
-	-- which is the same outcome as "charge, refund, fail".
-	local seed = (os.time() + player.UserId + profile.Stats.Spins + math.floor(os.clock() * 1000)) % 2147483647
-	local rolledOk, petId = pcall(PetCatalog.RollPet, rouletteId, Util.NewRng(seed))
-	if not rolledOk or type(petId) ~= "string" then
-		return false, "The roulette jammed, try again"
-	end
-	local def = PetCatalog.Get(petId)
-	if not def then
-		return false, "The roulette jammed, try again"
-	end
-	local owned = profile.Pets[petId] or 0
-	if owned >= Config.Pets.MaxPerStack then
-		return false, "You already own the maximum of " .. def.Name
-	end
-	if not DataService.SpendTokens(player, price) then
+	return rollAndGrant(player, profile, rouletteId, function()
+		if DataService.SpendTokens(player, price) then
+			return true
+		end
 		return false, "Not enough cloud tokens"
-	end
-
-	-- Nothing below yields, so the check + charge + grant is atomic.
-	local firstPetEver = totalPets(profile) == 0
-	profile.Pets[petId] = owned + 1
-	profile.Stats.Spins = profile.Stats.Spins + 1
-	if firstPetEver and #profile.Equipped < Config.Pets.MaxEquipped then
-		table.insert(profile.Equipped, petId)
-	end
-	local newDiscovery = markDiscovered(player, petId) -- before the Sync, so the snapshot shows it in the Index
-	DataService.MarkDirty(player)
-	refreshPlayer(player, false)
-	DataService.Sync(player)
-
-	local result = {
-		Ok = true,
-		RouletteId = rouletteId,
-		PetId = petId,
-		IsNew = owned == 0,
-		NewDiscovery = newDiscovery,
-		Count = owned + 1,
-		Tokens = DataService.GetTokens(player),
-		Strip = buildStrip(rouletteId, petId, seed + 7919),
-	}
-	fireClient("RouletteResult", player, result)
-	announcePull(player, def)
-	PetService.Rolled:Fire(player, petId)
-	return true, result
+	end)
 end
 
 ----------------------------------------------------------------------
