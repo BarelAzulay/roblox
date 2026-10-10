@@ -81,6 +81,11 @@ or the VS Code "Rojo" extension are the easy ways to get it).
   Studio also turn on Game Settings -> Security -> **Enable Studio Access to API Services**. Without these the
   game still runs, it just forgets everything when you stop. Saves happen on leave, every 90 s and at server
   shutdown (older v1 and v2 saves are migrated automatically).
+- **After publishing an update, restart the live servers.** Once the game is published and people play it, every
+  time you publish a new version open the Creator Hub -> your experience -> **Servers** and choose **Shut Down All
+  Servers**. Old servers still running the previous version do not
+  know the new save fields and could overwrite them (for example replaying the tutorial rewards). Players simply
+  rejoin into the new version.
 - Leave *StreamingEnabled* off. Everything else (sky, lighting, gravity, the village) is created by the scripts,
   so an empty baseplate is all you need. To test parties use Test -> Clients and Servers with 2-4 players.
 - **The Stormfang artwork** (Storm Altar poster, Stormfang's Pet Index banner) is the image id in
