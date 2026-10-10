@@ -553,16 +553,16 @@ local EYE_MASKS = {
 	-- Stormfang's fierce slanted eyes (the left eye uses the mirror image): a dark brow line slanting down to the
 	-- muzzle, a glowing blue iris with a bright core and a white glint, a violet rim along the lower edge
 	Fierce = {
-		"L L L . . .",
-		"R I I L L .",
-		"R I S I I L",
-		". R I G I I",
-		". . R R R .",
+		"L L L . .",
+		"R S I L L",
+		"R I G I I",
+		". R I I I",
+		". . R R .",
 	},
 	FierceLow = {
-		"L L .",
-		"I S L",
-		". I I",
+		"L L",
+		"I L",
+		"I I",
 	},
 	Owl = {
 		". R R R .",
@@ -1377,19 +1377,16 @@ end
 -- Screen-space masks pressed onto the front surface (gems): B dark bezel, R glass rim, G gem, C bright core.
 local STORM_MASKS = {
 	Brow = {
-		". . . B . . .",
-		". . B R B . .",
-		". B R G R B .",
-		"B R G C G R B",
-		". R G C G R .",
-		". B R G R B .",
-		". . B R B . .",
-		". . . B . . .",
+		". . R . .",
+		". B G B .",
+		"B G C G B",
+		"B G C G B",
+		". B G B .",
+		". . R . .",
 	},
 	BrowLow = {
-		". R .",
-		"R C R",
-		". G .",
+		"C",
+		"G",
 	},
 	Chest = {
 		". . B . .",
@@ -1402,9 +1399,7 @@ local STORM_MASKS = {
 		"C",
 	},
 	Shoulder = {
-		". G .",
-		"G C G",
-		". G .",
+		"C",
 	},
 }
 -- mask character -> { palette key, voxels it stands out of the surface }
@@ -1470,50 +1465,54 @@ SPECIES.Stormfang = function(ctx)
 	local look = ctx.Look
 	local PAINT_ARMOUR = { Op = "Paint", OnlyKeys = { Fur = true, Plate = true } }
 
-	-------------------------------------------------- head: a wide wedge with a short muzzle
-	rbox(g, "Fur", { 0, 6.4, -1 }, { 15, 9, 11 }, 2)
-	rbox(g, "Mask", { 0, 2.8, -2.6 }, { 15, 5.6, 8.6 }, 2)
-	ctx.HeadC, ctx.HeadR, ctx.HeadTop = { 0, 6.4, -1 }, { 7.5, 4.5, 5.5 }, 10.9
-	-- white around the eyes, the muzzle with its grey bridge and dark nose
-	pair(function(s)
-		box(g, "Mask", { s * 4.6, 6.6, -6.4 }, { 5, 3, 2 }, { Op = "Paint", OnlyKeys = "Fur" })
-	end)
-	rbox(g, "Mask", { 0, 3, -7.6 }, { 6.4, 4.4, 4 }, 1)
-	box(g, "Fur", { 0, 5.6, -7.4 }, { 3, 1.6, 4.4 })
-	box(g, "Nose", { 0, 4.6, -9.8 }, { 3, 1.4, 1 })
+	-------------------------------------------------- head: a wedge, narrow forehead, flared cheeks, pointed muzzle
+	rbox(g, "Fur", { 0, 6.8, -0.6 }, { 13, 8.4, 10.6 }, 1.6)
+	rbox(g, "Fur", { 0, 3.4, -2.4 }, { 15, 5.6, 8.4 }, 1.6)
+	ctx.HeadC, ctx.HeadR, ctx.HeadTop = { 0, 6.8, -0.6 }, { 6.5, 4.2, 5.3 }, 11
+	-- the muzzle: a grey bridge with a small dark nose, a white chin below
+	rbox(g, "Fur", { 0, 3.8, -8 }, { 5.4, 3.6, 4.4 }, 1)
+	rbox(g, "Mask", { 0, 1.6, -7 }, { 6.2, 2.6, 4.4 }, 1)
+	box(g, "Nose", { 0, 5, -10.4 }, { 3, 1, 1 })
 	if H then
-		face(ctx, "Mouth", { { 0, 3 }, { 0, 2 }, { 1, 1.6 }, { -1, 1.6 } })
+		box(g, "Nose", { 0, 4, -10.4 }, { 1, 1, 1 })
 	end
 	-- the V-shaped forehead plate that holds the gem, stepping down to the bridge
-	stair(g, "Plate", { 0, 11.6, -6.6 }, { 0, 6, -7.4 }, { 7.2, 1.2, 3 }, { 1.2, 1.2, 3 }, 6, { Op = "Paint", OnlyKeys = { Fur = true, Mask = true } })
+	stair(g, "Plate", { 0, 11.4, -6.4 }, { 0, 6, -7.4 }, { 7.2, 2.2, 3 }, { 1.2, 2.2, 3 }, 3, { Op = "Paint", OnlyKeys = "Fur" })
 	pair(function(s)
-		-- white brows sweeping up and out to the ear roots
+		-- the white mask: big brows sweeping up and out to the ear roots, the cheeks under the eyes flaring into
+		-- a jagged ruff
+		stair(g, "Mask", { s * 3.4, 10, -5.8 }, { s * 7, 12.2, -3.6 }, { 3.6, 2.4, 2.6 }, { 2.2, 1.8, 2.2 }, 2)
+		box(g, "Mask", { s * 5.6, 3.6, -5.6 }, { 4.2, 3.4, 3.4 })
+		stair(g, "Mask", { s * 7, 5.6, -3 }, { s * 11.4, 7, -0.6 }, { 2.8, 3, 4.4 }, { 1.6, 1.2, 1.4 }, 2)
 		if H then
-			stair(g, "Mask", { s * 3.6, 10.2, -5.6 }, { s * 7.6, 12.4, -3.4 }, { 3, 1.8, 2 }, { 1.6, 1.4, 1.6 }, 2)
-		end
-		-- the cheek ruff: jagged white tufts flaring out and down
-		stair(g, "Mask", { s * 7.2, 4.6, -2.6 }, { s * 11, 6, -0.4 }, { 2.4, 2.6, 3.4 }, { 1.6, 1.2, 1.4 }, 2)
-		stair(g, "Mask", { s * 7.4, 2, -2.4 }, { s * 11.4, 1, 0 }, { 2.4, 2.6, 3.4 }, { 1.6, 1.2, 1.4 }, 2)
-		if H then
-			stair(g, "Mask", { s * 6, 0.2, -3 }, { s * 9, -1.8, -1 }, { 2.2, 2, 3 }, { 1.4, 1.2, 1.4 }, 2)
+			stair(g, "Mask", { s * 7.4, 2.6, -2.8 }, { s * 11.8, 1.6, 0 }, { 2.8, 3, 4.4 }, { 1.6, 1.2, 1.4 }, 2)
+			stair(g, "Mask", { s * 6.2, 0.6, -3 }, { s * 9.4, -1.6, -1.2 }, { 2.4, 2, 3 }, { 1.4, 1.2, 1.4 }, 2)
+		else
+			stair(g, "Mask", { s * 7.4, 2.4, -2.8 }, { s * 11.4, 0.4, -0.4 }, { 2.8, 3.4, 4.4 }, { 2.4, 2.4, 2.4 }, 1)
 		end
 	end)
 
-	-------------------------------------------------- crest: stepped blades sweeping back over the head
-	stormSpike(g, { 0, 10.8, -5 }, { 0, 15.4, 2.6 }, 3, 2.2)
+	-------------------------------------------------- crest: wide stepped blades fanning back over the head
+	stormSpike(g, { 0, 10.6, -4.6 }, { 0, 16.2, 2.4 }, 4, 2.6)
 	if H then
 		pair(function(s)
-			stormSpike(g, { s * 3, 10.6, -4 }, { s * 4.6, 13.8, 3 }, 2.4, 2)
+			stormSpike(g, { s * 2.6, 10.8, -3.6 }, { s * 6.4, 15, 2.6 }, 3, 2.2)
 		end)
 	end
 
 	-------------------------------------------------- tall stepped lynx ears: dark inside, neon violet + blue stripes
 	pair(function(s)
-		stair(g, "Fur", { s * 4.6, 10.2, 0.4 }, { s * 7.4, 19.2, 1.6 }, { 6, 2.2, 4.4 }, { 1.4, 2.2, 1.4 }, 5)
-		-- the front face: dark, a violet stripe up the outer side and a blue one up the inner side
-		stair(g, "Base", { s * 4.8, 10.8, -1.2 }, { s * 7.2, 17.4, 1.2 }, { 3.6, 2.2, 1.6 }, { 1.2, 2.2, 1.6 }, 4, { Op = "Paint", OnlyKeys = "Fur" })
-		stair(g, "NeonViolet", { s * 6.4, 11, -1.2 }, { s * 7.4, 17, 1 }, { 1.2, 2.2, 1.6 }, { 1.2, 2.2, 1.6 }, 3, { Op = "Paint", OnlyKeys = "Base" })
-		stair(g, "NeonBlue", { s * 3.6, 11.4, -1.2 }, { s * 6.4, 16.2, 1 }, { 1.2, 2.2, 1.6 }, { 1.2, 2.2, 1.6 }, 3, { Op = "Paint", OnlyKeys = "Base" })
+		stair(g, "Fur", { s * 4.4, 10.2, 0.2 }, { s * 8.2, 18.4, 1.6 }, { 7, 2.6, 4.6 }, { 1.4, 2.6, 1.4 }, 4)
+		-- the front face: dark, a violet stripe up the outer side and a blue one up the inner side (Low detail
+		-- paints the two stripes straight onto the ear)
+		local inner = "Base"
+		if H then
+			stair(g, "Base", { s * 4.6, 11, -1.4 }, { s * 7.6, 16.8, 1.2 }, { 4.6, 3.4, 1.6 }, { 1.2, 3.4, 1.6 }, 2, { Op = "Paint", OnlyKeys = "Fur" })
+		else
+			inner = "Fur"
+		end
+		stair(g, "NeonViolet", { s * 7, 11.6, -1.4 }, { s * 8.2, 16.4, 1 }, { 1.2, 3.4, 1.6 }, { 1.2, 3.4, 1.6 }, 2, { Op = "Paint", OnlyKeys = inner })
+		stair(g, "NeonBlue", { s * 3.6, 11.6, -1.4 }, { s * 6.4, 15.8, 1 }, { 1.2, 3.4, 1.6 }, { 1.2, 3.4, 1.6 }, 2, { Op = "Paint", OnlyKeys = inner })
 	end)
 
 	-------------------------------------------------- body: crouched with high shoulders, armoured legs, huge paws
@@ -1521,21 +1520,24 @@ SPECIES.Stormfang = function(ctx)
 	rbox(g, "Fur", { 0, -2.6, -2.2 }, { 8, 6, 5 }, 1.5)
 	-- white neck fluff under the chin, the chest plate below it
 	stair(g, "Mask", { 0, 0.4, -4.2 }, { 0, -2.6, -5.2 }, { 6, 2, 2.4 }, { 2, 1.6, 1.6 }, 2)
-	rbox(g, "Plate", { 0, -4.6, -4.4 }, { 5, 3.6, 1.6 }, 0.8)
+	if H then
+		box(g, "Plate", { 0, -4.6, -4.6 }, { 5, 3.6, 1.6 })
+	end
 	pair(function(s)
 		-- haunches and hind feet
-		rbox(g, "Fur", { s * 3.8, -8, 3.8 }, { 4.4, 5, 6 }, 1.5)
-		rbox(g, "Plate", { s * 4.2, -10.4, 0.6 }, { 3.4, 1.6, 4 }, 0.6)
+		box(g, "Fur", { s * 3.8, -8, 3.8 }, { 4.4, 5, 6 })
+		if H then
+			box(g, "Plate", { s * 4.2, -10.4, 0.6 }, { 3.4, 1.6, 4 })
+		end
 		-- front legs: a dark under-suit with two armour rings
 		box(g, "Base", { s * 4, -6, -4.2 }, { 3.4, 6, 3.4 })
-		rbox(g, "Fur", { s * 4, -4.2, -3.6 }, { 4.2, 3.2, 4.2 }, 1)
-		rbox(g, "Plate", { s * 4, -7.6, -4.6 }, { 4, 2.4, 4 }, 1)
-		-- big armoured paws: toe plates split by dark grooves, a glowing claw at the tip of each toe
+		if H then
+			rbox(g, "Fur", { s * 4, -4.2, -3.6 }, { 4.2, 3.2, 4.2 }, 1)
+			rbox(g, "Plate", { s * 4, -7.6, -4.6 }, { 4, 2.4, 4 }, 1)
+		end
+		-- big armoured paws with a glowing claw at the tip of each toe
 		rbox(g, "Plate", { s * 4, -9.9, -6.4 }, { 7, 2.8, 5.6 }, 1)
 		if H then
-			for _, o in ipairs({ -2, 0, 2 }) do
-				box(g, "Base", { s * (4 + o), -9.4, -8.4 }, { 1, 2, 1.6 }, { Op = "Paint", OnlyKeys = "Plate" })
-			end
 			for _, o in ipairs({ -3, -1, 1, 3 }) do
 				box(g, "Claw", { s * (4 + o), -10.6, -9.8 }, { 1, 2, 1 })
 			end
@@ -1545,40 +1547,39 @@ SPECIES.Stormfang = function(ctx)
 			end
 		end
 		-- layered shoulder plates (pauldrons): a light bevelled top edge, a neon seam, a stepped spike
-		rbox(g, "Fur", { s * 7.2, -3.2, 0.6 }, { 4.4, 3.2, 6.6 }, 1)
-		rbox(g, "Plate", { s * 6.6, -0.6, -0.6 }, { 5, 3, 7 }, 1)
-		box(g, "Bevel", { s * 6.6, 0.8, -0.6 }, { 5.2, 1, 7.4 }, { Op = "Paint", OnlyKeys = "Plate" })
-		box(g, "NeonBlue", { s * 7.2, -2.2, -0.4 }, { 5, 1, 7.4 }, PAINT_ARMOUR)
-		stormSpike(g, { s * 6.8, 1.4, 0 }, { s * 9.4, 3.8, 5.6 }, 2, 2)
+		if H then
+			rbox(g, "Fur", { s * 7.4, -2.2, 0.6 }, { 4.6, 3, 6.8 }, 1)
+		end
+		rbox(g, "Plate", { s * 7, 0.4, -0.4 }, { 5.4, 3, 7.4 }, 1)
+		box(g, "NeonBlue", { s * 7.4, H and -1.2 or -0.8, -0.2 }, { 5.2, H and 1 or 2.1, 7.8 }, PAINT_ARMOUR)
+		if H then
+			box(g, "Bevel", { s * 7, 1.8, -0.4 }, { 5.6, 1, 7.8 }, { Op = "Paint", OnlyKeys = "Plate" })
+			stormSpike(g, { s * 7.2, 2.4, 0.4 }, { s * 9.8, 4.6, 5.8 }, 2, 2)
+		end
 	end)
-	-- spine ridge
-	stormSpike(g, { 0, -0.6, 4.6 }, { 0, 2.6, 9.4 }, 2, 2)
 
 	-------------------------------------------------- face + gems
-	addEyes(ctx, 7, 9, "Fierce", true)
+	addEyes(ctx, 6, 9, "Fierce", true)
 	if H then
-		stormMask(ctx, STORM_MASKS.Brow, 0, 11.4, { Plate = true, Fur = true })
+		stormMask(ctx, STORM_MASKS.Brow, 0, 11, { Plate = true, Fur = true })
 		stormMask(ctx, STORM_MASKS.Chest, 0, -2.6, { Plate = true })
 		pair(function(s)
-			stormMask(ctx, STORM_MASKS.Shoulder, s * 6.6, 0.4, { Plate = true, Bevel = true })
+			stormMask(ctx, STORM_MASKS.Shoulder, s * 7, 0.4, { Plate = true, Bevel = true })
 		end)
 	else
 		stormMask(ctx, STORM_MASKS.BrowLow, 0, 10.4, { Plate = true, Fur = true })
-		stormMask(ctx, STORM_MASKS.ChestLow, 0, -4, { Plate = true, Fur = true })
 	end
 
-	-------------------------------------------------- fluffy armoured tail: plates, neon bands, a white tuft
+	-------------------------------------------------- fluffy armoured tail: plates, a neon band, a white tuft
 	local t = newTail(ctx, { 0, -7.4, 7.2 }, 0.26)
 	rbox(t, "Fur", { 0, 0.6, 2 }, { 3.4, 3.2, 4.4 }, 1)
 	stair(t, "Fur", { 0, 2.4, 4 }, { 0, 8.4, 5.8 }, { 3.4, 3, 3.4 }, { 4.2, 3, 3.6 }, 3)
 	rbox(t, "Mask", { 0, 11, 5.4 }, { 4.8, 4.4, 4.6 }, 1.4)
 	if H then
 		stair(t, "Mask", { 0, 12.8, 5 }, { 0, 14.6, 3.4 }, { 2.4, 1.6, 2 }, { 1.2, 1.2, 1.2 }, 2)
-		stormSpike(t, { 0, 4.6, 6.6 }, { 0, 6.6, 9.6 }, 1.6, 1.6)
+		box(t, "Plate", { 0, 5.6, 7.6 }, { 6, 6, 2 }, { Op = "Paint", OnlyKeys = "Fur" })
 	end
-	for _, y in ipairs(H and { 3.6, 7 } or { 5.4 }) do
-		box(t, "NeonBlue", { 0, y, 5 }, { 8, H and 1 or 2.1, 12 }, { Op = "Paint", OnlyKeys = "Fur" })
-	end
+	box(t, "NeonBlue", { 0, H and 3.6 or 5.4, 5 }, { 8, H and 1 or 2.1, 12 }, { Op = "Paint", OnlyKeys = "Fur" })
 
 	-------------------------------------------------- palette, faithful to the art (the charcoal comes from the Look)
 	local P = look.Primary
@@ -1607,8 +1608,8 @@ SPECIES.Stormfang = function(ctx)
 	pal.EyeRing = { Color = rgb(122, 60, 255), Material = NEON }
 	pal.EyeShine = rgb(252, 252, 255)
 	ctx.Pulse = { NeonViolet = true, NeonBlue = true, Claw = true, Gem = true, GemCore = true }
-	-- the armour greys are painted as layers (no automatic shading: crisp plates, few parts); the fur is shaded
-	for _, k in ipairs({ "Base", "Fur", "Plate", "Bevel", "NeonViolet", "NeonBlue", "Claw", "Gem", "GemCore", "GemRim" }) do
+	-- every colour is painted as a layer (no automatic shading: crisp plates and tufts, few parts)
+	for _, k in ipairs({ "Base", "Fur", "Plate", "Bevel", "Mask", "NeonViolet", "NeonBlue", "Claw", "Gem", "GemCore", "GemRim" }) do
 		ctx.NoShade[k] = true
 	end
 	-- the LOD may fold the fur's shading but never recolours a plate layer
@@ -1776,27 +1777,30 @@ WINGS.StormCloud = function(ctx, w)
 	ctx.WingHinge = { 0.5, floorY + 1, midZ }
 	-- the LEFT half in hinge-local design voxels: a flat rounded base, then puffs heaped around the rim (low in front
 	-- so the paws and claws hang over the edge, high at the back and the sides)
-	rbox(w, "Wing", { -6, -1.6, 0.6 }, { 13, 3.6, 15 }, 1.6)
+	rbox(w, "Wing", { -5.6, -1.8, 0.6 }, { 12.6, 3.6, 15 }, 1.6)
 	local puffs = {
-		{ -11.2, 0, -0.6, 6, 5, 6.8 },
-		{ -9.2, 0.8, 4.6, 6.4, 5.4, 6 },
-		{ -3.6, 1.4, 6.4, 7, 5.8, 5 },
-		{ -8, -0.6, -5.4, 5.4, 4, 5 },
+		{ -10.8, 0, 0.6, 6, 5.2, 9 },
+		{ -4.4, 1.2, 6, 8, 5.6, 5 },
+		{ -7.8, -0.6, -5.4, 5, 3.6, 4.6 },
 	}
-	for _, p in ipairs(puffs) do
-		rbox(w, "Wing", { p[1], p[2], p[3] }, { p[4], p[5], p[6] }, 1.8)
+	for i, p in ipairs(puffs) do
+		if H or i < 3 then
+			rbox(w, "Wing", { p[1], p[2], p[3] }, { p[4], p[5], p[6] }, 2)
+		end
 	end
-	-- lighter tops: the upper layers of the heap, the brightest caps on the high puffs, a few white puffs
-	paint(w, "CloudMid", { Kind = "Box", Center = { -8, 4.6, 0 }, Size = { 30, 8, 30 } }, "Wing")
-	paint(w, "CloudTop", { Kind = "Box", Center = { -8, 6.6, 0 }, Size = { 30, 8, 30 } }, "CloudMid")
-	ell(w, "CloudLight", { -3.4, 4.2, 6.8 }, { 1.7, 1.3, 1.6 })
+	-- lighter tops: the upper layers of the heap, small brighter caps on the high puffs, a few white puffs
+	paint(w, "CloudMid", { Kind = "Box", Center = { -8, 5.6, 0 }, Size = { 30, 8, 30 } }, "Wing")
 	if H then
-		ell(w, "CloudLight", { -10.6, 3.2, 3.8 }, { 1.5, 1.2, 1.5 })
+		paint(w, "CloudTop", { Kind = "Box", Center = { -6.2, 4.2, 6.2 }, Size = { 4, 2, 3 } }, "CloudMid")
+		paint(w, "CloudTop", { Kind = "Box", Center = { -11.6, 3.2, 1.6 }, Size = { 3, 2, 4 } }, "CloudMid")
+	end
+	box(w, "CloudLight", { -3.6, 4.6, 6.6 }, { 2.2, 1.2, 2 })
+	if H then
+		box(w, "CloudLight", { -10.2, 3.4, -1.4 }, { 2, 1.2, 2 })
 	end
 	local navy = ctx.Look.WingColor
 	ctx.Pal.Wing = navy -- ~#2e3a66
-	ctx.Pal.Wing_Light = mix(navy, rgb(107, 119, 168), 0.45) -- ~#44507f
-	ctx.Pal.Wing_Dark = darken(navy, 0.25)
+	ctx.Pal.CloudMid = mix(navy, rgb(107, 119, 168), 0.4) -- ~#44507f
 	ctx.Pal.CloudTop = mix(navy, rgb(107, 119, 168), 0.92) -- ~#6b77a8
 	ctx.Pal.CloudLight = rgb(236, 240, 250)
 	ctx.WingTilt = 0

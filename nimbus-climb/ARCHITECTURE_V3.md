@@ -326,7 +326,7 @@ team presets (`Teams` in the profile). Team synergy shown live in the Team scree
 +10% Power for them, 3 -> +20%, 4 -> +30%; 3+ different elements -> "Balanced" +10% Health for the team. Battles use
 `ElementMultiplier` on every hit (dual-element attackers use their better element against the target).
 
-**Fusion Machine (Phase 2, needs the per-copy pet data):** a crafted voxel machine built on each player's home plot from its buy pad (`FusionMachine`:
+**Fusion Machine (Phase 2, needs the per-copy pet data; unlocks at Prestige 1):** a crafted voxel machine built on each player's home plot from its buy pad (`FusionMachine`:
 two input pods, a swirling cloud chamber, an output pod; fusion animation on the client). Two tabs:
 * **UPGRADE:** 3 copies of the same pet and tier -> 1 of the next tier: Normal -> **Golden** (x1.5 stats/perk bonus,
   gold shimmer material) -> **Rainbow** (x2.5, animated rainbow shimmer). Costs Cloud Tokens by rarity.
@@ -374,19 +374,21 @@ real tycoon. Upgrades use the same pad, which stays in front of the built statio
    (`PetCatalog.GetStats(petId, level)`): Income for Economy pets, Power/Health/Speed for Combat pets.
 4. **Gym:** training slots for Combat pets; placed pets gain XP over time (more slots and faster with Gym levels).
 5. **Fusion Machine:** section 11 (Upgrade: 3 copies -> Golden -> Rainbow; Mix: 2 pets -> hybrid), built on the plot
-   from its pad; its window opens with E at the machine.
+   from its pad; its window opens with E at the machine. **Unlocks only after Prestige 1** (the player's rule): before
+   that its pad is a locked silhouette with "Unlocks at Prestige 1".
 6. **Vault:** raises the Collector's cash cap and pays offline earnings (a % of the hourly income for up to N hours,
    shown in a "While you were away" toast on rejoin).
-7. **House:** the home itself, cottage -> villa -> sky castle tiers; cosmetic, but each tier raises the max level of
-   the other stations and is needed for Prestige.
+7. **House:** the home itself: **Cottage -> Villa -> Manor -> Sky Castle**. The player asked that the house upgrade
+   only every 10 Home Levels so the castle is hard to get: Villa needs Home Level 10, Manor 20, Sky Castle 30 (the
+   House pad shows "Reach Home Level N" until then). Each tier raises the max level of the other stations.
 8. **Decor pads:** lamps, fences, flower beds, fountain, banners, a pet podium (the v2 showcase), cheap cosmetics that
    also add to Home Level.
 9. **Arena Gate:** visible pad that unlocks pet battles (Phase 3); until then its sign says "Coming soon".
 
-**Home Level and Prestige.** Every purchase or upgrade adds to Home Level. At Home Level 30 with the top House tier,
+**Home Level and Prestige.** Every purchase or upgrade adds to Home Level. At Home Level 40 with the Sky Castle,
 the Prestige pad appears: prestiging resets Cash and station levels (pets, food, decor choices kept) for +1 Prestige
 star: a permanent x1.25 income multiplier per star, a Gems reward, a prestige badge on the nameplate, and at
-Prestige 1 the 4th battle-team slot (section 11).
+Prestige 1 the Fusion Machine pad and the 4th battle-team slot (section 11).
 
 **Economy.** Cash is the tycoon currency (HUD currency stack already shows it from the Cash attribute); Cloud Tokens
 stay the obby/battle currency. Prices and incomes come from `Config.Tycoon` tables produced by an economy simulation
@@ -407,9 +409,49 @@ toasts for purchases, level-ups and offline earnings. **Tutorial:** after the Ph
 gate), buy your first Cloud Press, collect your cash, build the Kitchen and feed a pet. **NPC tips** for the Kitchen
 (Granny Owl), Gym (Coach Corgi), Fusion and Prestige.
 
-## Phase 3 outline (pet battles) — design only
-Arena island in the lobby. PvE ladder (10 tiers of NPC teams) and PvP challenges between players in the arena.
-Teams = 3 pets (4th slot at Prestige 1), element synergy and the element chart (section 11). Server-simulated auto-battle (10 Hz ticks: Speed -> attack interval, Power ->
-damage, Health -> HP); a special meter charges and the owner presses SPECIAL to fire the pet's `Special` (Kind decides
-the effect). Client plays animations: lunges, hit flashes, damage numbers, special effects per Kind. Pet food (bought
-with Cash) feeds pets -> XP -> level -> `PetCatalog.GetStats(petId, level)`. Rewards: Cloud Tokens, trophies, rare Gems.
+## Phase 3: Pet battles (detailed by the player during Phase 1; build after Phase 2)
+The player's words: "create an Arena in the map for players to fight in it; at the arena there will be a special
+events system (like in the chicken fight game) like a boss to defeat (everyone gets in this fight for the reward);
+a button on the screen for controlling the pet (attack, retreat; works only in an arena or pvp); and a portal for
+fighting NPC pets by levels so players can go there and fight for tokens."
+
+**Battle Arena (lobby landmark, world).** A big detailed-voxel colosseum on its own cloud island linked to the plaza by
+a bridge: a central battle floor (the boss stage), two or more PvP duel rings, spectator stands, an event board
+(next event + countdown), a trophy leaderboard, and the Arena Gate pads of the homes point here. Battle zones are
+tagged areas: the battle controls only work inside them (arena floor, duel rings, trial pockets).
+
+**Teams.** Section 11: 3 pets (4th slot at Prestige 1), up to 3 saved presets, element synergy. The battle team
+follows the owner into a battle zone and fights there; outside battle zones pets just follow as usual.
+
+**Real-time battles, server-authoritative.** Pets move on the battle floor (10 Hz server sim, client interpolation):
+move speed from Speed, melee or ranged by species, damage = Power x level factor x ElementMultiplier x small
+variance, HP from Health x level, specials by `Special.Kind` (Blast = area, Heal, Shield, Storm = damage over time,
+Pounce = dash strike, Freeze = stun, Beam = line). Client effects: lunges, hit flashes, damage numbers (never in the
+screen centre), voxel particle bursts per special and element, knock-out poof; a downed pet returns after the fight.
+
+**Battle controls (on screen, ONLY inside battle zones):** a compact battle HUD at the bottom/side (never centred):
+each team pet's HP bar, element badge and special meter; buttons **ATTACK** (pets engage; tap/click an enemy to focus
+it), **RETREAT** (pets break off and run back to the owner, take reduced damage and slowly regain HP while retreating;
+short cooldown before attacking again) and one **SPECIAL** button per pet (lights up when its meter is full).
+Keyboard F = Attack, R = Retreat, 1-4 = specials; gamepad mapped; touch buttons sized for phones.
+
+**PvE: the Trial Portal (lobby).** A portal (named `Portal_Trials`, styled like the difficulty portals) opens a level
+list of NPC pet teams: Level 1..30, each harder (higher levels, rarities, element mixes, a mini-boss every 5
+levels). Beating level N unlocks N+1; rewards Cloud Tokens (big first-clear bonus, smaller repeat rewards) and pet
+XP. Fights run in private battle pockets in the sky (instanced like obby matches) so many players fight at once.
+
+**PvP.** In the arena: walk onto a duel ring and challenge another player (request -> accept), or join the quick
+queue. Team vs team; rewards trophies (leaderboard) and tokens; nobody ever loses pets.
+
+**Special events system (arena).** An event scheduler (every ~20 minutes, configurable; announced 2 minutes before by
+a side toast to everyone and a countdown on the event board) runs events on the arena floor:
+* **Boss Raid** (the main event): a giant detailed-voxel boss (rotating roster, each with an element and mechanics:
+  e.g. Storm Titan, Lava Golem, Frost Wyrm, Shadow Hydra) appears; everyone in the arena can join with their team.
+  Shared boss HP scales with the number of participants; telegraphed attacks (glowing circles/lines on the floor to
+  RETREAT from), minion waves, an enrage timer. Rewards for everyone who took part, scaled by damage contribution
+  tier (Tokens, pet XP, a chance of Gems and of an exclusive event pet).
+* The scheduler supports more event types later (e.g. Double Rewards hour, King of the Ring).
+
+**Progression.** Pet XP from battles + Kitchen food + Gym; levels raise stats (`PetCatalog.GetStats`). Rewards are
+Tokens (shop, roulettes), trophies (rank/leaderboard), rare Gems.
+
