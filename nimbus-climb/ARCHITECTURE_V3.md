@@ -326,7 +326,7 @@ team presets (`Teams` in the profile). Team synergy shown live in the Team scree
 +10% Power for them, 3 -> +20%, 4 -> +30%; 3+ different elements -> "Balanced" +10% Health for the team. Battles use
 `ElementMultiplier` on every hit (dual-element attackers use their better element against the target).
 
-**Fusion Machine (Phase 2, needs the per-copy pet data):** a crafted voxel machine in the lobby (`FusionMachine`:
+**Fusion Machine (Phase 2, needs the per-copy pet data):** a crafted voxel machine built on each player's home plot from its buy pad (`FusionMachine`:
 two input pods, a swirling cloud chamber, an output pod; fusion animation on the client). Two tabs:
 * **UPGRADE:** 3 copies of the same pet and tier -> 1 of the next tier: Normal -> **Golden** (x1.5 stats/perk bonus,
   gold shimmer material) -> **Rainbow** (x2.5, animated rainbow shimmer). Costs Cloud Tokens by rarity.
@@ -340,14 +340,72 @@ two input pods, a swirling cloud chamber, an output pod; fusion animation on the
   ProfileSync like every other field; fusion is server-authoritative, validated and rate-limited, never consumes
   equipped pets without unequipping them first, and is atomic (inputs removed and output added in one step).
 
-## Phase 2 outline (tycoon) — design only, do not build yet
-Home on each plot: rooms **Kitchen** (makes pet food + cash), **Garden** (economy pets work here: cash/s =
-sum(Income * RarityScale * level factor)), **Gym** (combat pets gain XP over time), **Vault** (cash cap, offline
-earnings), **Arena Gate** (unlocks battles). Rooms have levels bought with Cash via plot buttons and a Home window.
-Prestige at Home level 25: reset Cash and room levels for a permanent income multiplier and Gems. Gems: developer
+## Phase 2: Tycoon homes, the main mode (detailed by the player during Phase 1; build after the Stormfang round)
+The player's words: "make sure the player's spot has the buttons and system working (you press E at the entrance to
+obtain it) and you have there a spot purchasable for every tool or objective such as the kitchen (feeding the pet for
+xp), machines, gym, fusion machine and everything so the tycoon system will work". So every home plot becomes a
+classic Roblox tycoon: claim it at the gate, then build it up with buy pads.
+
+**Claiming (replaces v2 auto-assignment in SpotService).** Each free plot's gate shows a ProximityPrompt "Claim Home"
+(E, ObjectText "Free home"). Pressing it claims that plot for the session (one per player; refused during a match).
+The SAVED progress is the player's home build (`Home` in the profile), not a plot number: it is rebuilt on whichever
+plot they claim. A returning player whose last plot is free gets a side toast "Welcome back! Press E at your gate";
+the tutorial arrow and the "My Spot" button lead to that gate (or the nearest free gate). Leaving releases the plot:
+the build is removed and the gate shows "Claim Home" again. The nameplate/mailbox shows the owner, Home Level and
+Prestige stars.
+
+**Buy pads (the tycoon buttons).** Every purchasable thing has a build pad on the yard: a glowing voxel pad with a
+floating sign (icon, name, price in Cash, "Lv 2 -> 3" for upgrades) and a ProximityPrompt "Buy" (E, HoldDuration
+0.25). Only the owner sees and can use their pads (prompts disabled locally for everyone else; the server checks
+ownership, price and prerequisites on every purchase). Buying deducts Cash, saves, and the structure assembles with a
+quick voxel pop-in (client-side animation); new pads unlock in a tree so the yard fills up step by step, like a
+real tycoon. Upgrades use the same pad, which stays in front of the built station.
+
+**Stations (all voxel art in the detailed style, all on the plot):**
+1. **Cloud Presses** (the money machines): up to 4 presses that puff glowing cloud blocks onto a conveyor into the
+   **Collector**. Cash piles up in the Collector (shown on its sign); the owner steps on/presses E at the Collector to
+   bank it. Each press upgrades L1-L10 (faster, bigger blocks). The first press pad is free/very cheap on claim.
+2. **Pet Garden:** slots where the owner places Economy pets (from the Pets panel or a "Place pet" prompt); each
+   placed pet makes Cash per second = Income x RarityScale x level factor x prestige multiplier, added to the
+   Collector. Slots unlock with Garden levels.
+3. **Kitchen:** cooks pet food with Cash (Snack, Meal, Feast; better recipes and faster cooking with Kitchen
+   levels); food goes to the inventory. **Feeding** (from the Pets panel "Feed" button or the feeding bowl next to the
+   kitchen): pick a pet and a food -> XP -> pet levels (`PetLevels`), which raise its stats
+   (`PetCatalog.GetStats(petId, level)`): Income for Economy pets, Power/Health/Speed for Combat pets.
+4. **Gym:** training slots for Combat pets; placed pets gain XP over time (more slots and faster with Gym levels).
+5. **Fusion Machine:** section 11 (Upgrade: 3 copies -> Golden -> Rainbow; Mix: 2 pets -> hybrid), built on the plot
+   from its pad; its window opens with E at the machine.
+6. **Vault:** raises the Collector's cash cap and pays offline earnings (a % of the hourly income for up to N hours,
+   shown in a "While you were away" toast on rejoin).
+7. **House:** the home itself, cottage -> villa -> sky castle tiers; cosmetic, but each tier raises the max level of
+   the other stations and is needed for Prestige.
+8. **Decor pads:** lamps, fences, flower beds, fountain, banners, a pet podium (the v2 showcase), cheap cosmetics that
+   also add to Home Level.
+9. **Arena Gate:** visible pad that unlocks pet battles (Phase 3); until then its sign says "Coming soon".
+
+**Home Level and Prestige.** Every purchase or upgrade adds to Home Level. At Home Level 30 with the top House tier,
+the Prestige pad appears: prestiging resets Cash and station levels (pets, food, decor choices kept) for +1 Prestige
+star: a permanent x1.25 income multiplier per star, a Gems reward, a prestige badge on the nameplate, and at
+Prestige 1 the 4th battle-team slot (section 11).
+
+**Economy.** Cash is the tycoon currency (HUD currency stack already shows it from the Cash attribute); Cloud Tokens
+stay the obby/battle currency. Prices and incomes come from `Config.Tycoon` tables produced by an economy simulation
+(targets: first purchase within 30 s of claiming, a steady new purchase every 1-3 minutes early on, first Prestige
+after about 2-3 hours of active play, later prestiges faster thanks to the multiplier; no dead ends). Gems: developer
 products (product ids in Config, placeholders until the owner creates them), idempotent ProcessReceipt; roulettes
-priced in gems too (cheap) and a gems-only Secret roulette; respect PolicyService paid-random-items restrictions and
-always show odds. The Fusion Machine (section 11) is built in this phase.
+also priced in gems (cheap) and the gems-only Secret roulette at the Storm Altar; respect PolicyService
+paid-random-items restrictions and always show odds.
+
+**Data.** `Home = {Level, Prestige, Stations = {[stationId] = level}, Garden = {slot -> petKey}, Gym = {slot -> petKey},
+CollectorCash, LastSeen}`, `Food = {[foodId] = count}`, `PetLevels`, fusion data (section 11: `Tiers`, `Hybrids`),
+all with migration + delta save + ProfileSync like every other field; server-authoritative, validated and
+rate-limited; Cash income is computed on the server on a slow tick (1 s) and banked atomically.
+
+**UI.** A Home window (menu tile "My Spot" becomes "Home": station list with levels, upgrade buttons, income per
+second, prestige progress, "Go home"), the Feed panel, the Fusion window, readable pad signs (readability rule),
+toasts for purchases, level-ups and offline earnings. **Tutorial:** after the Phase 1 steps: claim your home (E at a
+gate), buy your first Cloud Press, collect your cash, build the Kitchen and feed a pet. **NPC tips** for the Kitchen
+(Granny Owl), Gym (Coach Corgi), Fusion and Prestige.
 
 ## Phase 3 outline (pet battles) — design only
 Arena island in the lobby. PvE ladder (10 tiers of NPC teams) and PvP challenges between players in the arena.
