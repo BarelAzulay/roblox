@@ -30,6 +30,11 @@
 --   npc[:<n>]             the NPC dialog of NPC n (default 1); the NPCs are built by the real NpcService
 --   dev                   the owner-only DEV panel (NC_Dev attribute), when DevController exists
 --   toasts                four side toasts (info / good / bad / token)
+--   portal[:<Id>[:<n>[:<studs>]]]  no game HUD: the real LobbyBuilder + PortalService with n players (default 1) on
+--                         the portal pad (default Medium); its world GUIs mirrored flat into the ScreenGui
+--                         WorldMirror: the pixel billboard at its own size, the eye-level countdown face at the
+--                         size it has on this screen from <studs> away (default 36, a friend outside the lock
+--                         walls) over a sketch of the swirl, and the face's canvas at 1:1
 --
 -- Every dumped node: absolute screen position/size (top bar inset included), cumulative UIScale, ZIndex, Rotation,
 -- clipping, background colour/transparency, legacy border, UICorner radius in px, UIStrokes (colour, thickness in
@@ -1195,6 +1200,210 @@ local function probeMetrics(gui)
 end
 
 ----------------------------------------------------------------------
+-- portal: the world GUIs of one portal, built by the real LobbyBuilder + PortalService and mirrored flat into the
+-- ScreenGui WorldMirror (no game HUD). The pixel billboard is drawn at its own size (it keeps that size on
+-- screen at any distance); the eye-level countdown face (a SurfaceGui) is drawn at the size it has on this screen
+-- from `distance` studs (70 degree vertical field of view, over a sketch of the gate's swirl), then at its canvas
+-- size for the details.
+----------------------------------------------------------------------
+local FOV_HALF_TAN = math.tan(math.rad(35))
+local FRIEND_DISTANCE = 36 -- studs: a friend 4 studs outside the lock walls, default camera 12.5 studs behind
+
+local function canvasOf(gui)
+	if gui:IsA("BillboardGui") then
+		return gui.Size.X.Offset, gui.Size.Y.Offset
+	end
+	return gui.CanvasSize.X, gui.CanvasSize.Y
+end
+
+-- screen px per canvas px of a SurfaceGui seen face-on from `distance` studs
+local function onScreenScale(gui, distance)
+	local pps = gui.PixelsPerStud
+	if gui.SizingMode ~= Enum.SurfaceGuiSizingMode.PixelsPerStud or not pps or pps <= 0 then
+		pps = 50
+	end
+	return Mock.Viewport.Y / (2 * FOV_HALF_TAN * distance) / pps
+end
+
+-- the gate's swirl (radius 5.3 studs) and its glow ring behind a face cell `w` x `h` canvas px at `pps`
+local function swirlSketch(parent, x, y, w, h, scale, pps, color)
+	local r = 5.3 * pps * scale
+	local swirl = make("Frame", {
+		Name = "SwirlSketch",
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromOffset(x + w * scale / 2, y + h * scale / 2),
+		Size = UDim2.fromOffset(2 * r, 2 * r),
+		BackgroundColor3 = color:Lerp(WHITE, 0.35),
+		BackgroundTransparency = 0.55,
+		BorderSizePixel = 0,
+	}, parent)
+	corner(swirl, 0.5, 0)
+	make("UIStroke", { Color = color, Thickness = max(2, 0.5 * pps * scale), Transparency = 0.1 }, swirl)
+	return swirl
+end
+
+-- Multiplies every pixel quantity under `root` by `s` (sizes, positions, text sizes, strokes, corners, paddings,
+-- list gaps). The mock measures AutomaticSize text without the scale of an ANCESTOR UIScale, so a scaled copy is
+-- made this way instead; a text that would pass Roblox's 100 px cap keeps 100 and gets the rest as its own UIScale.
+local function deepScale(root, s)
+	local function u2(v)
+		return UDim2.new(v.X.Scale, v.X.Offset * s, v.Y.Scale, v.Y.Offset * s)
+	end
+	local function ud(v)
+		return UDim.new(v.Scale, v.Offset * s)
+	end
+	for _, d in ipairs(root:GetDescendants()) do
+		if d:IsA("GuiObject") then
+			d.Size = u2(d.Size)
+			d.Position = u2(d.Position)
+			if isText(d) then
+				local px = d.TextSize * s
+				if px > 100 then
+					local own = d:FindFirstChildWhichIsA("UIScale")
+					if own then
+						own.Scale = own.Scale * px / 100
+					else
+						make("UIScale", { Scale = px / 100 }, d)
+					end
+					px = 100
+				end
+				d.TextSize = max(1, px)
+			end
+		elseif d:IsA("UICorner") then
+			d.CornerRadius = ud(d.CornerRadius)
+		elseif d:IsA("UIStroke") then
+			d.Thickness = d.Thickness * s
+		elseif d:IsA("UIPadding") then
+			d.PaddingTop, d.PaddingBottom = ud(d.PaddingTop), ud(d.PaddingBottom)
+			d.PaddingLeft, d.PaddingRight = ud(d.PaddingLeft), ud(d.PaddingRight)
+		elseif d:IsA("UIListLayout") then
+			d.Padding = ud(d.Padding)
+		end
+	end
+end
+
+-- a flat copy of `gui`'s content with its top-left at (x, y), drawn `scale` times its canvas size; caption above
+local function mirrorCell(parent, gui, x, y, scale, caption)
+	local w, h = canvasOf(gui)
+	local cell = make("Frame", { Name = gui.Name, BackgroundTransparency = 1, Position = UDim2.fromOffset(x, y), Size = UDim2.fromOffset(w * scale, h * scale) }, parent)
+	for _, c in ipairs(gui:GetChildren()) do
+		if c:IsA("GuiObject") then
+			c:Clone().Parent = cell
+		end
+	end
+	if math.abs(scale - 1) > 1e-3 then
+		deepScale(cell, scale)
+	end
+	label(parent, caption, 18, {
+		Name = "Caption",
+		Position = UDim2.fromOffset(x, y - 30),
+		Size = UDim2.fromOffset(max(utf8len(caption) * 10 + 12, w * scale), 24),
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextStrokeTransparency = 0.2,
+		TextStrokeColor3 = NAVY,
+	})
+	return cell
+end
+
+-- portal[:<Id>[:<members>[:<distance>]]]
+local function portalScene(id, members, distance, width, height)
+	Config = req("shared/Config")
+	local okMetrics, why = installMetrics()
+	if not okMetrics then
+		note("text metrics: " .. tostring(why))
+	end
+	ensureRemotes()
+	Mock.SetViewport(width, height)
+	-- the two services are server code (PortalService listens to OnServerEvent): run them as the server would,
+	-- then hand the world back to the client for the walk
+	local context = Mock.Context
+	Mock.Context = "server"
+	local LobbyBuilder = req("server/Services/LobbyBuilder")
+	local PortalService = req("server/Services/PortalService")
+	local lobby = LobbyBuilder.Build()
+	local portals = (type(lobby) == "table" and lobby.Portals) or {}
+	if not id or id == "" then
+		id = "Medium"
+	end
+	if not portals[id] then
+		Mock.Context = context
+		local known = {}
+		for _, d in ipairs(Config.Difficulties) do
+			known[#known + 1] = d.Id
+		end
+		fail("no portal '" .. tostring(id) .. "'. Known: " .. table.concat(known, ", "))
+	end
+	-- no matches here: a launch just fails quietly
+	PortalService.Init(lobby, {
+		StartMatch = function()
+			return nil
+		end,
+		GetMatchOf = function()
+			return nil
+		end,
+	})
+	local info = portals[id]
+	local zone = info.Zone
+	local count = max(0, min(Config.Match.MaxPlayers, floor(tonumber(members) or 1)))
+	local list = { LocalPlayer }
+	for i = 2, count do
+		list[i] = Mock.AddPlayer("Buddy" .. i, 9100 + i)
+	end
+	advance(0.3)
+	Mock.Teleport(LocalPlayer, (Config.Lobby.Origin or Vector3.new(0, 300, 0)) + Vector3.new(0, 4, 0))
+	for i = 1, count do
+		Mock.Teleport(list[i], zone.CFrame * CFrame.new((i - 1) * 2.6 - 3.9, 0, 1))
+	end
+	advance(1.6)
+	Mock.Context = context
+
+	local pg = LocalPlayer:WaitForChild("PlayerGui")
+	local screen = make("ScreenGui", { Name = "WorldMirror", IgnoreGuiInset = true, ResetOnSpawn = false, ZIndexBehavior = Enum.ZIndexBehavior.Sibling })
+	local vp = Mock.Viewport
+	local x, y, rowH = 24, 104, 0 -- under the top bar
+	local function place(w, h, caption)
+		w = max(w, utf8len(caption) * 10 + 12) -- the caption's width (18 px text)
+		if x > 24 and x + w > vp.X - 24 then
+			x, y, rowH = 24, y + rowH + 56, 0
+		end
+		local px, py = x, y
+		x = x + w + 48
+		rowH = max(rowH, h)
+		return px, py
+	end
+
+	local board = info.Billboard
+	if board and board:IsA("BillboardGui") then
+		local w, h = canvasOf(board)
+		local caption = "Billboard (pixels; " .. floor(board.MaxDistance) .. " studs max)"
+		local px, py = place(w, h, caption)
+		mirrorCell(screen, board, px, py, 1, caption)
+	else
+		note("portal " .. id .. " has no billboard")
+	end
+
+	local facePart = info.CountdownFace
+	local face = facePart and facePart:FindFirstChildWhichIsA("SurfaceGui")
+	if face then
+		local d = tonumber(distance) or FRIEND_DISTANCE
+		local s = onScreenScale(face, d)
+		local w, h = canvasOf(face)
+		local caption = fmt("Face from %d studs (x%.2f)%s", d, s, face.Enabled and "" or ", hidden")
+		local px, py = place(w * s, h * s, caption)
+		swirlSketch(screen, px, py, w, h, s, face.PixelsPerStud, (info.Model and info.Model:FindFirstChild("SwirlCore") and info.Model.SwirlCore.Color) or difficulty(id).Color)
+		mirrorCell(screen, face, px, py, s, caption)
+		caption = fmt("Face canvas (%d px per stud)", floor(face.PixelsPerStud))
+		px, py = place(w, h, caption)
+		mirrorCell(screen, face, px, py, 1, caption)
+	else
+		note("portal " .. id .. " has no CountdownFace")
+	end
+	screen.Parent = pg
+	advance(0.1)
+	return okMetrics
+end
+
+----------------------------------------------------------------------
 -- boot
 ----------------------------------------------------------------------
 local function boot(width, height, touch, keepTitle)
@@ -1270,10 +1479,15 @@ else
 		advance(0.1)
 		data = walk()
 		data.metrics = okMetrics and "font" or "mock"
+	elseif name == "portal" then
+		-- the world GUIs of one portal (no game HUD)
+		local okMetrics = portalScene(fields[2], fields[3], fields[4], width, height)
+		data = walk()
+		data.metrics = okMetrics and "font" or "mock"
 	else
 		local fn = SCENARIOS[name]
 		if not fn then
-			fail("unknown scenario '" .. spec .. "'. Known: gallery, " .. table.concat(ORDER, ", "))
+			fail("unknown scenario '" .. spec .. "'. Known: gallery, portal, " .. table.concat(ORDER, ", "))
 		end
 		local metrics = boot(width, height, ARGS.touch == true, name == "title")
 		fn(fields[2], fields[3])

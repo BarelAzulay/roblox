@@ -12,7 +12,12 @@
 --                                  Leave unlocks + ejects outside the walls + LEAVE_LOCKOUT + must step out first,
 --                                  junk LeaveParty calls, death / leaving the game / CancelParty / a too-small party
 --                                  (MinPlayers) unlock, a full party ("Full! Starting in N") launches and every member
---                                  is unlocked, a player in a match is never locked
+--                                  is unlocked, a player in a match is never locked; the eye-level countdown face
+--                                  (review: the billboard sits ~27 studs up, off-screen for a friend next to the pad):
+--                                  a SurfaceGui in the gate's swirl facing the plaza, in front of the back lock wall,
+--                                  8-14 studs up, numeral >= 3 studs, within 30 deg of the view centre of a friend 4
+--                                  studs outside the walls (default camera, 10-20 deg pitch), hidden on an empty pad,
+--                                  same seconds as the billboard (written once per second), 'Waiting...', 'Full! 4/4'
 --   client_polish_portals          (client, 1920x1080) the party panel: big red Leave button beside the title, readable
 --                                  countdown / hint / count, nothing overlaps, one LeaveParty per press, clear of the
 --                                  screen middle and of the vitals
@@ -129,6 +134,46 @@ local function serverScenarios()
 		local list = K.remotesFor("PartyState", p.UserId, mark)
 		return list[#list]
 	end
+	-- the eye-level countdown face (SurfaceGui in the gate's swirl) and its labels
+	local function faceOf(id)
+		local info = infoOf(id)
+		local part = info and (info.CountdownFace or (info.Model and info.Model:FindFirstChild("CountdownFace")))
+		local gui = part and part:FindFirstChildWhichIsA("SurfaceGui")
+		if not gui then
+			return nil
+		end
+		return {
+			Part = part,
+			Gui = gui,
+			Num = gui:FindFirstChild("NumeralLabel", true),
+			Top = gui:FindFirstChild("TopLabel", true),
+			Count = gui:FindFirstChild("CountLabel", true),
+			Disc = gui:FindFirstChild("Disc", true),
+		}
+	end
+	local function faceShown(id)
+		local f = faceOf(id)
+		return f ~= nil and f.Gui.Enabled == true
+	end
+	local function faceText(id, key)
+		local f = faceOf(id)
+		local label = f and f[key]
+		return label and tostring(label.Text) or ""
+	end
+	-- a label's text height in studs on a SurfaceGui (UIScales included)
+	local function letterStuds(label, gui)
+		local k = 1
+		local cur = label
+		while cur and cur ~= gui do
+			for _, c in ipairs(cur:GetChildren()) do
+				if c:IsA("UIScale") then
+					k = k * c.Scale
+				end
+			end
+			cur = cur.Parent
+		end
+		return label.TextSize * k / gui.PixelsPerStud
+	end
 
 	-- A tiny Roblox-like collision-group registry patched into the mock's PhysicsService for one test (the mock's
 	-- own PhysicsService methods are no-ops). A group "NC_TestPets" is registered first, like another system would.
@@ -213,6 +258,11 @@ local function serverScenarios()
 		local plates = T.tally("the billboard plate is solid, auto-sized to its text and compact (fits the container)")
 		local above = T.tally("the billboard floats just above the gate (over the star gems, readable from outside)")
 		local idle = T.tally("an idle portal reads '<Name>', '0/" .. Config.Match.MaxPlayers .. " players' and 'Step in to play'")
+		local faces = T.tally("every portal has an eye-level CountdownFace: an invisible part (no collision / query / touch / shadow) with a SurfaceGui on its Front face (40-60 px per stud, LightInfluence 0, not AlwaysOnTop), hidden on an empty pad")
+		local faceSpot = T.tally("the face sits in the gate's swirl, facing the plaza, just in front of the back lock wall (inside the enclosure), 8-14 studs above the pad")
+		local faceLetters = T.tally("face letters: the numeral >= 3 studs tall (TextSize x UIScale / px per stud), 'Starting in' >= 1 stud, the head count >= 0.6 stud; outlined, not TextScaled, Theme fonts")
+		local eyeLevel = T.tally("a friend 4 studs outside the front lock wall, default camera (12.5 studs behind the head, pitched 10/15/20 deg down), has the whole numeral within 30 deg of the view centre (vertical half-FOV 35 deg)")
+		local eyeWorst, boardWorst = 0, 0
 		local walls = T.tally("five lock walls per pad in NC_PortalWall: anchored, collidable, no Touched, no shadow, invisible while idle")
 		local enclose = T.tally("the walls enclose the pad on all sides (just outside the zone) and above (clear of a full jump)")
 		for _, diff in ipairs(Config.Difficulties) do
@@ -261,6 +311,79 @@ local function serverScenarios()
 				boards:case(false, id .. ": no BillboardGui in LobbyInfo")
 			end
 
+			-- the eye-level countdown face
+			local face = faceOf(id)
+			if info and face and face.Num and face.Top and face.Count then
+				local part, gui = face.Part, face.Gui
+				faces:case(part.Anchored and not part.CanCollide and not part.CanQuery and not part.CanTouch and not part.CastShadow and part.Transparency >= 1
+					and gui.Face == Enum.NormalId.Front and gui.Adornee == part and gui.SizingMode == Enum.SurfaceGuiSizingMode.PixelsPerStud
+					and gui.PixelsPerStud >= 40 and gui.PixelsPerStud <= 60 and gui.LightInfluence == 0 and gui.AlwaysOnTop == false and gui.Enabled == false,
+					id .. ": " .. tostring(gui.PixelsPerStud) .. " px per stud, enabled " .. tostring(gui.Enabled))
+				local zone = info.Zone
+				local hs = zone.Size * 0.5
+				local rel = zone.CFrame:PointToObjectSpace(part.Position)
+				local above = rel.Y + hs.Y
+				local toPlaza = Vector3.new(config().Lobby.Origin.X - part.Position.X, 0, config().Lobby.Origin.Z - part.Position.Z)
+				local facing = toPlaza.Magnitude > 0 and part.CFrame.LookVector:Dot(toPlaza.Unit) or -1
+				local back = info.Model:FindFirstChild("LockWalls") and info.Model.LockWalls:FindFirstChild("WallBack")
+				local backInner = back and (zone.CFrame:PointToObjectSpace(back.Position).Z - back.Size.Z * 0.5) or math.huge
+				local swirl = info.Model:FindFirstChild("SwirlCore")
+				local inRing = true
+				if swirl then
+					local sr = swirl.CFrame:PointToObjectSpace(part.Position)
+					inRing = math.abs(sr.X) < 0.5 and math.abs(sr.Y) < 0.5 and sr.Z <= -0.3 and sr.Z >= -2.5
+				end
+				local inWall = false
+				for _, w in ipairs(info.Model.LockWalls and info.Model.LockWalls:GetChildren() or {}) do
+					inWall = inWall or insideBox(w, part.Position) or insideBox(w, part.Position + part.CFrame.LookVector * part.Size.Z * 0.5)
+				end
+				faceSpot:case(inRing and facing > 0.9 and rel.Z + part.Size.Z * 0.5 <= backInner + 0.01 and not inWall and above >= 8 and above <= 14,
+					id .. string.format(": %.1f studs up, facing %.2f, front %.2f vs back wall %.2f, in ring %s, in a wall %s", above, facing, rel.Z - part.Size.Z * 0.5, backInner, tostring(inRing), tostring(inWall)))
+				local okText = true
+				for _, d in ipairs(gui:GetDescendants()) do
+					if d:IsA("TextLabel") then
+						okText = okText and not d.TextScaled and fonts[d.Font] == true and (d:FindFirstChild("TextOutline") ~= nil or d.TextStrokeTransparency < 0.5)
+					end
+				end
+				local num, top, cnt = letterStuds(face.Num, gui), letterStuds(face.Top, gui), letterStuds(face.Count, gui)
+				faceLetters:case(okText and num >= 3 and top >= 1 and cnt >= 0.6, id .. string.format(": numeral %.2f, top %.2f, count %.2f studs", num, top, cnt))
+				-- the numeral's world extent: its centre on the canvas (top-left origin), the face's top edge in world space
+				local pps = gui.PixelsPerStud
+				local cy = (face.Num.AbsolutePosition.Y + face.Num.AbsoluteSize.Y * 0.5) / pps
+				local faceTop = rel.Y + part.Size.Y * 0.5
+				local numTop, numBottom = faceTop - cy + num * 0.5, faceTop - cy - num * 0.5
+				local front = back and info.Model.LockWalls:FindFirstChild("WallFront")
+				local frontOuter = front and (zone.CFrame:PointToObjectSpace(front.Position).Z - front.Size.Z * 0.5) or -(hs.Z + 3.5)
+				local viewerZ = frontOuter - 4
+				local focusY = -hs.Y + 4.5 -- head height above the pad surface (zone space)
+				local worst, worstAt = 0, ""
+				for _, pitch in ipairs({ 10, 15, 20 }) do
+					local p = math.rad(pitch)
+					local camY, camZ = focusY + 12.5 * math.sin(p), viewerZ - 12.5 * math.cos(p)
+					for _, y in ipairs({ numTop, numBottom }) do
+						local off = math.deg(math.abs(math.atan2(y - camY, rel.Z - camZ) + p))
+						if off > worst then
+							worst, worstAt = off, string.format("%d deg pitch", pitch)
+						end
+					end
+				end
+				local boardInfo = ""
+				local bgui = info.Billboard
+				if bgui and bgui.Adornee then
+					local by = bgui.Adornee.Position.Y + bgui.StudsOffsetWorldSpace.Y - (zone.Position.Y - hs.Y)
+					local p = math.rad(15)
+					local camY, camZ = focusY + hs.Y + 12.5 * math.sin(p), viewerZ - 12.5 * math.cos(p)
+					local bz = zone.CFrame:PointToObjectSpace(bgui.Adornee.Position).Z
+					local boardDeg = math.deg(math.atan2(by - camY, bz - camZ) + p)
+					boardWorst = math.max(boardWorst, boardDeg)
+					boardInfo = string.format("; the billboard's bottom edge: %.0f deg", boardDeg)
+				end
+				eyeWorst = math.max(eyeWorst, worst)
+				eyeLevel:case(worst <= 30, id .. string.format(": numeral up to %.1f deg from the view centre (%s), viewer %.1f studs from the gate%s", worst, worstAt, (swirl and zone.CFrame:PointToObjectSpace(swirl.Position).Z or rel.Z) - viewerZ, boardInfo))
+			else
+				faces:case(false, id .. ": no CountdownFace with NumeralLabel / TopLabel / CountLabel")
+			end
+
 			-- lock walls
 			local folder = info and info.Model and info.Model:FindFirstChild("LockWalls")
 			local list = folder and folder:GetChildren() or {}
@@ -300,6 +423,10 @@ local function serverScenarios()
 			end
 		end
 		boards:report()
+		faces:report()
+		faceSpot:report()
+		faceLetters:report()
+		eyeLevel:report(string.format("numeral at most %.1f deg off centre; the high billboard's bottom edge would be %.0f deg up at 15 deg pitch", eyeWorst, boardWorst))
 		single:report()
 		textRule:report()
 		plates:report()
@@ -382,19 +509,37 @@ local function serverScenarios()
 		T.check(pill ~= nil and pill.BackgroundColor3 == (Theme.Colors.Gold or Theme.Colors.Token), "the status pill turns gold while counting down")
 		T.eq(hard.Model:GetAttribute("PartyCount"), 1, "Portal_Hard attribute PartyCount = 1")
 		T.check(math.abs((hard.Model:GetAttribute("Countdown") or -99) - (cd or 0)) <= 1, "Portal_Hard attribute Countdown follows the timer", tostring(hard.Model:GetAttribute("Countdown")))
-		local writes = 0
+		-- the eye-level face next to the pad shows the same countdown
+		local faceNum = tonumber(faceText("Hard", "Num"))
+		T.check(faceShown("Hard") and faceText("Hard", "Top") == "Starting in" and faceNum ~= nil and shown ~= nil and math.abs(faceNum - shown) <= 1
+			and faceText("Hard", "Count") == "1/" .. Config.Match.MaxPlayers .. " players",
+			"the eye-level face appears with 'Starting in', the billboard's seconds and '1/" .. Config.Match.MaxPlayers .. " players'",
+			faceText("Hard", "Top") .. " / " .. faceText("Hard", "Num") .. " / " .. faceText("Hard", "Count"))
+		local hardFace = faceOf("Hard")
+		local rim = hardFace and hardFace.Disc and hardFace.Disc:FindFirstChildWhichIsA("UIStroke")
+		T.check(rim ~= nil and rim.Color == (Theme.Colors.Gold or Theme.Colors.Token), "the face's badge rim turns gold while counting down")
+		local writes, faceWrites = 0, 0
 		local conn = hard.StatusLabel:GetPropertyChangedSignal("Text"):Connect(function()
 			writes = writes + 1
 		end)
+		local faceConn = hardFace and hardFace.Num:GetPropertyChangedSignal("Text"):Connect(function()
+			faceWrites = faceWrites + 1
+		end)
 		advance(3.0)
 		conn:Disconnect()
+		if faceConn then
+			faceConn:Disconnect()
+		end
 		T.check(writes >= 2 and writes <= 4, "the server rewrites the status at most once per second (" .. writes .. " writes in 3 s)")
+		T.check(faceWrites >= 2 and faceWrites <= 4, "...and the face's numeral too (" .. faceWrites .. " writes in 3 s)")
 		local later = shownSeconds()
 		T.check(shown ~= nil and later ~= nil and shown - later >= 2 and shown - later <= 4, "the countdown on the billboard goes down", tostring(shown) .. " -> " .. tostring(later))
+		T.check(later ~= nil and tonumber(faceText("Hard", "Num")) ~= nil and math.abs(tonumber(faceText("Hard", "Num")) - later) <= 1, "the face counts down with it", faceText("Hard", "Num") .. " vs " .. tostring(later))
 		-- a second player
 		K.enterPortal(b, "Hard")
 		advance(0.6)
 		T.eq(countText("Hard"), "2/" .. Config.Match.MaxPlayers .. " players", "a second member: '2/" .. Config.Match.MaxPlayers .. " players'")
+		T.eq(faceText("Hard", "Count"), "2/" .. Config.Match.MaxPlayers .. " players", "...on the face as well")
 		T.check(isLocked(b) and allLocked(b), "the second member is locked as well")
 
 		------------------------------------------------------------------------------------------
@@ -426,6 +571,7 @@ local function serverScenarios()
 		T.check(not barrierShown("Hard"), "an empty pad hides the barrier shimmer")
 		T.eq(statusText("Hard"), "Step in to play", "an empty portal's billboard says 'Step in to play'")
 		T.eq(hard.Model:GetAttribute("Countdown"), nil, "...and its Countdown attribute is cleared")
+		T.check(not faceShown("Hard"), "...and the eye-level face hides again")
 
 		-- (the Leave step put her outside the zone, so only the lockout holds her back; the "must step out first"
 		-- rule is covered by the CancelParty test below)
@@ -478,6 +624,7 @@ local function serverScenarios()
 			K.enterPortal(d, "Extreme")
 			advance(0.6)
 			T.check(isLocked(d) and statusText("Extreme"):lower():find("waiting") ~= nil, "a party below MinPlayers waits (locked, 'Waiting for players...')", statusText("Extreme"))
+			T.check(faceShown("Extreme") and faceText("Extreme", "Top") == "Waiting..." and tonumber(faceText("Extreme", "Num")) ~= nil, "...and the face says 'Waiting...' over the seconds left", faceText("Extreme", "Top"))
 			mark = K.logSize()
 			local released = K.waitFor(function()
 				return not isLocked(d)
@@ -506,6 +653,10 @@ local function serverScenarios()
 		T.check(allIn, "four players fill the Saint party, all locked")
 		T.check(statusText("Saint"):find("Full! Starting in %d") ~= nil, "a full party's billboard reads 'Full! Starting in N'", statusText("Saint"))
 		T.eq(countText("Saint"), Config.Match.MaxPlayers .. "/" .. Config.Match.MaxPlayers .. " players", "...and '" .. Config.Match.MaxPlayers .. "/" .. Config.Match.MaxPlayers .. " players'")
+		T.check(faceShown("Saint") and faceText("Saint", "Top") == "Starting in" and faceText("Saint", "Count") == "Full! " .. Config.Match.MaxPlayers .. "/" .. Config.Match.MaxPlayers
+			and tonumber(faceText("Saint", "Num")) ~= nil and tonumber(faceText("Saint", "Num")) <= Config.Match.FullPartyCountdown,
+			"the face of a full party: 'Starting in', the short countdown and 'Full! " .. Config.Match.MaxPlayers .. "/" .. Config.Match.MaxPlayers .. "'",
+			faceText("Saint", "Top") .. " / " .. faceText("Saint", "Num") .. " / " .. faceText("Saint", "Count"))
 		local started = K.waitFor(function()
 			return MS().GetMatchOf(four[1]) ~= nil
 		end, Config.Match.FullPartyCountdown + 6)
@@ -519,6 +670,7 @@ local function serverScenarios()
 			T.eq(statusText("Saint"), "Step in to play", "the billboard is back to 'Step in to play' after the launch")
 			T.eq(countText("Saint"), "0/" .. Config.Match.MaxPlayers .. " players", "...and '0/" .. Config.Match.MaxPlayers .. " players'")
 			T.check(not barrierShown("Saint"), "...and the barrier is off")
+			T.check(not faceShown("Saint"), "...and the face is hidden")
 			-- a player in a match standing in a portal zone (as the server sees it) is refused
 			K.enterPortal(four[2], "Easy")
 			advance(0.6)

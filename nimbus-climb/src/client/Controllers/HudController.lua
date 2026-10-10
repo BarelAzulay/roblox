@@ -853,13 +853,14 @@ end
 
 -- Layout numbers of the match / party panels (design px, 1080p). Text is 18+ everywhere, so it stays
 -- >= 14 px on a phone; touch devices get a taller Leave button (it then owns the top-right corner of the
--- match panel and the token line moves left of it instead of adding a row).
+-- match panel and the token line drops under it, at the full right edge: squeezed inset left of the button,
+-- it ran into the timer / countdown numeral on landscape phones).
 local function panelMetrics(touch)
 	local m = {
 		LeaveW = 88, LeaveH = 32, LeaveText = 20,
 		TitleH = 32, TitleText = 28,
 		TimerY = 52, TimerH = 38, TimerText = 34, CountText = 42,
-		TokensText = 22, TokensInset = 0,
+		TokensText = 22, TokensY = 52, TokensH = 38, -- the token line (centre y) shares the timer row
 		CpY = 76, CpH = 24, CpText = 18,
 		ChipH = 30, RowPitch = 34, NameText = 18, StateText = 18,
 		-- party panel (a locked portal: Leave is the only way out, so it is big and sits beside the title),
@@ -869,7 +870,8 @@ local function panelMetrics(touch)
 	}
 	if touch then
 		m.LeaveW, m.LeaveH = 92, 40
-		m.TokensInset = m.LeaveW + 6
+		-- right under the Leave button (y 41-69): clear of it, of the checkpoint bar (76+) and of the timer text
+		m.TokensY, m.TokensH = m.LeaveH + 15, 28
 		m.PartyLeaveH, m.PartyLeaveText = 56, 26 -- a fat thumb target (>= 44 px on screen at the 0.8 phone scale)
 	end
 	m.TeamY = m.CpY + m.CpH + 8
@@ -1518,8 +1520,8 @@ local function buildMatch(holder)
 	UI.TimerScale = newScale(UI.Timer, 1)
 	UI.MatchTokens = newText(inner, "Tokens", "", "Toast", M.TokensText, Colors.TokenGlow, {
 		AnchorPoint = Vector2.new(1, 0.5),
-		Position = UDim2.new(1, -M.TokensInset, 0, M.TimerY),
-		Size = UDim2.new(0.55, 0, 0, M.TimerH),
+		Position = UDim2.new(1, 0, 0, M.TokensY),
+		Size = UDim2.new(0.55, 0, 0, M.TokensH),
 		TextXAlignment = Enum.TextXAlignment.Right,
 		Stroke = 0.15,
 		Outline = 2,

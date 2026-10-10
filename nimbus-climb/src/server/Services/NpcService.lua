@@ -27,7 +27,6 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CollectionService = game:GetService("CollectionService")
 local Workspace = game:GetService("Workspace")
-local TextService = game:GetService("TextService")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Config = require(Shared:WaitForChild("Config"))
@@ -411,27 +410,16 @@ local NAME_PX = 28
 local TITLE_PX = 19
 local INK = Theme.Colors.TextStroke or Theme.Colors.Ink
 
--- Width of a one-line text in px (TextService measures with the real font; a rough estimate if it fails).
-local function textWidth(text, size, font)
-	local ok, bounds = pcall(function()
-		return TextService:GetTextSize(text, size, font, Vector2.new(2000, 400))
-	end)
-	if ok and typeof(bounds) == "Vector2" and bounds.X > 0 then
-		return bounds.X
-	end
-	return string.len(text) * size * 0.56
-end
-
--- A rounded pill as wide as its (fixed-size, outlined) text plus padding (+8% and the outline as a safety
--- margin, so a slightly wider glyph never truncates). `extraRight` keeps room for a corner badge. Returns pill, label.
+-- A rounded pill that the engine sizes to its (fixed-size, outlined) text, so no name is ever truncated whatever
+-- the real glyph widths: the label carries the padding (its own UIPadding) and grows with AutomaticSize X from a
+-- minimum width of minW (the text stays centred), and the pill wraps the label. No list layout, so the corner
+-- badge can live on the pill; `extraRight` keeps room for it. Returns pill, label.
 local function textPill(parent, name, text, role, size, padX, height, minW, thickness, extraRight)
-	local font = Theme.Fonts[role] or Theme.Fonts.Body
-	local textW = math.ceil(textWidth(text, size, font) * 1.08 + thickness * 2)
-	local width = math.min(PLATE_W + 40, math.max(minW, textW + padX * 2 + (extraRight or 0)))
 	local frame = make("Frame", {
 		Name = name,
 		AnchorPoint = Vector2.new(0.5, 1),
-		Size = UDim2.fromOffset(width, height),
+		Size = UDim2.fromOffset(0, height),
+		AutomaticSize = Enum.AutomaticSize.X,
 		BackgroundColor3 = Theme.Colors.White,
 		BorderSizePixel = 0,
 	}, parent)
@@ -442,13 +430,16 @@ local function textPill(parent, name, text, role, size, padX, height, minW, thic
 		OutlineColor = INK,
 		Props = {
 			Name = (name == "NamePill") and "Name" or "Title",
-			AnchorPoint = Vector2.new(0, 0.5),
-			Position = UDim2.new(0, padX, 0.5, 0),
-			Size = UDim2.new(1, -(padX * 2 + (extraRight or 0)), 1, 0),
+			AutomaticSize = Enum.AutomaticSize.X,
+			Size = UDim2.fromOffset(minW, height),
+			TextXAlignment = Enum.TextXAlignment.Center,
 			TextWrapped = false,
-			TextTruncate = Enum.TextTruncate.AtEnd,
 		},
 	})
+	make("UIPadding", {
+		PaddingLeft = UDim.new(0, padX + thickness),
+		PaddingRight = UDim.new(0, padX + thickness + (extraRight or 0)),
+	}, label)
 	label.Parent = frame
 	return frame, label
 end

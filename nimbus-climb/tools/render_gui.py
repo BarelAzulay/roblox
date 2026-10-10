@@ -7,8 +7,9 @@
     python3 tools/render_gui.py --list
 
 Scenarios (see tools/dump_gui.lua): lobby, title, match[:hit], countdown, party, results,
-menu:<Inventory|Pets|Index|Shop|Stats>[:<Tab>], tutorial[:<step>], npc[:<n>], dev, toasts, or a .json dump
-written earlier with --json.
+menu:<Inventory|Pets|Index|Shop|Stats>[:<Tab>], tutorial[:<step>], npc[:<n>], dev, toasts,
+portal[:<Id>[:<players>[:<studs>]]] (a portal's world GUIs mirrored flat: the pixel billboard and the eye-level
+countdown face as big as it looks from <studs> away), or a .json dump written earlier with --json.
 
 How it works: tools/dump_gui.lua runs inside a lupa Lua world booted like tools/smoke.py boots its client world
 (tools/robloxmock.lua, src/ mounted per default.project.json, the viewport set to --size, a touch device when the
@@ -59,7 +60,7 @@ except Exception:  # pragma: no cover
 
 GRID_SIZES = [(1920, 1080), (1280, 720), (390, 844), (844, 390)]
 SCENARIOS = ["gallery", "lobby", "title", "match", "match:hit", "countdown", "party", "results", "menu:Inventory", "menu:Pets",
-             "menu:Index", "menu:Shop", "menu:Stats", "tutorial", "npc", "dev", "toasts"]
+             "menu:Index", "menu:Shop", "menu:Stats", "tutorial", "npc", "dev", "toasts", "portal", "portal:Saint:4"]
 
 # ---------------------------------------------------------------------------------------------------
 # Lua world (booted the way tools/smoke.py boots its client world)
@@ -1355,7 +1356,7 @@ def render_one(dump, fonts, args):
 def main():
     ap = argparse.ArgumentParser(description="Offline renders of the Nimbus Climb 2D UI (real client code + Pillow)")
     ap.add_argument("scenario", nargs="?", help="lobby, title, match[:hit], countdown, party, results, menu:<Window>[:<Tab>], "
-                    "tutorial[:<step>], npc[:<n>], dev, toasts, or a dump .json")
+                    "tutorial[:<step>], npc[:<n>], dev, toasts, portal[:<Id>[:<players>[:<studs>]]], or a dump .json")
     ap.add_argument("-o", "--out", help="output PNG (default: gui_<scenario>_<W>x<H>.png in the current directory)")
     ap.add_argument("--size", type=parse_size, default=(1920, 1080), help="screen size WxH (default 1920x1080)")
     ap.add_argument("--grid", action="store_true", help="render 1920x1080, 1280x720, 390x844 and 844x390 into one sheet")

@@ -20,8 +20,12 @@
 --   * While a countdown runs the side walls show a soft ForceField shimmer in the portal colour.
 -- Billboard (World text rule, ARCHITECTURE_V3.md): a PIXEL-sized BillboardGui above each gate replaces the
 -- studs-sized card LobbyBuilder made: difficulty name + stars, "2/4 players" and a status pill ("Step in to
--- play" / "Starting in 12"). The server writes a text only when it changes (at most once per second per
--- line) and mirrors the numbers as attributes on the portal model (PartyCount, PartyMax, Countdown).
+-- play" / "Starting in 12"). It floats ~27 studs up, so it serves viewers further away.
+-- Countdown face (eye level, for friends standing next to the portal): a SurfaceGui in the gate's swirl,
+-- facing the plaza, ~11 studs above the pad: "Starting in", a 3.2-stud numeral on a round badge and the head
+-- count. Shown only while the pad has a party.
+-- The server writes a text only when it changes (at most once per second per line) and mirrors the numbers as
+-- attributes on the portal model (PartyCount, PartyMax, Countdown).
 -- Plain Lua 5.1-compatible syntax only.
 
 local Players = game:GetService("Players")
@@ -70,6 +74,26 @@ local BB = {
 	InfoText = 21,
 	StatusText = 25,
 	PlateMinW = 190,
+}
+
+-- Countdown face (SurfaceGui, World text rule: 40-60 px per stud, titles >= 1 stud, info lines >= 0.6 stud).
+-- Roblox caps TextSize at 100, so the numeral gets a UIScale: 100 px x 1.6 = 160 px = 3.2 studs at 50 px per stud.
+local FACE = {
+	Width = 8.4, -- studs; corners stay inside the gate ring's 6-stud hole
+	Height = 7,
+	Thickness = 0.2,
+	PPS = 50,
+	Lift = 11.2, -- studs above the pad surface when the gate has no SwirlCore
+	WallGap = 0.3, -- studs in front of the back lock wall (no ForceField layer between the face and the plaza)
+	SwirlGap = 0.6, -- studs in front of the swirl's centre plane
+	Disc = 240, -- px: the round numeral badge (4.8 studs)
+	TopY = 4, -- px: top of the "Starting in" ribbon (it overlaps the badge's rim)
+	DiscY = 178, -- px: badge centre
+	CountY = 312, -- px: centre of the head-count pill (it overlaps the badge's bottom)
+	NumText = 100,
+	NumScale = 1.6,
+	TopText = 56, -- 1.12 studs
+	CountText = 40, -- 0.8 stud
 }
 
 local STAR_FULL = "\226\152\133"
@@ -634,6 +658,164 @@ local function buildBillboard(party)
 end
 
 ----------------------------------------------------------------------
+-- Countdown face (eye level, SurfaceGui in the gate's swirl)
+----------------------------------------------------------------------
+-- In the zone's frame (-Z faces the plaza): the swirl's centre, pulled just in front of the back lock wall so
+-- viewers on the plaza look through the front wall only. Without a SwirlCore: the back edge of the pad.
+local function faceCFrame(party)
+	local zone = party.Info.Zone
+	local hs = zone.Size * 0.5
+	local inner = hs.Z + ZONE_HYSTERESIS -- the back wall's inner face
+	local model = party.Info.Model
+	local swirl = model and model:FindFirstChild("SwirlCore")
+	local rel
+	if swirl and swirl:IsA("BasePart") then
+		rel = zone.CFrame:PointToObjectSpace(swirl.Position)
+	else
+		rel = Vector3.new(0, -hs.Y + FACE.Lift, inner)
+	end
+	local z = math.min(rel.Z - FACE.SwirlGap, inner - FACE.WallGap - FACE.Thickness / 2)
+	return zone.CFrame * CFrame.new(rel.X, rel.Y, z)
+end
+
+local function buildFace(party)
+	local info = party.Info
+	local color = party.Diff.Color
+	local parent = info.Model or info.Zone.Parent
+	local old = parent:FindFirstChild("CountdownFace")
+	if old then
+		old:Destroy()
+	end
+
+	local part = Instance.new("Part")
+	part.Name = "CountdownFace"
+	part.Anchored = true
+	part.CanCollide = false
+	part.CanTouch = false
+	part.CanQuery = false
+	part.CastShadow = false
+	part.Transparency = 1
+	part.Size = Vector3.new(FACE.Width, FACE.Height, FACE.Thickness)
+	part.CFrame = faceCFrame(party)
+	part:SetAttribute("PortalId", party.Id)
+
+	local gui = Instance.new("SurfaceGui")
+	gui.Name = "CountdownGui"
+	gui.Face = Enum.NormalId.Front
+	gui.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud
+	gui.PixelsPerStud = FACE.PPS
+	gui.CanvasSize = Vector2.new(FACE.Width * FACE.PPS, FACE.Height * FACE.PPS)
+	gui.LightInfluence = 0
+	gui.AlwaysOnTop = false
+	gui.Enabled = false -- shown while the pad has a party
+	gui.Adornee = part
+
+	-- round badge: portal-coloured gradient, gold rim, a soft inner ring
+	local disc = Instance.new("Frame")
+	disc.Name = "Disc"
+	disc.AnchorPoint = Vector2.new(0.5, 0.5)
+	disc.Position = UDim2.new(0.5, 0, 0, FACE.DiscY)
+	disc.Size = UDim2.fromOffset(FACE.Disc, FACE.Disc)
+	disc.BackgroundColor3 = Color3.fromRGB(255, 255, 255) -- the gradient supplies the colour
+	disc.BackgroundTransparency = 0.04
+	disc.BorderSizePixel = 0
+	Theme.Corner(disc, UDim.new(0.5, 0))
+	local discStroke = Theme.Stroke(disc, GOLD, 9, 0)
+	Theme.Gradient(disc, Theme.Darken(color, 0.38), Theme.Darken(color, 0.74), 90)
+	disc.Parent = gui
+	local ring = Instance.new("Frame")
+	ring.Name = "Ring"
+	ring.AnchorPoint = Vector2.new(0.5, 0.5)
+	ring.Position = UDim2.fromScale(0.5, 0.5)
+	ring.Size = UDim2.fromOffset(FACE.Disc - 26, FACE.Disc - 26)
+	ring.BackgroundTransparency = 1
+	Theme.Corner(ring, UDim.new(0.5, 0))
+	Theme.Stroke(ring, Theme.Lighten(color, 0.35), 3, 0.35)
+	ring.Parent = disc
+
+	-- the numeral fills the badge box (its UIScale grows it around the centre)
+	local num = Theme.Label("0", "Display", {
+		Size = FACE.NumText,
+		Color = Theme.Colors.White,
+		Stroke = 1,
+		Outline = 6,
+		OutlineColor = INK,
+		Props = {
+			Name = "NumeralLabel",
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromScale(0.5, 0.5),
+			Size = UDim2.fromScale(1, 1),
+			TextXAlignment = Enum.TextXAlignment.Center,
+			TextYAlignment = Enum.TextYAlignment.Center,
+			ZIndex = 3,
+		},
+	})
+	local numScale = Instance.new("UIScale")
+	numScale.Scale = FACE.NumScale
+	numScale.Parent = num
+	num.Parent = disc
+
+	-- "Starting in" ribbon over the badge's top edge
+	local top = Instance.new("Frame")
+	top.Name = "TopPill"
+	top.AnchorPoint = Vector2.new(0.5, 0)
+	top.Position = UDim2.new(0.5, 0, 0, FACE.TopY)
+	top.Size = UDim2.fromOffset(0, FACE.TopText + 12)
+	top.AutomaticSize = Enum.AutomaticSize.X
+	top.BackgroundColor3 = GOLD
+	top.BorderSizePixel = 0
+	top.ZIndex = 4
+	Theme.Corner(top, UDim.new(0, 22))
+	local topStroke = Theme.Stroke(top, Theme.Darken(GOLD, 0.7), 5, 0)
+	uiPadding(top, 3, 24, 5)
+	top.Parent = gui
+	local topLabel = plateLabel(top, "TopLabel", "Starting in", "Title", FACE.TopText, Theme.Colors.White, Theme.Darken(GOLD, 0.66), 1)
+	topLabel.ZIndex = 5
+	local topOutline = topLabel:FindFirstChild("TextOutline")
+	if topOutline then
+		topOutline.Thickness = 4
+	end
+
+	-- head count under the badge
+	local bottom = Instance.new("Frame")
+	bottom.Name = "CountPill"
+	bottom.AnchorPoint = Vector2.new(0.5, 0.5)
+	bottom.Position = UDim2.new(0.5, 0, 0, FACE.CountY)
+	bottom.Size = UDim2.fromOffset(0, FACE.CountText + 12)
+	bottom.AutomaticSize = Enum.AutomaticSize.X
+	bottom.BackgroundColor3 = Theme.Colors.Panel or INK
+	bottom.BorderSizePixel = 0
+	bottom.ZIndex = 4
+	Theme.Corner(bottom, UDim.new(0, 18))
+	Theme.Stroke(bottom, Theme.Lighten(color, 0.15), 4, 0)
+	uiPadding(bottom, 3, 18, 5)
+	bottom.Parent = gui
+	local countLabel = plateLabel(bottom, "CountLabel", "0/" .. tostring(Config.Match.MaxPlayers) .. " players", "Heading", FACE.CountText, Theme.Colors.White, INK, 1)
+	countLabel.ZIndex = 5
+	local countOutline = countLabel:FindFirstChild("TextOutline")
+	if countOutline then
+		countOutline.Thickness = 3
+	end
+
+	gui.Parent = part
+	part.Parent = parent
+
+	party.Face = {
+		Part = part,
+		Gui = gui,
+		DiscStroke = discStroke,
+		TopPill = top,
+		TopStroke = topStroke,
+		TopOutline = topOutline,
+		Top = topLabel,
+		Num = num,
+		Count = countLabel,
+		Shown = false,
+	}
+	info.CountdownFace = part
+end
+
+----------------------------------------------------------------------
 -- Party bookkeeping
 ----------------------------------------------------------------------
 -- Effective launch deadline: the normal timer, or the short "party is full" timer if sooner.
@@ -711,6 +893,44 @@ local function setPillMode(party, mode)
 	if outline then
 		outline.Color = Theme.Darken(base, 0.66)
 	end
+	-- the face's ribbon and badge rim follow: gold while counting down, the portal colour while waiting
+	local face = party.Face
+	if face then
+		face.TopPill.BackgroundColor3 = base
+		face.TopStroke.Color = Theme.Darken(base, 0.7)
+		if face.TopOutline then
+			face.TopOutline.Color = Theme.Darken(base, 0.66)
+		end
+		face.DiscStroke.Color = (mode == "Countdown") and GOLD or Theme.Lighten(party.Diff.Color, 0.2)
+	end
+end
+
+-- The eye-level face: hidden on an empty pad, otherwise "Starting in" / the seconds / the head count.
+local function refreshFace(party, n, seconds, mode)
+	local face = party.Face
+	if not face then
+		return
+	end
+	local shown = n > 0
+	if face.Shown ~= shown then
+		face.Shown = shown
+		pcall(function()
+			face.Gui.Enabled = shown
+		end)
+	end
+	if not shown then
+		return
+	end
+	local max = Config.Match.MaxPlayers
+	setText(face.Top, (mode == "Countdown") and "Starting in" or "Waiting...", "LastFaceTop", party)
+	setText(face.Num, tostring(seconds or 0), "LastFaceNum", party)
+	local count
+	if isFull(party) then
+		count = string.format("Full! %d/%d", n, max)
+	else
+		count = string.format("%d/%d players", n, max)
+	end
+	setText(face.Count, count, "LastFaceCount", party)
 end
 
 -- Billboard above the portal: "2/4 players" and the status pill.
@@ -733,6 +953,7 @@ local function refreshLabels(party)
 	end
 	setText(info.StatusLabel, status, "LastStatus", party)
 	setPillMode(party, mode)
+	refreshFace(party, n, seconds, mode)
 	setModelAttr(party, "PartyCount", n)
 	setModelAttr(party, "PartyMax", max)
 	if n > 0 then
@@ -1096,6 +1317,11 @@ function PortalService.Init(lobbyInfo, matchServiceArg)
 		local okBoard, errBoard = pcall(buildBillboard, party)
 		if not okBoard then
 			warn("[PortalService] billboard for " .. id .. ": " .. tostring(errBoard))
+		end
+		local okFace, errFace = pcall(buildFace, party)
+		if not okFace then
+			party.Face = nil
+			warn("[PortalService] countdown face for " .. id .. ": " .. tostring(errFace))
 		end
 		refreshLabels(party)
 	end

@@ -6,9 +6,9 @@
 --                             courses, downed markers; one destroyed before the audit is checked from a snapshot taken
 --                             as it was destroyed), plus fresh course builds of every difficulty and a downed marker
 --                             made here. Billboards: pixel-sized (offset UDim2: no studs-scaled billboard with a fixed
---                             TextSize), no TextScaled, names >= 22 px and info lines >= 18 px, every text outlined and
---                             on a solid plate, the plate compact (sized to its content, no huge empty panel),
---                             LightInfluence 0, MaxDistance 50-150 (AlwaysOnTop beacons may reach further). Surface
+--                             TextSize), no TextScaled / TextTruncate, names >= 22 px and info lines >= 18 px, every text
+--                             outlined and on a solid plate, the plate compact (sized to its content, no huge empty
+--                             panel), LightInfluence 0, MaxDistance 50-150 (AlwaysOnTop beacons may reach further). Surface
 --                             signs: 40-60 px per stud, LightInfluence 0, no TextScaled, the biggest line >= 0.95 stud
 --                             and every line >= 0.6 stud, the text fits its box. The home nameplate: "Free home" /
 --                             "Step in to claim" with the "+" icon; the owner's name, "<n> pets • <n> Cloud Tokens",
@@ -162,7 +162,7 @@ local function auditGui(gui)
 	local isBoard = gui:IsA("SurfaceGui")
 	local pps = isBoard and gui.PixelsPerStud or nil
 	local maxPx, minPx = 0, math.huge
-	local scaled, noOutline, noPlate = {}, {}, {}
+	local scaled, noOutline, noPlate, truncating = {}, {}, {}, {}
 	local plates, plateList = {}, {}
 	for _, d in ipairs(texts) do
 		local px = d.TextSize * scaleWithin(d, gui)
@@ -171,6 +171,10 @@ local function auditGui(gui)
 		minPx = math.min(minPx, px)
 		if d.TextScaled then
 			scaled[#scaled + 1] = "'" .. plain(d.Text):sub(1, 20) .. "'"
+		end
+		-- a world label sizes itself to its text (or has room for it): a name cut to "Granny ..." reads as broken
+		if d.TextTruncate ~= Enum.TextTruncate.None then
+			truncating[#truncating + 1] = "'" .. plain(d.Text):sub(1, 20) .. "'"
 		end
 		if not outlined(d) then
 			noOutline[#noOutline + 1] = "'" .. plain(d.Text):sub(1, 20) .. "'"
@@ -191,6 +195,9 @@ local function auditGui(gui)
 	end
 	if #noOutline > 0 then
 		bad("no outline on " .. table.concat(noOutline, ", "))
+	end
+	if #truncating > 0 then
+		bad("truncating text (TextTruncate) " .. table.concat(truncating, ", "))
 	end
 	if gui.LightInfluence ~= 0 then
 		bad("LightInfluence " .. tostring(gui.LightInfluence))

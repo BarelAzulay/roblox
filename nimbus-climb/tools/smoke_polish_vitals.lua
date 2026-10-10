@@ -11,6 +11,10 @@
 --                                (>= 14 px), clear of the hotbar, the touch buttons, the menu column, the currency stack
 --                                and the top-left panel (4-player party); short landscape screens get the compact card
 --                                (the dash ring spans both rows, a visible gap above the hotbar)
+--   client_polish_matchpanel_mobile  (phone world, touch: 844x390, 667x375, 390x844, 1024x768) the match panel: the
+--                                token line sits under the tall Leave button, so its text never overlaps the timer or
+--                                the countdown numeral (pop included; widths measured with 20 % slack for real fonts),
+--                                stays inside the panel, clear of Leave and the checkpoint bar, readable
 -- Plain Lua 5.1 syntax only.
 
 local T = SmokeCommon.T
@@ -505,6 +509,84 @@ S.client_polish_vitals_mobile = guarded("client_polish_vitals_mobile", function(
 	advance(0.8)
 	KC().flushErrors("polish vitals phone")
 	KC().flushWarnings("polish vitals phone")
+end)
+
+----------------------------------------------------------------------------------------------------
+-- the match panel on touch screens (review: on landscape phones the token line, inset left of the tall Leave
+-- button, ran into the timer "8:58" and covered the countdown numeral with "Get ready!")
+----------------------------------------------------------------------------------------------------
+-- the on-screen box of a label's TEXT (its alignment inside the label box), widened by `slack` for real fonts
+-- (the mock measures a flat 0.5 em per character; FredokaOne digits run ~0.6 em)
+local function textRect(label, slack)
+	local r = rect(label)
+	local k = scaleOf(label)
+	local b = label.TextBounds
+	local w, h = b.X * k * (slack or 1), b.Y * k
+	local ax = label.TextXAlignment
+	local x0
+	if ax == Enum.TextXAlignment.Right then
+		x0 = r.x1 - w
+	elseif ax == Enum.TextXAlignment.Center then
+		x0 = (r.x0 + r.x1 - w) / 2
+	else
+		x0 = r.x0
+	end
+	local cy = (r.y0 + r.y1) / 2
+	return { x0 = x0, y0 = cy - h / 2, x1 = x0 + w, y1 = cy + h / 2 }
+end
+
+S.client_polish_matchpanel_mobile = guarded("client_polish_matchpanel_mobile", function()
+	local SLACK = 1.2
+	resetState()
+	for _, size in ipairs({ { 844, 390 }, { 667, 375 }, { 390, 844 }, { 1024, 768 } }) do
+		Mock.SetViewport(size[1], size[2])
+		advance(1.2)
+		local label = fmt("match panel (%dx%d, touch)", size[1], size[2])
+		LocalPlayer:SetAttribute("InMatch", true)
+		KC().toClient("MatchState", KC().matchState({}))
+		advance(1.5)
+		local inner = path(playerGui(), "NimbusHud.TopLeft.MatchPanel.Content.Inner")
+		local timer, tokens = path(inner, "Timer"), path(inner, "Tokens")
+		local leave = inner and inner:FindFirstChild("LeaveMatch", true)
+		local cp = path(inner, "CheckpointBar")
+		if T.check(inner ~= nil and shown(timer) and shown(tokens) and leave ~= nil and shown(cp), label .. ": the timer, the token line, Leave and the checkpoint bar are shown") then
+			local tt, kt = textRect(timer, SLACK), textRect(tokens, SLACK)
+			T.check(tostring(tokens.Text):find("7/24", 1, true) ~= nil and kt.x0 >= tt.x1 + 4,
+				label .. ": the token count and the timer text never overlap (" .. SLACK .. "x the measured width)",
+				fmt("'%s' ends at %.0f, '%s' starts at %.0f", timer.Text, tt.x1, tokens.Text, kt.x0))
+			local ib = rect(inner)
+			T.check(kt.x0 >= ib.x0 and kt.x1 <= ib.x1 + 1, label .. ": the token text stays inside the panel", fmt("%.0f-%.0f in %.0f-%.0f", kt.x0, kt.x1, ib.x0, ib.x1))
+			local lb, cb, kb = rect(leave), rect(cp), rect(tokens)
+			T.check(not overlap(kb, lb) and not overlap(kb, cb) and not overlap(tt, lb), label .. ": the token line is clear of the Leave button and the checkpoint bar (and the timer of Leave)",
+				fmt("tokens y %.0f-%.0f, Leave y %.0f-%.0f, checkpoints from %.0f", kb.y0, kb.y1, lb.y0, lb.y1, cb.y0))
+			T.check(tokens.TextSize * scaleOf(tokens) >= 14 and timer.TextSize * scaleOf(timer) >= 14 and lb.y1 - lb.y0 >= 30,
+				label .. ": readable (>= 14 px) with a thumb-sized Leave button", fmt("tokens %.1f px, Leave %.0f px tall", tokens.TextSize * scaleOf(tokens), lb.y1 - lb.y0))
+
+			-- the pre-match countdown: the numeral (popping in at 1.7x) and "Get ready!"
+			KC().toClient("MatchState", KC().matchState({ Phase = "Countdown", Seconds = 3, Checkpoint = 0, TokensCollected = 0 }))
+			advance(0.05)
+			local worst = math.huge
+			local detail = ""
+			for _ = 1, 4 do
+				local nt, gt = textRect(timer, SLACK), textRect(tokens, SLACK)
+				local gap = gt.x0 - nt.x1
+				if gap < worst then
+					worst = gap
+					detail = fmt("'%s' x%.2f ends at %.0f, '%s' starts at %.0f", timer.Text, scaleOf(timer), nt.x1, tokens.Text, gt.x0)
+				end
+				advance(0.15)
+			end
+			T.check(tokens.Text == "Get ready!" and tonumber(timer.Text) ~= nil and worst >= 4, label .. ": the countdown numeral (pop included) stays clear of 'Get ready!'", detail)
+		end
+		LocalPlayer:SetAttribute("InMatch", false)
+		KC().toClient("MatchState", nil)
+		advance(1)
+	end
+	Mock.SetViewport(390, 844)
+	advance(0.8)
+	resetState()
+	KC().flushErrors("polish match panel phone")
+	KC().flushWarnings("polish match panel phone")
 end)
 
 return S
