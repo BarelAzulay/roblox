@@ -657,16 +657,96 @@ local function rollAndGrant(player, profile, rouletteId, charge, roll, opts)
 	return true, result
 end
 
-function PetService.BuyRoulette(player, rouletteId)
+-- The optional currency of a spin: nil (the roulette's own), "Tokens" or "Gems" (any case; also { Currency = ... }).
+-- Returns "Tokens" | "Gems" | nil, or false for anything else.
+local function parseCurrency(currency)
+	if currency == nil then
+		return nil
+	end
+	if type(currency) == "table" then
+		currency = rawget(currency, "Currency")
+		if currency == nil then
+			return nil
+		end
+	end
+	if type(currency) ~= "string" or #currency > MAX_CURRENCY_LENGTH then
+		return false
+	end
+	local lower = string.lower(currency)
+	if lower == "gems" or lower == "gem" then
+		return "Gems"
+	elseif lower == "tokens" or lower == "token" or lower == "cloudtokens" then
+		return "Tokens"
+	end
+	return false
+end
+
+-- A gems-only roulette (the Secret roulette at the Storm Altar) by id, or nil. GemService knows them.
+local function gemsOnlyRoulette(rouletteId)
+	local gems = getGemService()
+	if not gems or type(gems.GetRoulette) ~= "function" then
+		return nil
+	end
+	local ok, def = pcall(gems.GetRoulette, rouletteId)
+	if ok and type(def) == "table" and def.GemsOnly == true then
+		return def
+	end
+	return nil
+end
+
+-- A spin paid in Gems: GemService quotes it (gem price, PolicyService check, the roulette's roll), then the shared
+-- roll charges the Gems and grants in one non-yielding step.
+local function buyWithGems(player, profile, rouletteId)
+	local gems = getGemService()
+	if not gems or type(gems.Quote) ~= "function" or type(DataService.SpendGems) ~= "function" or type(DataService.GetGems) ~= "function" then
+		return false, "Gem roulettes are not available right now"
+	end
+	local okQuote, ok, quote = pcall(gems.Quote, player, rouletteId)
+	if not okQuote then
+		warn("[PetService] GemService.Quote errored: " .. tostring(ok))
+		return false, "Gem roulettes are not available right now"
+	end
+	if not ok then
+		return false, type(quote) == "string" and quote or "Gem roulettes are not available right now"
+	end
+	local price = type(quote) == "table" and quote.Price or nil
+	if type(price) ~= "number" or price ~= price or price < 1 or price ~= math.floor(price) or price > 1e9 then
+		return false, "Gem roulettes are not available right now"
+	end
+	if DataService.GetGems(player) < price then
+		return false, "Not enough Gems"
+	end
+	local roll = type(quote.Roll) == "function" and quote.Roll or nil
+	return rollAndGrant(player, profile, rouletteId, function()
+		if DataService.SpendGems(player, price) then
+			return true
+		end
+		return false, "Not enough Gems"
+	end, roll, { AllowSecret = quote.AllowSecret == true, Currency = "Gems", Price = price })
+end
+
+function PetService.BuyRoulette(player, rouletteId, currency)
 	if not isLivePlayer(player) then
 		return false, "Player unavailable"
 	end
 	if type(rouletteId) ~= "string" then
 		return false, "Unknown roulette"
 	end
+	local paidWith = parseCurrency(currency)
+	if paidWith == false then
+		return false, "Unknown currency"
+	end
 	local roulette = roulettes[rouletteId]
 	if not roulette then
-		return false, "Unknown roulette"
+		-- not a token roulette: a gems-only one (the Secret roulette) is paid in Gems even when no currency is named
+		local gemsOnly = gemsOnlyRoulette(rouletteId)
+		if not gemsOnly then
+			return false, "Unknown roulette"
+		end
+		if paidWith == "Tokens" then
+			return false, tostring(gemsOnly.DisplayName or "That roulette") .. " takes Gems only"
+		end
+		paidWith = "Gems"
 	end
 	if player:GetAttribute(Config.Attr.InMatch) == true then
 		return false, "The shop is closed during a match"
@@ -678,6 +758,9 @@ function PetService.BuyRoulette(player, rouletteId)
 	if not profile then
 		return false, "Your data is still loading"
 	end
+	if paidWith == "Gems" then
+		return buyWithGems(player, profile, rouletteId)
+	end
 	local price = roulette.Price
 	if DataService.GetTokens(player) < price then
 		return false, "Not enough cloud tokens"
@@ -687,7 +770,7 @@ function PetService.BuyRoulette(player, rouletteId)
 			return true
 		end
 		return false, "Not enough cloud tokens"
-	end)
+	end, nil, { AllowSecret = roulette.AllowSecret == true, Currency = "Tokens", Price = price })
 end
 
 ----------------------------------------------------------------------
@@ -707,25 +790,33 @@ local function connectRemotes()
 	end
 	remotesConnected = true
 
-	buyRemote.OnServerEvent:Connect(function(player, rouletteId)
+	-- BuyRoulette(rouletteId, currency|nil): currency "Tokens" / "Gems" (or nil: the roulette's own), see BuyRoulette
+	buyRemote.OnServerEvent:Connect(function(player, rouletteId, currency)
 		if rateLimited(player, "BuyRoulette", REMOTE_COOLDOWN) then
 			return
 		end
 		if type(rouletteId) ~= "string" or #rouletteId > MAX_ID_LENGTH then
 			return
 		end
-		local ok, success, info = pcall(PetService.BuyRoulette, player, rouletteId)
+		local ok, success, info = pcall(PetService.BuyRoulette, player, rouletteId, currency)
 		if not ok then
 			warn("[PetService] BuyRoulette errored: " .. tostring(success))
 			success, info = false, "Something went wrong, try again"
 		end
 		if not success then
-			fireClient("RouletteResult", player, {
+			local answer = {
 				Ok = false,
 				Reason = tostring(info),
 				RouletteId = rouletteId,
 				Tokens = DataService.GetTokens(player),
-			})
+			}
+			if type(DataService.GetGems) == "function" then
+				answer.Gems = DataService.GetGems(player)
+			end
+			if parseCurrency(currency) == "Gems" or gemsOnlyRoulette(rouletteId) then
+				answer.Currency = "Gems"
+			end
+			fireClient("RouletteResult", player, answer)
 		end
 	end)
 

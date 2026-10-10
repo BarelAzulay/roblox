@@ -35,8 +35,13 @@
 --              "Secret pets" and "Awakens soon" in 0.64-stud letters: readable from ~30 studs), low walls between
 --              the bridge and the pillars, and a pixel-sized "STORM ALTAR" / "Secret pets" title tag above the
 --              altar, readable from the plaza.
---   Prompt     ProximityPrompt "Storm Altar" (ActionText "Look"): phase 1 sends the side toast
---              "The Storm Altar awakens soon: summon Secret pets with Gems!" (Notify, rate-limited per player).
+--   Prompt     ProximityPrompt "Storm Altar" (ActionText "Summon"). Phase 2 (gems): it opens the Shop on the
+--              gems-only Secret roulette (OpenPanel("Shop", { RouletteId = Config.Gems.SecretRoulette.Id,
+--              Currency = "Gems" }), rate-limited per player) when GemService.SecretRouletteState says "Open";
+--              an account where PolicyService restricts paid random items gets a side toast that the Secret
+--              Roulette is not available there; while the gem system is missing or still checking the account the
+--              phase 1 side toast "The Storm Altar awakens soon: summon Secret pets with Gems!" is sent (toasts:
+--              Notify, rate-limited per player).
 --   Lights     a few soft electric-blue PointLights with small ranges (portal, head crystal, gate).
 -- No AltarSite: a free spot between the plaza and the plot ring road is searched (away from lobby parts, NPC spots
 -- and the spawn), and the dock is found by raycasting for the street. Collision only on walkable parts (island
@@ -82,7 +87,11 @@ local MODEL_NAME = "StormAltar"
 local SHOWCASE_TAG = "NC_Showcase"
 local PET_ID = "stormfang"
 local TOAST = "The Storm Altar awakens soon: summon Secret pets with Gems!"
+local TOAST_RESTRICTED = "The Storm Altar's Secret Roulette is not available on your account."
 local TOAST_COOLDOWN = 3 -- seconds between two toasts for the same player
+local OPEN_COOLDOWN = 0.5 -- seconds between two "open the Secret roulette" for the same player
+local SECRET_ROULETTE_ID = (type(Config.Gems) == "table" and type(Config.Gems.SecretRoulette) == "table"
+	and type(Config.Gems.SecretRoulette.Id) == "string" and Config.Gems.SecretRoulette.Id) or "Secret"
 
 local DECK = 3 -- the island's walking surface above the lobby walking height
 local R_TOP = 23 -- walkable top radius
@@ -154,6 +163,7 @@ local C = {
 local altarModel = nil
 local altarCFrame = nil
 local lastToast = {} -- [player] = os.clock() of the last toast
+local lastOpen = {} -- [player] = os.clock() of the last OpenPanel (Secret roulette)
 local playersHooked = false
 
 ----------------------------------------------------------------------
@@ -1157,7 +1167,8 @@ end
 ----------------------------------------------------------------------
 -- Prompt, lights, sparkles
 ----------------------------------------------------------------------
-local function notify(player)
+-- A side toast for that player (rate-limited per player: TOAST_COOLDOWN).
+local function notify(player, text)
 	local now = os.clock()
 	local last = lastToast[player]
 	if last and now - last < TOAST_COOLDOWN then
@@ -1166,27 +1177,84 @@ local function notify(player)
 	lastToast[player] = now
 	local ok, remote = pcall(Remotes.Get, "Notify")
 	if ok and remote and player.Parent then
-		remote:FireClient(player, TOAST, "info", 5)
+		remote:FireClient(player, text or TOAST, "info", 5)
 	end
+end
+
+-- GemService (Phase 2) is optional and loaded after this module: looked up when the prompt is used.
+local gemModule = nil
+local function gemService()
+	if gemModule then
+		return gemModule
+	end
+	local inst = script.Parent and script.Parent:FindFirstChild("GemService")
+	if not inst then
+		return nil
+	end
+	local ok, result = pcall(require, inst)
+	if ok and type(result) == "table" then
+		gemModule = result
+		return result
+	end
+	return nil
+end
+
+-- "Open" | "Restricted" | "Checking" | "Unavailable" (no GemService: the phase 1 behaviour)
+local function secretState(player)
+	local gems = gemService()
+	if not gems or type(gems.SecretRouletteState) ~= "function" then
+		return "Unavailable"
+	end
+	local ok, state = pcall(gems.SecretRouletteState, player)
+	if ok and type(state) == "string" then
+		return state
+	end
+	return "Unavailable"
+end
+
+-- Opens the Shop on the gems-only Secret roulette (no Tab: the Shop picks the tab that holds that roulette).
+local function openSecretRoulette(player)
+	local now = os.clock()
+	local last = lastOpen[player]
+	if last and now - last < OPEN_COOLDOWN then
+		return
+	end
+	lastOpen[player] = now
+	local ok, remote = pcall(Remotes.Get, "OpenPanel")
+	if ok and remote and player.Parent then
+		remote:FireClient(player, "Shop", { RouletteId = SECRET_ROULETTE_ID, Currency = "Gems" })
+	end
+end
+
+local function onAltarUsed(player)
+	if typeof(player) ~= "Instance" or not player:IsA("Player") or player.Parent ~= Players then
+		return
+	end
+	if player:GetAttribute(Config.Attr.InMatch) == true then
+		return
+	end
+	local state = secretState(player)
+	if state == "Open" then
+		openSecretRoulette(player)
+	elseif state == "Restricted" then
+		notify(player, TOAST_RESTRICTED)
+	else
+		notify(player, TOAST) -- the gem system is missing or still checking this account
+	end
+	StormAltar.Used:Fire(player)
 end
 
 local function buildPrompt(parent, A)
 	local part = invisible(parent, "AltarPrompt", A * CFrame.new(0, 2.4, 0))
 	local prompt = Instance.new("ProximityPrompt")
 	prompt.Name = "StormAltarPrompt"
-	prompt.ActionText = "Look"
+	prompt.ActionText = "Summon"
 	prompt.ObjectText = "Storm Altar"
 	prompt.HoldDuration = 0
 	prompt.MaxActivationDistance = 21
 	prompt.RequiresLineOfSight = false
 	prompt.Parent = part
-	prompt.Triggered:Connect(function(player)
-		if typeof(player) ~= "Instance" or not player:IsA("Player") or player.Parent ~= Players then
-			return
-		end
-		notify(player)
-		StormAltar.Used:Fire(player)
-	end)
+	prompt.Triggered:Connect(onAltarUsed)
 	-- the portal's soft glow and a few sparkles rising from it
 	pointLight(part, 1.3, 14)
 	local rise = Instance.new("Attachment")
@@ -1204,6 +1272,7 @@ local function hookPlayers()
 	playersHooked = true
 	Players.PlayerRemoving:Connect(function(player)
 		lastToast[player] = nil
+		lastOpen[player] = nil
 	end)
 end
 
