@@ -55,11 +55,19 @@ python3 tools/render_gui.py tutorial:3 --grid -o tutorial.png        # 1920x1080
 python3 tools/render_gui.py match --crop 0,920,420,160 --scale 3 -o hp.png   # zoom into the HP / stamina bars
 python3 tools/render_gui.py npc --mark-small --boxes -o npc.png      # red frames on small text, every box outlined
 python3 tools/render_gui.py gallery -o gallery.png                   # renderer check: one cell per feature, known values
+python3 tools/render_gui.py portal:Hard:2 -o portal.png              # a portal's world GUIs (billboard + countdown face)
 ```
 
 * Scenarios: `lobby`, `title` (title card up), `match` / `match:hit` (a quarter second after a hit), `countdown`,
   `party` (portal party panel), `results`, `menu:<Window>[:<Tab or Index group>]`, `tutorial[:<step>]`, `npc[:<n>]`,
-  `dev` (owner panel), `toasts`, `gallery`, or a `.json` dump written earlier with `--json`. `--list` prints them.
+  `dev` (owner panel), `toasts`, `gallery`, `portal[:<Id>[:<players>[:<studs>]]]`, or a `.json` dump written earlier
+  with `--json`. `--list` prints them.
+* `portal` draws world GUIs instead of the HUD: the real LobbyBuilder + PortalService run (as the server) with
+  `players` members on the pad (default 1 on Medium), and the portal's GUIs are mirrored flat into a ScreenGui: the
+  pixel billboard at its own size (it keeps that size on screen), the eye-level countdown face (a SurfaceGui) at the
+  size it has on this screen from `studs` away (default 36: a friend just outside the lock walls with the default
+  camera; 70 degree vertical field of view) over a sketch of the gate's swirl, and the face's canvas at 1:1. The
+  report's smallest text is then the face's real on-screen size from that distance.
 * Screen: `--size WxH` (default 1920x1080). The smaller side <= 500 px boots a touch device (RUN / DASH buttons,
   raised HUD); `--touch` / `--no-touch` override (use `--touch` for tablets). Roblox's top bar (the 58 px inset) and,
   on touch devices, its thumbstick and jump button are sketched as faint ghosts (`--no-chrome` hides them).
