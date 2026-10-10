@@ -1776,14 +1776,19 @@ S.client_pets = guarded("client_pets", function()
 	if #mine == 2 then
 		local ok = true
 		for _, m in ipairs(mine) do
-			ok = ok and m:FindFirstChild("WingL", true) ~= nil and m.PrimaryPart ~= nil
+			ok = ok and m:FindFirstChild("WingL", true) ~= nil and m.PrimaryPart ~= nil and m.PrimaryPart.Anchored
 			for _, d in ipairs(m:GetDescendants()) do
-				if d:IsA("BasePart") and (d.CanCollide or d.CanTouch or d.CanQuery or not d.Anchored) then
+				-- release pass: the static parts are welded to the anchored PrimaryPart (one root write per pose)
+				local held = d:IsA("BasePart") and (d.Anchored or (function()
+					local w = d:FindFirstChild("PetFollowWeld")
+					return w ~= nil and w:IsA("Weld") and w.Part0 == m.PrimaryPart and w.Part1 == d
+				end)())
+				if d:IsA("BasePart") and (d.CanCollide or d.CanTouch or d.CanQuery or not held) then
 					ok = false
 				end
 			end
 		end
-		T.check(ok, "...PetBuilder models with wings, visual only (no collision / touch / query, anchored)")
+		T.check(ok, "...PetBuilder models with wings, visual only (no collision / touch / query; anchored root, every other part anchored or welded to it)")
 		-- they hover beside the owner
 		local root = myRoot()
 		advance(3)

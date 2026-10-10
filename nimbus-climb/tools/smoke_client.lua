@@ -1281,7 +1281,7 @@ S.client_mobile = guarded("client_mobile", function()
 				-- "Column" (labelled tiles in one column), "Grid" (labelled tiles, 2 x 3, short landscape screens) or "Compact"
 				-- (icon-only tiles in one column, narrow portrait screens). Its size must be the laid-out entries plus the scaled
 				-- gaps, scaled once (the mock used to apply the UIScale twice: 158 px instead of 219 on a 844x390 phone), and it
-				-- must sit vertically centred in the ScreenGui area.
+				-- must sit vertically centred in the ScreenGui area (on touch landscape screens: above Roblox's thumbstick).
 				local entries, sum = {}, 0
 				for _, entry in ipairs(menuColumn:GetChildren()) do
 					if entry:IsA("GuiObject") and entry.Name:find("^Entry_") then
@@ -1347,7 +1347,13 @@ S.client_mobile = guarded("client_mobile", function()
 					end
 				end
 				local area = Mock.GuiLayerSize(menuColumn)
-				if area then
+				local uis = game:GetService("UserInputService")
+				if area and w >= h and uis.TouchEnabled and not uis.KeyboardEnabled then
+					-- release pass: on touch landscape screens the column sits in the band above Roblox's thumbstick
+					-- (classic stick / dynamic idle ring: top at H - 93 on small screens, H - 210 on large ones)
+					local stickTop = (math.min(w, h) <= 500) and (h - 93) or (h - 210)
+					T.check(col.y1 <= stickTop, label .. ": the menu column ends above Roblox's thumbstick (touch landscape)", show(col) .. " vs stick top " .. stickTop)
+				elseif area then
 					local centre = menuColumn.AbsolutePosition.Y + menuColumn.AbsoluteSize.Y / 2
 					T.check(math.abs(centre - area.Y / 2) <= 1.5, label .. ": the menu column is vertically centred in the screen area", fmt(centre, 1) .. " vs " .. fmt(area.Y / 2, 1))
 				end

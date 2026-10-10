@@ -1653,7 +1653,7 @@ local function petKey(info)
 end
 
 -- props: Size (default 80x80), Position, AnchorPoint, Parent, Callback, Hotkey, Name, LayoutOrder
--- info = { Glyph, Color, Pet = PetDef, RarityColor, Name, Blurb }
+-- info = { Glyph, Color, Pet = PetDef, Detail = "High" | "Low" (PetBuilder detail, default High), RarityColor, Name, Blurb }
 function CloudUI.Slot(props)
 	props = props or {}
 	local info = nil
@@ -1828,6 +1828,7 @@ function CloudUI.Slot(props)
 					AnchorPoint = Vector2.new(0.5, 0.5),
 					Animate = hovering or selected,
 					Spin = "sway",
+					Detail = info.Detail,
 					ZIndex = 2,
 				})
 			elseif info.Glyph then

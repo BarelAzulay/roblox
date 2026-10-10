@@ -25,8 +25,8 @@
 -- The window is designed in 1080p pixels (readability rule: body 19, captions >= 18, buttons 22+, titles
 -- 28-34) under ONE UIScale = min(screen factor, fit); its size adapts between 900x420 and 1240x760 design
 -- pixels so phones keep a readable scale, every column scrolls when space is short.
--- Pet viewports are built a few per frame (only for the shown group), silhouettes never animate, and every
--- viewport runs on CloudUI's one shared update loop. Esc / gamepad B / the X / a click outside closes it.
+-- Pet viewports are built under a per-frame time budget (only for the shown group), silhouettes never animate,
+-- and every viewport runs on CloudUI's one shared update loop. Esc / gamepad B / the X / a click outside closes it.
 --
 -- Remotes: IndexClaim (out, rate-limited here and validated + rate-limited by the server).
 -- Plain Lua 5.1-compatible syntax only. All text goes through Theme roles.
@@ -99,7 +99,11 @@ local K = {
 	GROUP_TILE_H_SHORT = 60,
 	ELEMENTS_BTN_H = 52,
 	ELEMENTS_BTN_H_SHORT = 44,
-	TILES_PER_FRAME = 2, -- pet viewports attached per frame (a High-detail pet is up to ~350 parts)
+	-- pet viewports are attached under a per-frame TIME budget: the first of a frame always, more only while the
+	-- frame has spent < TILE_BUDGET s and at most TILES_MAX (a first-time High sculpt of ~350 parts costs tens of
+	-- ms, a cached clone a few: a fixed count hitched on fresh clients)
+	TILE_BUDGET = 0.004,
+	TILES_MAX = 3,
 	CLAIM_GAP = 0.6, -- seconds between two IndexClaim sends
 	CLAIM_TIMEOUT = 5, -- seconds the CLAIM button waits for the server before it resets
 	BACK_ACTION = "NimbusIndexBack",
@@ -1000,17 +1004,22 @@ local function buildTileViewport(tile)
 	end
 end
 
--- Attaches the missing viewports TILES_PER_FRAME at a time while the window is open.
+-- Attaches the missing viewports while the window is open, under the per-frame time budget (K.TILE_BUDGET).
 local function fillViewports()
 	if S.Filling then
 		return
 	end
 	S.Filling = true
 	task.spawn(function()
+		task.wait() -- the frame that opens the window already builds it (and the detail card's pet)
 		while S.Open do
-			local built = 0
+			local built, start, more = 0, os.clock(), false
 			for _, id in ipairs(S.TileOrder) do
 				local tile = S.Tiles[id]
+				if tile and not tile.Viewport and tile.Button.Parent and (built >= K.TILES_MAX or (built > 0 and os.clock() - start >= K.TILE_BUDGET)) then
+					more = true
+					break
+				end
 				if tile and not tile.Viewport and tile.Button.Parent then
 					local ok, err = pcall(buildTileViewport, tile)
 					if not ok or not tile.Viewport then
@@ -1022,12 +1031,9 @@ local function fillViewports()
 						tile.BuiltDiscovered = State.IsDiscovered(id)
 					end
 					built = built + 1
-					if built >= K.TILES_PER_FRAME then
-						break
-					end
 				end
 			end
-			if built < K.TILES_PER_FRAME then
+			if not more then
 				break
 			end
 			task.wait()

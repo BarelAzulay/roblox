@@ -20,9 +20,20 @@
 --     the same player cannot clobber each other. After a failed load, the next save (or a
 --     background retry) re-reads the store and merges the session on top of it.
 --     v3 merge rules: Discovered / IndexClaimed only ever grow (set union); Tutorial merges
---     monotonically (highest Step, Done and Gifted stick once true) so a failed load or a second server
---     can never replay the tutorial gift; Cash / Gems travel as +/- deltas like Tokens; Home values and
---     PetLevels entries are replaced when the session changed them.
+--     monotonically (Done and Gifted stick once true) so a second server can never replay the tutorial
+--     gift; Cash / Gems travel as +/- deltas like Tokens; Home values and PetLevels entries are replaced
+--     when the session changed them. The ONE exception is ResetFields (developer tools only): the fields
+--     it names are written over the stored ones at the next successful save instead of merged.
+--   * A PROVISIONAL profile (the load failed while the DataStore is reachable, e.g. an outage) holds
+--     defaults, not the player's data. One-time rewards must not be decided from it: GetTutorial
+--     answers nil and SetTutorial refuses until the background recovery read the real save (then
+--     ProfileRebased fires and TutorialService starts from the stored progress), and
+--     IsProvisional(player) lets IndexService / DevService refuse claims and resets meanwhile. That
+--     is what keeps a failed load from replaying the tutorial gift / finish reward. Without a usable
+--     store (Studio without API access) nothing is provisional: everything runs from memory.
+--   * Forward compatibility: a save keeps every stored field this version does not know (top level,
+--     inside Home and inside Stats) and a newer Version number, so a Phase 1 server still running after
+--     a later phase is published never erases that phase's data (Stations, Food, Tiers, Hybrids, ...).
 --   * v1 saves ({Tokens = n} in Config.Tokens.LegacyDataStoreName) are migrated once: when the v2
 --     key is empty, the legacy key is read and its tokens become the starting balance. The legacy
 --     store is never written.
@@ -36,8 +47,12 @@
 --     Release(player), Init(), ComputePerks(equippedIds), IsDiscovered(player, petId),
 --     signal ProfileRebased(player, profile).
 --   * v3 API: MarkDiscovered(player, petId) -> isNew (marks dirty; the caller Syncs, PetService does right
---     after a roll), GetTutorial(player) -> copy | nil until loaded, SetTutorial(player, t) -> ok
---     (MarkDirty + Sync; Gifted never goes back to false). ProfileSync gains Discovered, IndexClaimed, Tutorial.
+--     after a roll), GetTutorial(player) -> copy | nil until loaded (and while provisional),
+--     SetTutorial(player, t) -> ok (MarkDirty + Sync; Gifted never goes back to false; false while
+--     provisional). ProfileSync gains Discovered, IndexClaimed, Tutorial.
+--     Extras: IsProvisional(player) -> bool; ResetFields(player, { Discovered, IndexClaimed, Tutorial,
+--     BestTimes = true }) -> ok: the session's CURRENT values of those fields replace the stored ones at the
+--     next successful save (DevService /reset and /tutorial; the caller changes the live values itself).
 --
 -- Plain Lua 5.1-compatible syntax only.
 
@@ -72,13 +87,28 @@ local STAT_KEYS = { "Matches", "Wins", "TokensEarned", "Spins" }
 local MAX_TUTORIAL_STEP = 1000 -- sanity cap for Tutorial.Step (TutorialService clamps to its own step count)
 local MAX_LEVEL = 100000 -- sanity cap for home / room / pet levels and prestige
 
+-- Fields ResetFields may write over the store (everything else already follows a reset through the normal delta).
+local OVERWRITABLE = { Discovered = true, IndexClaimed = true, Tutorial = true, BestTimes = true }
+-- Stored keys this version owns. Anything else in a stored profile belongs to a newer phase and is written back
+-- untouched by every save (see keepForeign).
+local KNOWN_TOP = {
+	Version = true, Tokens = true, Pets = true, Equipped = true, Items = true, Stats = true, SpotIndex = true,
+	Discovered = true, IndexClaimed = true, Tutorial = true, Cash = true, Gems = true, Home = true, PetLevels = true,
+	UpdatedAt = true,
+}
+local KNOWN_HOME = { Level = true, Rooms = true, Prestige = true }
+local KNOWN_STATS = { Matches = true, Wins = true, TokensEarned = true, Spins = true, BestTimes = true }
+
 -- cache[userId] = {
 --   Profile = live profile table (what every other module reads and mutates),
 --   Base = profile the store is known to contain (delta reference),
 --   Owner = the Player instance the entry was last announced to (a quick rejoin gets a new one),
 --   Loaded, Loading, LoadFailed, Saving, Dirty, RecoveryScheduled = bool flags,
 --   Orphan = true while the player is gone but the entry still holds unsaved progress,
---   OrphanSince = os.clock() when it became an orphan, OrphanScheduled = a background retry loop runs
+--   OrphanSince = os.clock() when it became an orphan, OrphanScheduled = a background retry loop runs,
+--   Overwrite = { [field] = true } fields ResetFields asked to write over the store (nil when none is pending;
+--     cleared only after a successful write, so orphan retries and BindToClose carry it too),
+--   OverwriteGen = counter bumped by every ResetFields (a reset during an in-flight save stays pending)
 -- }
 local cache = {}
 local store = nil
@@ -524,10 +554,47 @@ local function samePetLevel(a, b)
 	return a.Level == b.Level and a.Xp == b.Xp
 end
 
+-- Untrusted best-times map -> { [difficultyId] = seconds } with valid keys and sane seconds only.
+local function cleanBestTimes(raw)
+	local out = {}
+	for id, seconds in pairs(tableOr(raw)) do
+		local clean = sanitizeSeconds(seconds)
+		if validKey(id) and clean then
+			out[id] = clean
+		end
+	end
+	return out
+end
+
+-- The values a pending ResetFields writes over the store: the session's CURRENT values of those fields.
+local function overwriteValues(live, overwrite)
+	if type(overwrite) ~= "table" then
+		return nil
+	end
+	local out = {}
+	if overwrite.Discovered then
+		out.Discovered = cleanSet(live.Discovered)
+	end
+	if overwrite.IndexClaimed then
+		out.IndexClaimed = cleanSet(live.IndexClaimed)
+	end
+	if overwrite.Tutorial then
+		out.Tutorial = cleanTutorial(live.Tutorial)
+	end
+	if overwrite.BestTimes then
+		out.BestTimes = cleanBestTimes(type(live.Stats) == "table" and live.Stats.BestTimes)
+	end
+	if next(out) == nil then
+		return nil
+	end
+	return out
+end
+
 -- What changed between `base` and `live`. Counters travel as +/- deltas, "best" values as
 -- candidates, sets as additions, lists / single values as replacements. `live` may be the raw live
--- profile, so every v3 field is read defensively.
-local function diffProfiles(live, base)
+-- profile, so every v3 field is read defensively. `overwrite` (the entry's pending ResetFields, or nil)
+-- adds d.Overwrite: whole fields that replace the stored ones before anything else is merged.
+local function diffProfiles(live, base, overwrite)
 	local d = {
 		Tokens = live.Tokens - base.Tokens,
 		Pets = diffCounts(live.Pets, base.Pets),
@@ -548,6 +615,7 @@ local function diffProfiles(live, base)
 		HomePrestige = nil,
 		Rooms = nil,
 		PetLevels = nil,
+		Overwrite = overwriteValues(live, overwrite),
 	}
 	for _, key in ipairs(STAT_KEYS) do
 		local delta = live.Stats[key] - base.Stats[key]
@@ -600,6 +668,7 @@ local function isEmptyDelta(d)
 		and d.HomePrestige == nil
 		and next(d.Rooms) == nil
 		and next(d.PetLevels) == nil
+		and d.Overwrite == nil
 end
 
 local function applyCounts(target, deltas, maxCount)
@@ -628,6 +697,23 @@ end
 -- stored profile + delta -> new profile. Pure (runs inside UpdateAsync, which may retry it).
 local function applyDelta(stored, d)
 	local out = copyProfile(stored)
+	-- a pending ResetFields first replaces whole fields, so the union / sticky / best-of merges below cannot
+	-- bring the stored values back (they then merge the session's own changes onto the replaced value)
+	local o = d.Overwrite
+	if o then
+		if o.Discovered then
+			out.Discovered = copyMap(o.Discovered)
+		end
+		if o.IndexClaimed then
+			out.IndexClaimed = copyMap(o.IndexClaimed)
+		end
+		if o.Tutorial then
+			out.Tutorial = cleanTutorial(o.Tutorial)
+		end
+		if o.BestTimes then
+			out.Stats.BestTimes = copyMap(o.BestTimes)
+		end
+	end
 	out.Tokens = sanitize(out.Tokens + d.Tokens)
 	applyCounts(out.Pets, d.Pets, Config.Pets.MaxPerStack)
 	applyCounts(out.Items, d.Items, Config.Items.MaxCarry)
@@ -674,6 +760,39 @@ local function applyDelta(stored, d)
 	applyReplace(out.Home.Rooms, d.Rooms)
 	applyReplace(out.PetLevels, d.PetLevels)
 	return out
+end
+
+-- Forward compatibility (runs inside UpdateAsync, so it stays pure): `merged` was rebuilt from the keys this
+-- version knows, so it gets back every stored key it does not own (top level, inside Home and inside Stats) and
+-- a newer Version number. A Phase 1 server still running after a later phase is published then never erases that
+-- phase's data. Known keys are never copied back (a cleared SpotIndex must stay cleared).
+local function keepForeign(merged, old)
+	if type(old) ~= "table" then
+		return merged
+	end
+	for key, value in pairs(old) do
+		if not KNOWN_TOP[key] then
+			merged[key] = value
+		end
+	end
+	if type(old.Home) == "table" then
+		for key, value in pairs(old.Home) do
+			if not KNOWN_HOME[key] then
+				merged.Home[key] = value
+			end
+		end
+	end
+	if type(old.Stats) == "table" then
+		for key, value in pairs(old.Stats) do
+			if not KNOWN_STATS[key] then
+				merged.Stats[key] = value
+			end
+		end
+	end
+	if isFinite(old.Version) and old.Version > PROFILE_VERSION then
+		merged.Version = old.Version
+	end
+	return merged
 end
 
 -- Clears `t` and copies `src` into it (one level deep for table values).
@@ -734,9 +853,10 @@ local function replaceContents(target, src)
 end
 
 -- Moves the live profile onto freshly read store data while keeping everything the session did
--- since `fromBase`. `newBase` becomes the new "known to be in the store" reference.
+-- since `fromBase`. `newBase` becomes the new "known to be in the store" reference. A pending ResetFields
+-- keeps the session's values of its fields (they are still to be written over the store).
 local function rebase(entry, fromBase, stored, newBase)
-	local d = diffProfiles(entry.Profile, fromBase)
+	local d = diffProfiles(entry.Profile, fromBase, entry.Overwrite)
 	local merged = applyDelta(stored, d)
 	replaceContents(entry.Profile, merged)
 	entry.Base = copyProfile(newBase)
@@ -873,6 +993,7 @@ local function noteFailure(what, err)
 		string.find(message, "StudioAccessToApisNotAllowed", 1, true)
 		or string.find(message, "Studio access to APIs", 1, true)
 		or string.find(message, "Enable Studio Access", 1, true)
+		or string.find(message, "publish this place", 1, true) -- an unpublished place in Studio
 	then
 		storeDisabled = true -- stop hammering an API that will keep refusing us
 		return
@@ -899,6 +1020,13 @@ local function getStore()
 		end
 	end
 	return store
+end
+
+-- true while the entry holds stand-in defaults: its load failed although the store is usable (an outage), and the
+-- recovery has not read the real save yet. Without a usable store (Studio without API access) the in-memory
+-- profile is all there is, so it is never provisional.
+local function isProvisional(entry)
+	return entry ~= nil and entry.LoadFailed == true and getStore() ~= nil
 end
 
 local function getLegacyStore()
@@ -1137,8 +1265,9 @@ local function writeEntry(entry, userId)
 			return false
 		end
 
+		local overwriteGen = entry.OverwriteGen
 		local snapshot = copyProfile(entry.Profile)
-		local delta = diffProfiles(snapshot, entry.Base)
+		local delta = diffProfiles(snapshot, entry.Base, entry.Overwrite)
 		if isEmptyDelta(delta) then
 			entry.Dirty = false
 			return true
@@ -1148,7 +1277,7 @@ local function writeEntry(entry, userId)
 		local ok, err = pcall(function()
 			result = s:UpdateAsync(keyFor(userId), function(old)
 				-- Must be pure and non-yielding: UpdateAsync may call it more than once.
-				local merged = applyDelta(normalizeProfile(old), delta)
+				local merged = keepForeign(applyDelta(normalizeProfile(old), delta), old)
 				merged.UpdatedAt = os.time()
 				return merged
 			end)
@@ -1156,6 +1285,9 @@ local function writeEntry(entry, userId)
 
 		if ok then
 			entry.Dirty = false
+			if delta.Overwrite and entry.OverwriteGen == overwriteGen then
+				entry.Overwrite = nil -- written; a ResetFields during the write stays pending for the next save
+			end
 			if type(result) == "table" then
 				local confirmed = normalizeProfile(result)
 				if profilesEqual(confirmed, snapshot) then
@@ -1230,7 +1362,7 @@ end
 -- An unreadable comparison counts as "not clean": keeping data is always the safe direction.
 local function entryIsClean(entry)
 	local ok, empty = pcall(function()
-		return isEmptyDelta(diffProfiles(entry.Profile, entry.Base))
+		return isEmptyDelta(diffProfiles(entry.Profile, entry.Base, entry.Overwrite))
 	end)
 	return ok and empty == true
 end
@@ -1363,6 +1495,7 @@ function DataService.Load(player)
 		fallback.Loading = false
 		fallback.Loaded = true
 		fallback.LoadFailed = true
+		scheduleRecovery(player.UserId) -- provisional until the real save is read (see the header)
 		return fallback.Profile
 	end
 	-- A quick rejoin can find the previous session's entry still in memory (its final save was in
@@ -1461,10 +1594,20 @@ function DataService.IsDiscovered(player, petId)
 	return type(discovered) == "table" and discovered[petId] == true
 end
 
--- A copy of the tutorial progress { Step, Done, Gifted }, or nil until the profile is loaded.
+-- Extra: true while the player's profile is a stand-in (its load failed during a DataStore outage and the real
+-- save has not been read yet). One-time rewards (tutorial gift, Index claims) and developer resets wait for it.
+function DataService.IsProvisional(player)
+	local entry = player and cache[player.UserId]
+	return entry ~= nil and entry.Loaded == true and isProvisional(entry)
+end
+
+-- A copy of the tutorial progress { Step, Done, Gifted }, or nil until the profile is loaded. Also nil while the
+-- profile is provisional: its defaults would start a returning player's tutorial again (gift and finish reward
+-- included). TutorialService keeps polling and starts from the real progress once the recovery fired
+-- ProfileRebased.
 function DataService.GetTutorial(player)
 	local entry = player and cache[player.UserId]
-	if not entry or not entry.Loaded then
+	if not entry or not entry.Loaded or isProvisional(entry) then
 		return nil
 	end
 	return cleanTutorial(entry.Profile.Tutorial)
@@ -1472,13 +1615,14 @@ end
 
 -- Stores tutorial progress (MarkDirty + Sync). Step is clamped to a whole number >= 1; Done and Gifted
 -- stick once true (the store merges them the same way, so a gift can never be paid twice).
--- Returns true when stored (false until the profile is loaded or for a non-table argument).
+-- Returns true when stored (false until the profile is loaded, while it is provisional, or for a non-table
+-- argument).
 function DataService.SetTutorial(player, tutorial)
 	if not player or type(tutorial) ~= "table" then
 		return false
 	end
 	local entry = cache[player.UserId]
-	if not entry or not entry.Loaded then
+	if not entry or not entry.Loaded or isProvisional(entry) then
 		return false
 	end
 	local profile = entry.Profile
@@ -1494,6 +1638,40 @@ function DataService.SetTutorial(player, tutorial)
 	live.Gifted = wanted.Gifted or current.Gifted
 	entry.Dirty = true
 	DataService.Sync(player)
+	return true
+end
+
+-- Extra (developer tools only): the session's CURRENT values of the named fields (Discovered, IndexClaimed,
+-- Tutorial, BestTimes; fields = { Discovered = true, ... }) replace the stored ones at the next successful save
+-- instead of being merged (those merges only ever grow, so a /reset or /tutorial would otherwise come back with
+-- the next save). The caller changes the live values itself; everything after this call merges on top of them as
+-- usual. Pending until a save succeeds (orphan retries and BindToClose carry it). Returns true when recorded
+-- (false until the profile is loaded, while it is provisional, or without a known field).
+function DataService.ResetFields(player, fields)
+	if not player or type(fields) ~= "table" then
+		return false
+	end
+	local entry = cache[player.UserId]
+	if not entry or not entry.Loaded or isProvisional(entry) then
+		return false
+	end
+	local pending = {}
+	for key in pairs(entry.Overwrite or {}) do
+		pending[key] = true
+	end
+	local any = false
+	for key, on in pairs(fields) do
+		if on == true and OVERWRITABLE[key] then
+			pending[key] = true
+			any = true
+		end
+	end
+	if not any then
+		return false
+	end
+	entry.Overwrite = pending
+	entry.OverwriteGen = (entry.OverwriteGen or 0) + 1
+	entry.Dirty = true
 	return true
 end
 
