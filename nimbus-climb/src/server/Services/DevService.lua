@@ -49,15 +49,21 @@
 -- Chat: Player.Chatted (fires for the legacy chat and for TextChatService) of allowed players; "/allpets",
 -- "/tokens 50000", "/reset", "/tutorial", "/skiptutorial", "/devhelp". Other "/" messages are left alone.
 -- Studio auto grant: with Config.Dev.StudioAutoGrant in Studio, every allowed player gets allpets + tokens once per
--- server, right after their profile loads.
+-- server, right after their profile loads (a provisional profile waits until DataService.ProfileRebased says it
+-- recovered).
 -- The DevCommand listener is connected even when Config.Dev.Enabled is false (or DataService is missing): Roblox
 -- queues every event fired at a RemoteEvent nobody listens to, so a switched-off build must still drop them at once
 -- (Run rate-limits them and IsAllowed refuses everybody).
 --
--- Persistence note: DataService merges Discovered, IndexClaimed, Tutorial.Done / Gifted and best times so they only
--- ever grow (a gift can never be paid twice). With DataStores ON, a reset or tutorial restart of those fields
--- therefore only lasts until the next save; everything else (tokens, pets, items, stats, ...) is reset for good.
--- In Studio without API access (the default) everything is in memory anyway.
+-- Persistence: DataService merges Discovered, IndexClaimed, Tutorial.Done / Gifted and best times so they only
+-- ever grow (a gift can never be paid twice). reset and tutorial therefore call DataService.ResetFields for the
+-- fields they rewind (reset: Discovered, IndexClaimed, best times and the rewound Tutorial; tutorial: Tutorial):
+-- the next successful save writes the session's values over the stored ones, so the reset lasts with DataStores
+-- on (the live game, Studio with API access) and a replay is not ended by the next autosave. Everything else
+-- (tokens, pets, items, stats, ...) follows through the normal delta save.
+-- While DataService.IsProvisional(player) (the profile's load failed during a DataStore outage and the real save
+-- is still being read) only tokens and devhelp run: allpets, reset, tutorial and skiptutorial would work on stand-in
+-- defaults, so they are refused with "your data is still loading".
 -- Plain Lua 5.1-compatible syntax only.
 
 local Players = game:GetService("Players")
@@ -89,6 +95,8 @@ local KNOWN = {}
 for _, name in ipairs(DevService.Commands) do
 	KNOWN[name] = true
 end
+-- the commands that still run while the profile is provisional (see the persistence note)
+local PROVISIONAL_OK = { tokens = true, devhelp = true }
 
 ----------------------------------------------------------------------
 -- Collaborators (other engineers' modules: every use is guarded)
@@ -216,6 +224,27 @@ local function markDirtyAndSync(player)
 	end
 	if hasFunction(DataService, "Sync") then
 		DataService.Sync(player)
+	end
+end
+
+-- true while the player's profile holds stand-in defaults (its load failed during a DataStore outage)
+local function isProvisional(player)
+	if not hasFunction(DataService, "IsProvisional") then
+		return false
+	end
+	local ok, provisional = pcall(DataService.IsProvisional, player)
+	return ok and provisional == true
+end
+
+-- Asks DataService to write the session's values of these fields over the stored ones at the next save (they are
+-- merged so they only ever grow otherwise, which would undo the reset). See the persistence note in the header.
+local function overwriteStored(player, fields)
+	if not hasFunction(DataService, "ResetFields") then
+		return
+	end
+	local ok, err = pcall(DataService.ResetFields, player, fields)
+	if not ok then
+		warn("[DevService] DataService.ResetFields failed: " .. tostring(err))
 	end
 end
 
@@ -459,7 +488,10 @@ local function cmdReset(player, profile)
 	-- the tutorial: a new player's again when TutorialService can re-read it (or the build has none); otherwise
 	-- it must not wait forever on a step that needs what was just wiped
 	local tutorialNote = ""
-	if reload or not TutorialService then
+	local rewound = reload ~= nil or not TutorialService
+	-- the grow-only fields are written over the store at the next save (the store would merge them back otherwise)
+	overwriteStored(player, { Discovered = true, IndexClaimed = true, BestTimes = true, Tutorial = rewound })
+	if rewound then
 		rewindTutorial(player, profile, reload, true)
 	else
 		tutorialNote = settleTutorialAfterReset(player, profile)
@@ -477,6 +509,7 @@ local function cmdTutorial(player, profile)
 	if not reload then
 		return false, "Restart tutorial is not in this build yet"
 	end
+	overwriteStored(player, { Tutorial = true }) -- Done would otherwise stick in the store and end the replay
 	rewindTutorial(player, profile, reload, false)
 	return true, "the tutorial starts again from step 1", true
 end
@@ -547,6 +580,12 @@ local function execute(player, command, arg, source)
 		log(player, source, name, arg, "refused: profile not loaded")
 		notify(player, "DEV: your data is still loading, try again", "bad")
 		return false, "profile not loaded"
+	end
+	-- a provisional profile holds stand-in defaults (failed load during an outage): only additive commands make sense
+	if not PROVISIONAL_OK[name] and isProvisional(player) then
+		log(player, source, name, arg, "refused: profile provisional")
+		notify(player, "DEV: your data is still loading, try again", "bad")
+		return false, "profile provisional"
 	end
 	local pok, ok, message, changed = pcall(handler, player, profile, arg)
 	if not pok then
@@ -669,12 +708,13 @@ local function autoGrant(player)
 	if dev.StudioAutoGrant ~= true or not RunService:IsStudio() or not isLivePlayer(player) then
 		return
 	end
-	if autoGranted[player.UserId] or not getProfile(player) then
+	-- a provisional profile (failed load during an outage) waits: ProfileRebased brings it back here once it recovered
+	if autoGranted[player.UserId] or not getProfile(player) or isProvisional(player) then
 		return
 	end
 	local allowed = DevService.IsAllowed(player)
-	-- checked again after IsAllowed: the join handler and ProfileLoaded can both get here
-	if not allowed or autoGranted[player.UserId] or not isLivePlayer(player) or not getProfile(player) then
+	-- checked again after IsAllowed: the join handler, ProfileLoaded and ProfileRebased can all get here
+	if not allowed or autoGranted[player.UserId] or not isLivePlayer(player) or not getProfile(player) or isProvisional(player) then
 		return
 	end
 	autoGranted[player.UserId] = true
@@ -776,6 +816,11 @@ function DevService.Init(deps)
 	if hasSignal(DataService, "ProfileLoaded") then
 		DataService.ProfileLoaded:Connect(function(player)
 			autoGrant(player)
+		end)
+	end
+	if hasSignal(DataService, "ProfileRebased") then
+		DataService.ProfileRebased:Connect(function(player)
+			autoGrant(player) -- a profile that loaded provisionally gets its Studio grant once it recovered
 		end)
 	end
 	Players.PlayerAdded:Connect(onPlayerAdded)

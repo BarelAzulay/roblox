@@ -9,7 +9,9 @@
 --           IndexService.GetProgress(player) -> { [groupId] = { Found, Total, Complete, Claimed, Reward } }
 --
 -- A group is one rarity (PetCatalog.IndexGroups). It is complete when every pet in it is in the profile's
--- Discovered set; its Config.Index reward can be claimed once (Profile.IndexClaimed[groupId] = true).
+-- Discovered set; its Config.Index reward can be claimed once (Profile.IndexClaimed[groupId] = true). Claims wait
+-- while DataService.IsProvisional(player) (a load that failed during an outage: the defaults cannot tell which
+-- rewards were already claimed).
 -- Everything is server authoritative: the client only sends a group id through the IndexClaim remote, which
 -- is type checked and rate limited; the reward goes through DataService.AddTokens, then the profile is synced.
 --
@@ -186,6 +188,13 @@ function IndexService.CanClaim(player, groupId)
 	local profile = getProfile(player)
 	if not profile then
 		return false, "Your data is still loading"
+	end
+	-- a profile whose load failed (DataStore outage) holds defaults: its IndexClaimed cannot tell what was claimed
+	if type(DataService.IsProvisional) == "function" then
+		local okProvisional, provisional = pcall(DataService.IsProvisional, player)
+		if okProvisional and provisional == true then
+			return false, "Your data is still loading"
+		end
 	end
 	if isClaimed(profile, groupId) then
 		return false, "Already claimed"

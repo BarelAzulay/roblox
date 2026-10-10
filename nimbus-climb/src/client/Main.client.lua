@@ -25,13 +25,17 @@ local CONTROLLER_NAMES = {
 	"TutorialController",
 	"ShowcaseController",
 	"DevController",
+	-- Phase 2
+	"HomeFx",
+	"FusionController",
 }
 
 local TAG = "[NimbusClimb] "
 
 -- Newer controllers that a build may not contain yet: skip them quietly when absent.
 local OPTIONAL = { SkyDragonController = true, IndexController = true, NpcController = true, TutorialController = true,
-	ShowcaseController = true, DevController = true }
+	ShowcaseController = true, DevController = true,
+	HomeFx = true, FusionController = true }
 
 local client = script.Parent
 

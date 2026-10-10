@@ -10,7 +10,13 @@
 --     Cloudy Dragon in a ViewportFrame, gently flapping, livelier while talking), the step title, "Step 3/9",
 --     progress pips, the typewriter text, a hint line with the live distance, a Next button (CompleteOn = "Next")
 --     and a small "Skip tutorial" link that asks to confirm. Tapping the portrait folds the card into a bubble;
---     screens too small for the card get the bubble automatically. Designed in 1080p pixels under a UIScale of
+--     screens too small for the card get the bubble automatically. The HUD's bottom-left block (HP / stamina card)
+--     is a hard limit: a bubble that has no room under the top-left panel (party / match panel on a landscape
+--     phone) sits beside that panel instead. A card the player opens in the lobby may cover the idle vitals card
+--     (and, as a last resort, the idle hotbar) but never the thumbstick, the touch buttons or the screen edge; in a
+--     match it never covers the vitals (no room: the bubble), and a card opened in the lobby is folded back when
+--     the match starts. While a menu window / the Pet Index / the roulette is open the card folds into the bubble
+--     and the menu pointer hides. Designed in 1080p pixels under a UIScale of
 --     Theme.ScreenFactor() (readability rule: body 20, captions 18, buttons 22, title 30 -> >= 14.4 px on phones).
 --     Step completion: a voxel confetti burst from the portrait; the end of the tutorial: a bigger one.
 --   * Guide arrow for world targets (Spot / Shop / Roulette / Portal, found by name under workspace.NimbusLobby,
@@ -18,7 +24,9 @@
 --     shared/Voxel.lua, a ring of floating voxel sparkles on the ground, a floating name + distance sign and a
 --     dotted sparkle Beam from the HumanoidRootPart toward the target (workspace.ClientFx.TutorialGuide).
 --   * Menu targets: a pulsing gold ring around MenuButton_<Id> and a small pixel-art arrow pointing at it
---     (ScreenGui "NimbusTutorialPointer", display order 21, above the menu).
+--     (ScreenGui "NimbusTutorialPointer", display order 21, above the menu), on the first side of the button
+--     (right, above, below, left) that is clear of the other tiles and of the tutorial card; none free (the
+--     middle of the phone's 2 x 3 grid): the ring alone. The card / bubble keeps the arrow's spot free.
 --   * Hidden in a match except the "finish" step text; the guides only show in the lobby.
 -- Events sent through TutorialEvent (the server validates them against the current step): "Next", "Skip",
 -- "ShopOpened" / "IndexOpened" / "PetsOpened" (MenuController.WindowOpened / IndexController.WindowOpened, the
@@ -75,6 +83,7 @@ local K = {
 	FIRST_SHOW_DELAY = 1.2,
 	PANEL_ORDER = 12, -- HUD 10, hotbar 11, windows 20, toasts 30
 	POINTER_ORDER = 21, -- above the menu column
+	POINTER_ROOM = 92, -- room right of a Menu target for the arrow (68 px long, bouncing up to 15 px out)
 	EVENT_COOLDOWN = 0.35,
 	NEXT_LOCK = 2.5,
 	SKIP_LOCK = 3,
@@ -500,7 +509,8 @@ end
 
 local function hintShown()
 	local st = S.state
-	return st ~= nil and not st.Done and st.CompleteOn ~= "Next" and not S.finale
+	-- (S.compactCard: a short screen's opened card drops the objective line; the text above says the same)
+	return st ~= nil and not st.Done and st.CompleteOn ~= "Next" and not S.finale and not S.compactCard
 end
 
 local function footerShown()
@@ -554,26 +564,102 @@ local function menuRect()
 	return found
 end
 
--- HUD neighbours: bottom of the top-left panel area and top of the bottom-left block (0 / nil when absent).
+-- HUD neighbours (published by HudController, gui px): bottom of the top-left panel area and top of the
+-- bottom-left block (vitals / currency), plus the top-left panel's right edge and the top-right stack (0 when absent).
 local function hudBounds(area)
 	local pg = playerGui()
 	local hud = pg and pg:FindFirstChild("NimbusHud")
-	local topLeftBottom, bottomLeftTop = 0, area.Y
+	local out = { TopLeftBottom = 0, TopLeftRight = 0, BottomLeftTop = area.Y, TopRightLeft = 0, TopRightBottom = 0 }
 	if hud and hud:IsA("ScreenGui") and hud.Enabled then
 		local dy = insetShift(hud)
 		local a = tonumber(hud:GetAttribute("TopLeftBottom"))
 		if a and a > 0 then
-			topLeftBottom = a + dy
+			out.TopLeftBottom = a + dy
 		end
 		local b = tonumber(hud:GetAttribute("BottomLeftTop"))
 		if b and b > 0 then
-			bottomLeftTop = b + dy
+			out.BottomLeftTop = b + dy
+		end
+		local r = tonumber(hud:GetAttribute("TopLeftRight"))
+		if r and r > 0 and out.TopLeftBottom > 0 then
+			out.TopLeftRight = r
+		end
+		local trl = tonumber(hud:GetAttribute("TopRightLeft"))
+		local trb = tonumber(hud:GetAttribute("TopRightBottom"))
+		if trl and trl > 0 and trb and trb > 0 then
+			out.TopRightLeft, out.TopRightBottom = trl, trb + dy
 		end
 	end
-	return topLeftBottom, bottomLeftTop
+	return out
 end
 
+-- The hotbar in our gui coordinates (nil when there is none on screen).
+local function hotbarRect()
+	local pg = playerGui()
+	local bar = pg and pg:FindFirstChild("NimbusHotbar")
+	local frame = bar and bar:FindFirstChild("Hotbar")
+	if frame and frame:IsA("GuiObject") and frame.AbsoluteSize.X > 0 and shownIn(frame, bar) then
+		return rectOf(frame, insetShift(bar))
+	end
+	return nil
+end
+
+-- Roblox's touch thumbstick (bottom-left; the classic stick or the dynamic stick's idle ring, whichever is
+-- bigger) in gui px, nil without touch.
+local function thumbstickRect(area)
+	if not UserInputService.TouchEnabled then
+		return nil
+	end
+	local camera = Workspace.CurrentCamera
+	local vp = camera and camera.ViewportSize or area
+	if math.min(vp.X, vp.Y) <= 500 then
+		return { x0 = 25, y0 = area.Y - 96, x1 = 104, y1 = area.Y - 20 }
+	end
+	return { x0 = 58, y0 = area.Y - 210, x1 = 206, y1 = area.Y - 90 }
+end
+
+-- The touch RUN / DASH buttons (MovementController's MobileControls) in our gui coordinates.
+local function touchButtonRects()
+	local out = {}
+	local pg = playerGui()
+	local mobile = pg and pg:FindFirstChild("MobileControls")
+	if not (mobile and mobile:IsA("ScreenGui") and mobile.Enabled) then
+		return out
+	end
+	local dy = insetShift(mobile)
+	for _, d in ipairs(mobile:GetDescendants()) do
+		if d:IsA("GuiButton") and d.AbsoluteSize.X > 0 and shownIn(d, mobile) then
+			out[#out + 1] = rectOf(d, dy)
+		end
+	end
+	return out
+end
+
+-- A menu window, the odds popup, the roulette stage or the Pet Index is open (they cover the menu and the card).
+local function windowCovering()
+	local menu = mod("MenuController")
+	if menu and type(menu.IsOpen) == "function" then
+		local ok, open = pcall(menu.IsOpen)
+		if ok and open == true then
+			return true
+		end
+	end
+	local index = mod("IndexController")
+	if index and type(index.IsOpen) == "function" then
+		local ok, open = pcall(index.IsOpen)
+		if ok and open == true then
+			return true
+		end
+	end
+	return false
+end
+
+-- Folded into the bubble? A window on top (S.windowOpen) or a card that cannot fit on this screen right now
+-- (S.forcedBubble) always folds it; otherwise the player's choice, else automatic (the card does not fit).
 local function collapsed()
+	if S.windowOpen or S.forcedBubble then
+		return true
+	end
 	if S.finale then
 		return false
 	end
@@ -617,9 +703,7 @@ local function layout()
 	end
 	local area = guiArea()
 	local k = Theme.ScreenFactor()
-	if UI.Scale.Scale ~= k then
-		UI.Scale.Scale = k
-	end
+	S.compactCard = false -- measured with the objective line first (a short screen's opened card may drop it below)
 	if UI.PointerScale and UI.PointerScale.Scale ~= k then
 		UI.PointerScale.Scale = k
 	end
@@ -629,21 +713,37 @@ local function layout()
 	local midX0 = area.X * (0.5 - K.MIDDLE)
 	local midY0 = screenH * (0.5 - K.MIDDLE) - inset
 	local midY1 = screenH * (0.5 + K.MIDDLE) - inset
-	local hudTop, hudBottom = hudBounds(area)
+	local hud = hudBounds(area)
 	local column = menuRect()
 	-- the portrait pokes PORTRAIT_Y above the card: the card starts that much lower
 	local top = edge
-	if hudTop > 0 then
-		top = math.max(edge, hudTop + K.GAP * k)
+	if hud.TopLeftBottom > 0 then
+		top = math.max(edge, hud.TopLeftBottom + K.GAP * k)
 	end
 	top = top - K.PORTRAIT_Y * k
-	local bottomLimit = math.min(area.Y - edge, hudBottom - K.GAP * k)
+	-- the HUD's bottom-left block (vitals card / currency stack) is a hard limit for the bubble and the card
+	local bottomLimit = math.min(area.Y - edge, hud.BottomLeftTop - K.GAP * k)
+
+	-- on a Menu step the card / bubble also keeps clear of the pointer arrow's spot right of the target tile
+	-- (otherwise the arrow would have to sit on Nimbus, or on a neighbouring tile of the phone grid)
+	local target = nil
+	local st = S.state
+	if st and not st.Done and st.Target and st.Target.Kind == "Menu" and not inMatch() and M.button and M.button.Parent then
+		local owner = M.button:FindFirstAncestorOfClass("ScreenGui")
+		if owner and shownIn(M.button, owner) and M.button.AbsoluteSize.X > 0 then
+			target = rectOf(M.button, insetShift(owner))
+		end
+	end
 
 	local function leftFor(t, h)
+		local l = edge
 		if column and t < column.y1 + K.GAP * k and t + h > column.y0 - K.GAP * k then
-			return math.max(edge, column.x1 + K.GAP * k)
+			l = math.max(edge, column.x1 + K.GAP * k)
 		end
-		return edge
+		if target and t < target.y1 + K.GAP * k and t + h > target.y0 - K.GAP * k then
+			l = math.max(l, target.x1 + K.POINTER_ROOM * k)
+		end
+		return l
 	end
 
 	-- expanded card: as wide as allowed, never into the screen middle, never under the bottom-left HUD
@@ -665,14 +765,113 @@ local function layout()
 	width = math.max(width, K.PANEL_MIN_W)
 	S.autoCollapse = not fits
 
+	-- A card the player opened (or the finale) that does not fit there. In the lobby nothing can hurt the player and
+	-- the hotbar is idle, so the card the player asked for may cover the vitals card (and, as a last resort, the idle
+	-- hotbar) and reach towards the middle like any window the player opens; it never covers Roblox's thumbstick,
+	-- the touch buttons, the menu or the token pill and never leaves the screen, so its text, Next button and Skip
+	-- link are always reachable. In a match the vitals card stays a hard limit: the bubble.
+	local relaxed = nil
+	if not fits and not inMatch() then
+		local inputs = touchButtonRects()
+		inputs[#inputs + 1] = thumbstickRect(area)
+		local bar = hotbarRect()
+		local positions = { { Top = top, Left = nil } }
+		if hud.TopLeftRight > 0 then
+			-- beside the top-left panel (party panel) at the top edge
+			positions[#positions + 1] = { Top = edge - K.PORTRAIT_Y * k, Left = hud.TopLeftRight + K.GAP * k }
+		end
+		local function try(pos, avoidBar, compact, lastResort)
+			S.compactCard = compact
+			local t = pos.Top
+			local l = pos.Left or leftFor(t, area.Y)
+			local rightLimit = area.X - edge
+			if hud.TopRightLeft > 0 and t < hud.TopRightBottom + K.GAP * k then
+				rightLimit = math.min(rightLimit, hud.TopRightLeft - K.GAP * k)
+			end
+			local w2 = math.min(K.PANEL_W, math.floor((rightLimit - l) / k))
+			if w2 < K.PANEL_MIN_W then
+				return nil
+			end
+			local designH2 = panelHeight(w2)
+			local h2 = designH2 * k
+			if not pos.Left then
+				l = leftFor(t, h2)
+			end
+			local x1 = l + w2 * k
+			local floorY = area.Y - edge
+			for _, r in pairs(inputs) do
+				if l < r.x1 and x1 > r.x0 then
+					floorY = math.min(floorY, r.y0 - K.GAP * k)
+				end
+			end
+			if avoidBar and bar and l < bar.x1 and x1 > bar.x0 then
+				floorY = math.min(floorY, bar.y0 - K.GAP * k)
+			end
+			if not lastResort and t + h2 <= floorY then
+				return { Width = w2, Left = l, Top = t, H = h2, Scale = k, Compact = compact }
+			elseif lastResort then
+				-- shrink just enough (never below 0.7: body text 14 px) to keep the card on screen
+				local fit = math.max(0.7, math.min(k, (floorY - t) / designH2))
+				local t2 = math.max(edge - K.PORTRAIT_Y * k, math.min(t, floorY - designH2 * fit))
+				return { Width = w2, Left = l, Top = t2, H = designH2 * fit, Scale = fit, Compact = compact }
+			end
+			return nil
+		end
+		for _, avoidBar in ipairs({ true, false }) do
+			for _, pos in ipairs(positions) do
+				for _, compact in ipairs({ false, true }) do
+					relaxed = relaxed or try(pos, avoidBar, compact, nil)
+				end
+			end
+		end
+		if not relaxed and hud.TopLeftBottom <= 0 then
+			-- nothing else fits in the plain lobby: the compact card, shrunk just enough (the Next button and the
+			-- Skip link must stay reachable). With a party panel up (a short countdown) the bubble waits instead.
+			relaxed = try(positions[1], false, true, true)
+		end
+		-- the variant that won decides whether the objective line is shown
+		S.compactCard = relaxed ~= nil and relaxed.Compact == true
+	end
+	S.canOpen = fits or relaxed ~= nil
+	S.forcedBubble = not S.canOpen and (S.manual == "expanded" or S.finale == true)
+	local folded = collapsed()
+	local cardScale = k
+	if not fits and relaxed and not folded then
+		width, left, top, h, cardScale = relaxed.Width, relaxed.Left, relaxed.Top, relaxed.H, relaxed.Scale
+	else
+		S.compactCard = false
+	end
+	if UI.Scale.Scale ~= cardScale then
+		UI.Scale.Scale = cardScale
+	end
+
 	local designH, bodyH = panelHeight(width)
-	if collapsed() then
-		left = leftFor(top, (K.PORTRAIT + K.PORTRAIT_Y) * k)
+	local tagRoom = true
+	if folded then
+		local bubbleTop = top + K.PORTRAIT_Y * k
+		local bubbleH = K.PORTRAIT * k
+		if bubbleTop + bubbleH <= bottomLimit then
+			left = leftFor(top, (K.PORTRAIT + K.PORTRAIT_Y) * k)
+		elseif hud.TopLeftRight > 0 then
+			-- no room between the top-left panel (party / match panel on a short screen) and the vitals card:
+			-- beside that panel, at the top edge
+			top = edge - K.PORTRAIT_Y * k
+			left = math.max(hud.TopLeftRight + K.GAP * k, leftFor(top, bubbleH))
+		else
+			top = math.max(edge, bottomLimit - bubbleH) - K.PORTRAIT_Y * k
+			left = leftFor(top, (K.PORTRAIT + K.PORTRAIT_Y) * k)
+		end
+		-- the "Tap me!" tag right of the portrait must not run into the top-right stack (token pill)
+		local tagRight = left + (K.PAD + K.PORTRAIT + 8 + 104) * k
+		local portraitTop = top + K.PORTRAIT_Y * k
+		if hud.TopRightLeft > 0 and tagRight > hud.TopRightLeft and portraitTop < hud.TopRightBottom + K.GAP * k then
+			tagRoom = false
+		end
 	end
 	applyGeometry(width, designH, bodyH)
-	UI.Main.Visible = not collapsed()
-	UI.Badge.Visible = collapsed()
-	UI.TapTag.Visible = collapsed() and S.manual == nil
+	UI.Main.Visible = not folded
+	UI.Badge.Visible = folded
+	UI.TapTag.Visible = folded and S.manual == nil and S.canOpen and not S.windowOpen and tagRoom
 
 	local goal = UDim2.fromOffset(math.floor(left + 0.5), math.floor(top + 0.5))
 	if S.placed ~= goal then
@@ -684,6 +883,8 @@ local function layout()
 		end
 		S.hasPlaced = true
 	end
+
+	M.side = nil -- the menu pointer re-chooses its side around the new layout
 
 	-- floating sign above the world arrow follows the readability rule too
 	if W.labelGui then
@@ -871,7 +1072,7 @@ local function buildPointer()
 	}, ring)
 	corner(inner, 14)
 	stroke(inner, C.Navy, 2, 0.2)
-	local arrow = box("Arrow", { AnchorPoint = Vector2.new(0, 0.5), Visible = false, Active = false }, gui)
+	local arrow = box("Arrow", { AnchorPoint = Vector2.new(0.5, 0.5), Visible = false, Active = false }, gui)
 	buildPixelArrow(arrow)
 	UI.PointerScale = make("UIScale", "ReadScale", { Scale = 1 }, arrow)
 	UI.PointerGui, UI.Ring, UI.Arrow = gui, ring, arrow
@@ -1154,6 +1355,9 @@ local function buildPanel()
 	end)
 	UI.Toggle.Activated:Connect(function()
 		if collapsed() then
+			if S.canOpen == false or S.windowOpen then
+				return -- the card has no room right now (a match on a short screen) or a window covers it
+			end
 			S.manual = "expanded"
 		else
 			S.manual = "collapsed"
@@ -1588,9 +1792,85 @@ local function hidePointer()
 	end
 end
 
+-- Shown MenuButton_* tiles (other than `except`) in our gui coordinates.
+local function menuButtonRects(except)
+	local out = {}
+	local pg = playerGui()
+	local menuGui = pg and pg:FindFirstChild("NimbusMenu")
+	if not (menuGui and menuGui:IsA("ScreenGui") and menuGui.Enabled) then
+		return out
+	end
+	local dy = insetShift(menuGui)
+	for _, d in ipairs(menuGui:GetDescendants()) do
+		if d ~= except and d:IsA("GuiObject") and string.sub(d.Name, 1, 11) == "MenuButton_" and d.AbsoluteSize.X > 0 and shownIn(d, menuGui) then
+			out[#out + 1] = rectOf(d, dy)
+		end
+	end
+	return out
+end
+
+-- What the pointer arrow must not cover: the other menu tiles and the tutorial card / bubble.
+local function pointerObstacles(button)
+	local list = menuButtonRects(button)
+	if UI.Root and UI.Root.Visible then
+		local part = collapsed() and UI.Portrait or UI.Root
+		if part and part.AbsoluteSize.X > 0 then
+			list[#list + 1] = rectOf(part, 0)
+		end
+	end
+	return list
+end
+
+local function rectsOverlap(a, b)
+	return a.x0 < b.x1 and b.x0 < a.x1 and a.y0 < b.y1 and b.y0 < a.y1
+end
+
+-- Where the arrow goes around target rect `r`: right of it pointing left (the default), else above it pointing
+-- down, below it pointing up or left of it pointing right, whichever first stays on screen and clear of the
+-- neighbouring tiles and the tutorial card / bubble (the 2 x 3 phone grid has a tile right of Index). Returns
+-- side, rotation; side "none" when every side is taken: then only the ring marks the button (an arrow on a
+-- neighbouring tile would point the new player at the wrong button).
+local POINTER_SIDES = { { "right", 0 }, { "above", -90 }, { "below", 90 }, { "left", 180 } }
+local function pointerCentre(side, r, len, thick, push)
+	local cx, cy = (r.x0 + r.x1) * 0.5, (r.y0 + r.y1) * 0.5
+	if side == "right" then
+		return r.x1 + push + len / 2, cy, len, thick
+	elseif side == "above" then
+		return cx, r.y0 - push - len / 2, thick, len
+	elseif side == "below" then
+		return cx, r.y1 + push + len / 2, thick, len
+	end
+	return r.x0 - push - len / 2, cy, len, thick
+end
+
+local function choosePointerSide(r, k, area, button)
+	local len, thick = 68 * k, 44 * k
+	local push = 15 * k -- the farthest point of the bounce
+	local obstacles = pointerObstacles(button)
+	for _, spec in ipairs(POINTER_SIDES) do
+		local cx, cy, w, h = pointerCentre(spec[1], r, len, thick, push)
+		local box = { x0 = cx - w / 2, y0 = cy - h / 2, x1 = cx + w / 2, y1 = cy + h / 2 }
+		local clear = box.x0 >= 0 and box.y0 >= 0 and box.x1 <= area.X and box.y1 <= area.Y
+		if clear then
+			for _, o in ipairs(obstacles) do
+				if rectsOverlap(box, o) then
+					clear = false
+					break
+				end
+			end
+		end
+		if clear then
+			return spec[1], spec[2]
+		end
+	end
+	return "none", 0
+end
+
 local function updateMenuPointer(dt, t)
 	local st = S.state
+	-- hidden while a window / the Index / the roulette covers the menu (S.windowOpen): it would draw on top of it
 	local want = st and not st.Done and not S.finale and st.Target and st.Target.Kind == "Menu" and S.shown and not inMatch()
+		and not S.windowOpen
 	M.findTimer = M.findTimer - dt
 	if M.findTimer <= 0 then
 		M.findTimer = 1
@@ -1604,6 +1884,7 @@ local function updateMenuPointer(dt, t)
 			if not valid then
 				M.button = findMenuButton(st.Target.Id)
 				M.buttonId = st.Target.Id
+				M.side = nil
 			end
 		end
 	end
@@ -1625,8 +1906,26 @@ local function updateMenuPointer(dt, t)
 	UI.Ring.Size = UDim2.fromOffset(w + 2 * pad, h + 2 * pad)
 	UI.RingStroke.Transparency = 0.25 * pulse
 	UI.GlowStroke.Transparency = 0.3 + 0.55 * pulse
-	UI.Arrow.Position = UDim2.fromOffset(r.x1 + (8 + 7 * (math.sin(t * 5) + 1) * 0.5) * k, (r.y0 + r.y1) * 0.5)
+	-- the side is re-chosen after every layout pass (M.side = nil there, twice a second at most)
+	if not M.side then
+		local okSide, side, rotation = pcall(choosePointerSide, r, k, guiArea(), M.button)
+		if okSide then
+			M.side, M.rotation = side, rotation
+		else
+			M.side, M.rotation = "right", 0
+		end
+	end
 	UI.Ring.Visible = true
+	if M.side == "none" then
+		if UI.Arrow.Visible then
+			UI.Arrow.Visible = false
+		end
+		return
+	end
+	local bounce = (8 + 7 * (math.sin(t * 5) + 1) * 0.5) * k
+	local cx, cy = pointerCentre(M.side, r, 68 * k, 44 * k, bounce)
+	UI.Arrow.Rotation = M.rotation or 0
+	UI.Arrow.Position = UDim2.fromOffset(cx, cy)
 	UI.Arrow.Visible = true
 end
 
@@ -2192,6 +2491,17 @@ function TutorialController.Step(dt)
 	if wanted ~= (S.shown == true) then
 		setPanelShown(wanted)
 	end
+	-- a window on top (menu window, odds, roulette stage, Pet Index): fold the card into the bubble and hide the
+	-- menu pointer until it closes
+	local covered = false
+	if S.shown then
+		local ok, open = pcall(windowCovering)
+		covered = ok and open == true
+	end
+	if covered ~= (S.windowOpen == true) then
+		S.windowOpen = covered
+		safe("layout", layout)
+	end
 	if S.shown then
 		safe("typewriter", updateTypewriter, dt)
 		if not collapsed() then
@@ -2317,6 +2627,12 @@ function TutorialController.Init()
 	LocalPlayer:GetAttributeChangedSignal(Config.Attr.InMatch):Connect(function()
 		M.findTimer = 0
 		W.key = nil
+		if inMatch() then
+			-- a card opened in the lobby must not follow the player into the climb (it would cover the HP card):
+			-- every match starts with Nimbus' automatic choice
+			S.manual = nil
+		end
+		safe("layout", layout)
 	end)
 
 	task.spawn(function()

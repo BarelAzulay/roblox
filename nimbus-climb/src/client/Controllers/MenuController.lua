@@ -6,6 +6,8 @@
 --   MenuController.WindowOpened          -- Util.Signal, Fire(windowId) whenever a window opens:
 --                                           "Inventory", "Shop", "Stats" or "Index" (the tutorial listens)
 --   Extra: MenuController.GetButton(id) -> the MenuButton_<id> tile (or nil)
+--          MenuController.IsOpen() -> true while a window, the odds popup or the roulette stage is up
+--          MenuController.IsPrewarmed(petId) -> true once that pet was pre-sculpted for the roulette strip
 --
 -- Screen: ScreenGui "NimbusMenu" (display order 20, IgnoreGuiInset = false).
 --   * Menu column, left-centre (the reference style): square-ish rounded icon tiles with a big glyph and a
@@ -28,7 +30,14 @@
 --     keep the 0.8 scale instead of shrinking the text.
 --   * Every window re-renders from State.Changed (and when the token count or the InMatch attribute
 --     changes). Pet slots are kept per pet id and updated in place, so nothing is rebuilt or leaked; the
---     pet viewports of the Inventory grid are attached PETS_PER_FRAME at a time so a big collection never hitches.
+--     pet viewports of the Inventory grid, the odds popup and the roulette strip are attached under a per-frame
+--     TIME budget (K.BUILD_BUDGET, at least one per frame), so neither a big collection nor a fresh client's
+--     first-time pet sculpts hitch. The strip cells and odds tiles use PetBuilder's Low detail (the reveal card
+--     stays High), and the roulette pools are sculpted ahead of time (one pet per frame) when the Shop opens and
+--     when a spin is requested, so the spin itself only clones.
+--   * Touch screens: the menu column never reaches Roblox's thumbstick (bottom-left); in landscape it sits in the
+--     band between the top margin and the stick (2 x 3 grid with the labels on the tiles, or icon-only tiles
+--     when labels would drop below 14 px).
 --
 -- Remotes used: OpenPanel, RouletteResult (in); BuyRoulette, EquipPet, UnequipPet, BuyItem, GoToSpot (out).
 -- Plain Lua 5.1-compatible syntax only. All text goes through Theme roles.
@@ -107,7 +116,21 @@ local K = {
 	FIRE_GAP = 0.3, -- client-side spacing between two sends of the same remote
 	HINT_SECONDS = 2.8,
 	WAIT_TIMEOUT = 7, -- seconds to wait for a RouletteResult
-	PETS_PER_FRAME = 3, -- pet viewports the Inventory grid builds per frame
+	-- pet viewports (Inventory grid, odds popup, roulette strip) are built under a TIME budget per frame: the first
+	-- build of a frame always runs, more only while the frame has spent < BUILD_BUDGET s building, at most BUILD_MAX
+	-- (a first-time High sculpt costs tens of ms, a cached clone a few: a count budget hitches on fresh clients)
+	BUILD_BUDGET = 0.004,
+	BUILD_MAX = 3,
+	STRIP_DETAIL = "Low", -- roulette strip cells: small, static, moving fast (the reveal card keeps High)
+	ODDS_DETAIL = "Low", -- 88 px odds tiles
+	-- Roblox's touch thumbstick (bottom-left), gui px above the bottom edge: classic 70 px stick at 20 px on small
+	-- screens (the dynamic stick's idle ring reaches ~93) and 120 px at 0.75 * 120 on large ones
+	STICK_TOP_SMALL = 96,
+	STICK_TOP_LARGE = 210,
+	STICK_GAP = 8,
+	MIN_LABEL_PX = 14, -- smallest on-screen menu label on phones / tablets (readability rule)
+	GRID_ENTRY_H = 86, -- "Grid" layout: the label sits on the tile's bottom edge, so a row is shorter ...
+	GRID_LABEL_Y = -8, -- ... (label centre this far above the tile's bottom; "Column": 2 px below it)
 	BACK_ACTION = "NimbusMenuBack", -- ContextActionService action that owns gamepad B while something is closable
 	CARD_H = 474, -- roulette card
 	CARD_H_SHORT = 216,
@@ -172,7 +195,9 @@ local openId = nil -- id of the window that is currently open
 local Net = { Warned = {}, Cache = {}, Last = {} } -- warnOnce keys, remote cache, last send per remote
 local touchDevice = false
 
-local Spin = { Waiting = false, WaitToken = 0, Queue = {}, Stage = nil }
+local Spin = { Waiting = false, WaitToken = 0, Queue = {}, Stage = nil, Last = nil }
+-- per-frame build budget + roulette pool pre-sculpting (functions defined with the helpers below)
+local Warm = { Queue = {}, Seen = {}, Done = {}, Running = false, Module = nil, Tried = false }
 local Odds = { Gui = nil, Token = 0, Slots = {}, Holder = nil, Fit = nil }
 local Badge = { LastPetTotal = nil }
 local Back = { Bound = false, Busy = false, Swallowed = false } -- gamepad B binding state (see syncBackBinding)
@@ -201,6 +226,90 @@ local function safe(key, fn, ...)
 		warnOnce(key, err)
 	end
 	return ok
+end
+
+-- Per-frame build budget for pet viewports: the first build of a frame always runs, the next ones only while the
+-- frame has spent less than K.BUILD_BUDGET seconds and at most K.BUILD_MAX builds. Callers add 1 to Count per build.
+function Warm.Budget()
+	return { Start = os.clock(), Count = 0 }
+end
+
+function Warm.Allows(budget)
+	return budget.Count < K.BUILD_MAX and (budget.Count == 0 or os.clock() - budget.Start < K.BUILD_BUDGET)
+end
+
+-- shared/PetBuilder, loaded lazily (the pre-sculpting below is optional: nil when it cannot load)
+function Warm.Builder()
+	if not Warm.Tried then
+		Warm.Tried = true
+		local ok, result = pcall(function()
+			return require(Shared:WaitForChild("PetBuilder", 5))
+		end)
+		if ok and type(result) == "table" then
+			Warm.Module = result
+		end
+	end
+	return Warm.Module
+end
+
+-- Pre-sculpts pets at the strip's detail, a few per frame (time budget), so a roulette spin only clones cached
+-- templates instead of sculpting on the frame a cell scrolls into view. `front` puts them first in the queue.
+-- Paused while the roulette stage runs (its cells attach under their own budget).
+function Warm.Pets(defs, front)
+	if type(defs) ~= "table" or not Warm.Builder() then
+		return
+	end
+	local fresh = {}
+	for _, def in ipairs(defs) do
+		local id = type(def) == "table" and def.Id or nil
+		if type(id) == "string" and not Warm.Seen[id] then
+			Warm.Seen[id] = true
+			fresh[#fresh + 1] = def
+		end
+	end
+	for i, def in ipairs(fresh) do
+		if front then
+			table.insert(Warm.Queue, i, def)
+		else
+			Warm.Queue[#Warm.Queue + 1] = def
+		end
+	end
+	if Warm.Running or #Warm.Queue == 0 then
+		return
+	end
+	Warm.Running = true
+	task.spawn(function()
+		task.wait() -- never in the frame that opens the Shop (it builds the window)
+		while #Warm.Queue > 0 do
+			if Spin.Stage then
+				task.wait(0.25)
+			else
+				local budget = Warm.Budget()
+				while #Warm.Queue > 0 and Warm.Allows(budget) do
+					local def = table.remove(Warm.Queue, 1)
+					local ok, model = pcall(Warm.Module.Build, def, { Detail = K.STRIP_DETAIL, Scale = 1 })
+					if ok and typeof(model) == "Instance" then
+						model:Destroy()
+						Warm.Done[def.Id] = true
+					end
+					budget.Count = budget.Count + 1
+				end
+				task.wait()
+			end
+		end
+		Warm.Running = false
+	end)
+end
+
+-- the possible pets of one roulette (pre-sculpted when the Shop opens and when that roulette is requested)
+function Warm.Roulette(rouletteId, front)
+	if type(rouletteId) ~= "string" or type(PetCatalog.PossiblePets) ~= "function" then
+		return
+	end
+	local ok, defs = pcall(PetCatalog.PossiblePets, rouletteId)
+	if ok then
+		Warm.Pets(defs, front)
+	end
 end
 
 local function makeFrame(parent, name, props)
@@ -881,6 +990,16 @@ function openWindow(id, args)
 	updateMenuActive()
 	if not wasShown then
 		MenuController.WindowOpened:Fire(id)
+		if id == "Shop" then
+			-- sculpt the likely roulette pools ahead of the spin (the last one spun, then the cheapest)
+			if Spin.Last then
+				Warm.Roulette(Spin.Last)
+			end
+			local first = type(Config.Roulettes) == "table" and Config.Roulettes[1] or nil
+			if type(first) == "table" then
+				Warm.Roulette(first.Id)
+			end
+		end
 	end
 end
 
@@ -1309,8 +1428,10 @@ local function buildColumn()
 end
 
 -- Column layouts: "Column" (labelled tiles, one column), "Grid" (labelled tiles, 2 x 3, short landscape
--- screens) or "Compact" (icon-only tiles in one column, narrow portrait screens: a second column would reach
--- the middle of the screen there, and a labelled column would collide with the HUD corners).
+-- screens; the labels sit on the tiles' bottom edge so the rows pack tighter), "Compact" (icon-only tiles in one
+-- column, narrow portrait screens: a second column would reach the middle of the screen there, and a labelled
+-- column would collide with the HUD corners) or "CompactGrid" (icon-only tiles, 2 x 3: short touch screens where
+-- the band above Roblox's thumbstick cannot hold labelled tiles at a readable size).
 local function setColumnLayout(mode)
 	if U.ColumnMode == mode and U.ColumnLayout and U.ColumnLayout.Parent then
 		return
@@ -1319,14 +1440,21 @@ local function setColumnLayout(mode)
 		U.ColumnLayout:Destroy()
 	end
 	U.ColumnMode = mode
-	local entryH = (mode == "Compact") and K.TILE or K.ENTRY_H
+	local iconOnly = mode == "Compact" or mode == "CompactGrid"
+	local entryH = K.ENTRY_H
+	if iconOnly then
+		entryH = K.TILE
+	elseif mode == "Grid" then
+		entryH = K.GRID_ENTRY_H
+	end
 	for _, entry in pairs(Entries) do
 		entry.Root.Size = UDim2.fromOffset(K.ENTRY_W, entryH)
-		entry.Label.Visible = mode ~= "Compact"
+		entry.Label.Visible = not iconOnly
+		entry.Label.Position = UDim2.new(0.5, 0, 1, (mode == "Grid") and K.GRID_LABEL_Y or 2)
 	end
-	if mode == "Grid" then
+	if mode == "Grid" or mode == "CompactGrid" then
 		U.ColumnLayout = Util.Create("UIGridLayout", {
-			CellSize = UDim2.fromOffset(K.ENTRY_W, K.ENTRY_H),
+			CellSize = UDim2.fromOffset(K.ENTRY_W, entryH),
 			CellPadding = UDim2.fromOffset(K.GAP, K.GAP),
 			FillDirection = Enum.FillDirection.Horizontal,
 			FillDirectionMaxCells = 2,
@@ -1363,16 +1491,42 @@ function relayoutMenu()
 	local mode, cols = "Column", 1
 	local scale = factor
 	local entryH = K.ENTRY_H
-	if area.X >= area.Y then
+	local columnTop = nil -- gui px of the column's top edge; nil = vertically centred on the screen
+	local gridRows = math.ceil(n / 2)
+	local gridH = gridRows * K.GRID_ENTRY_H + (gridRows - 1) * K.GAP
+	local columnH = n * K.ENTRY_H + (n - 1) * K.GAP
+	if area.X >= area.Y and touchDevice then
+		-- touch landscape: Roblox's thumbstick owns the bottom-left corner, and a tile on top of it would take the
+		-- thumb's touch (My Spot would teleport the player home). The column lives in the band between the top
+		-- margin and the stick: one labelled column when it fits at the screen factor, else the 2 x 3 grid while
+		-- its labels stay >= MIN_LABEL_PX, else icon-only tiles in a 2 x 3 grid.
+		local camera = workspace.CurrentCamera
+		local vp = camera and camera.ViewportSize or area
+		local stickTop = area.Y - ((math.min(vp.X, vp.Y) <= 500) and K.STICK_TOP_SMALL or K.STICK_TOP_LARGE)
+		local top = K.EDGE
+		local avail = stickTop - K.STICK_GAP - top
+		local labelScale = K.MIN_LABEL_PX / K.LABEL_TEXT
+		local h
+		if columnH * factor <= avail then
+			h = columnH
+		elseif math.min(factor, avail / gridH) >= labelScale then
+			mode, cols, entryH = "Grid", 2, K.GRID_ENTRY_H
+			h = gridH
+			scale = math.min(factor, avail / gridH)
+		else
+			mode, cols, entryH = "CompactGrid", 2, K.TILE
+			h = gridRows * K.TILE + (gridRows - 1) * K.GAP
+			scale = Util.Clamp(avail / h, 0.4, factor)
+		end
+		columnTop = top + math.max(0, (avail - h * scale) / 2)
+	elseif area.X >= area.Y then
 		-- landscape: the HUD has room to step aside, the column only has to fit on the screen
 		local avail = area.Y - 2 * margin
-		if (n * K.ENTRY_H + (n - 1) * K.GAP) * factor > avail then
-			mode, cols = "Grid", 2
-		end
-		local rows = math.ceil(n / cols)
-		local h = rows * K.ENTRY_H + (rows - 1) * K.GAP
-		if h * scale > avail then
-			scale = math.max(0.4, avail / h)
+		if columnH * factor > avail then
+			mode, cols, entryH = "Grid", 2, K.GRID_ENTRY_H
+			if gridH * scale > avail then
+				scale = math.max(0.4, avail / gridH)
+			end
 		end
 	else
 		-- portrait: stay between the HUD's top-left panel (the tallest is ~216 design px) and its
@@ -1380,7 +1534,6 @@ function relayoutMenu()
 		local centre = area.Y / 2
 		local top = margin + 222 * factor
 		local half = math.min(centre - top, bottomBlockTop(area, factor) - 6 - centre)
-		local columnH = n * K.ENTRY_H + (n - 1) * K.GAP
 		if columnH * factor > 2 * half then
 			mode, entryH = "Compact", K.TILE
 			local compactH = n * K.TILE + (n - 1) * K.GAP
@@ -1393,13 +1546,21 @@ function relayoutMenu()
 	setColumnLayout(mode)
 	U.Column.Size = UDim2.fromOffset(w, h)
 	U.ColumnScale.Scale = scale
-	U.Column.Position = UDim2.new(0, margin, 0.5, 0)
+	local hintY = UDim2.new(0, 0, 0.5, 0)
+	if columnTop then
+		U.Column.AnchorPoint = Vector2.new(0, 0)
+		U.Column.Position = UDim2.new(0, margin, 0, math.floor(columnTop + 0.5))
+		hintY = UDim2.new(0, 0, 0, math.floor(columnTop + h * scale / 2 + 0.5))
+	else
+		U.Column.AnchorPoint = Vector2.new(0, 0.5)
+		U.Column.Position = UDim2.new(0, margin, 0.5, 0)
+	end
 	if Hint.Frame then
 		-- next to the column, and never wide enough to reach the middle of the screen
 		local hintLeft = margin + w * scale + 10
 		local room = math.max(120, area.X * 0.34 - hintLeft - 28 * factor)
 		Hint.Scale.Scale = factor
-		Hint.Frame.Position = UDim2.new(0, hintLeft, 0.5, 0)
+		Hint.Frame.Position = UDim2.new(0, hintLeft, hintY.Y.Scale, hintY.Y.Offset)
 		Hint.Limit.MaxSize = Vector2.new(math.min(300, math.floor(room / factor)), 260)
 	end
 	for _, win in pairs(windows) do
@@ -1799,33 +1960,36 @@ local function buildInventory(win)
 		if pets.Filling then
 			return
 		end
+		-- one frame's share (time budget); returns true when slots are still waiting for their pet
 		local function buildBatch()
-			local built = 0
+			local budget = Warm.Budget()
 			for _, id in ipairs(pets.Order) do
 				local slot = pets.Slots[id]
 				local def = PetCatalog.Get(id)
 				if slot and def and not pets.Ready[id] then
+					if not Warm.Allows(budget) then
+						return true
+					end
 					pets.Ready[id] = true
 					slot.SetContent(gridInfo(def, true))
 					slot.SetCount(State.OwnedCount(id)) -- pet slots hide "x1": needs the Pet content to be set first
-					built = built + 1
-					if built >= K.PETS_PER_FRAME then
-						break
-					end
+					budget.Count = budget.Count + 1
 				end
 			end
-			return built
+			return false
 		end
 		pets.Filling = true
 		task.spawn(function()
-			-- stops when the window closes; the next open refreshes it and resumes with what is still missing
+			-- the frame that opens the window already builds it (and the detail card's pet): start on the next one.
+			-- Stops when the window closes; the next open refreshes it and resumes with what is still missing.
+			task.wait()
 			while win.Shown do
-				local ok, built = pcall(buildBatch)
+				local ok, more = pcall(buildBatch)
 				if not ok then
-					warnOnce("fill pets", built)
+					warnOnce("fill pets", more)
 					break
 				end
-				if built < K.PETS_PER_FRAME then
+				if not more then
 					break
 				end
 				task.wait()
@@ -2179,9 +2343,9 @@ function openOdds(rouletteId)
 	end
 	local cellH = hasElements and 156 or 128
 
-	-- built a few pets per frame so opening the popup never hitches
+	-- built under the per-frame time budget (Low detail tiles) so opening the popup never hitches
 	task.spawn(function()
-		local built = 0
+		local budget = Warm.Budget()
 		for index, group in ipairs(groups) do
 			if Odds.Token ~= mine then
 				return
@@ -2222,6 +2386,13 @@ function openOdds(rouletteId)
 				if Odds.Token ~= mine then
 					return
 				end
+				if not Warm.Allows(budget) then
+					task.wait()
+					if Odds.Token ~= mine then
+						return
+					end
+					budget = Warm.Budget()
+				end
 				local def = PetCatalog.Get(entry.PetId)
 				local cell = makeFrame(cells, "Cell_" .. tostring(entry.PetId), { LayoutOrder = cellIndex })
 				if def then
@@ -2232,7 +2403,7 @@ function openOdds(rouletteId)
 						Position = UDim2.new(0.5, 0, 0, 2),
 						Parent = cell,
 					}))
-					slot.SetContent({ Pet = def, RarityColor = color, Name = def.Name, Blurb = def.Blurb })
+					slot.SetContent({ Pet = def, Detail = K.ODDS_DETAIL, RarityColor = color, Name = def.Name, Blurb = def.Blurb })
 					table.insert(Odds.Slots, slot)
 					local elements = elementsOf(def)
 					if #elements > 0 then
@@ -2252,10 +2423,7 @@ function openOdds(rouletteId)
 					Position = UDim2.new(0.5, 0, 1, -2),
 					Size = UDim2.new(1, 0, 0, 24),
 				})
-				built = built + 1
-				if built % 3 == 0 then
-					task.wait()
-				end
+				budget.Count = budget.Count + 1
 			end
 		end
 	end)
@@ -2971,6 +3139,9 @@ function requestSpin(rouletteId)
 	if not fire("BuyRoulette", rouletteId) then
 		return
 	end
+	-- the answer takes a round trip: use it to sculpt this pool first
+	Spin.Last = rouletteId
+	Warm.Roulette(rouletteId, true)
 	Spin.Waiting = true
 	Spin.WaitToken = Spin.WaitToken + 1
 	local mine = Spin.WaitToken
@@ -3039,7 +3210,9 @@ function closeStage()
 		stage.Conn = nil
 	end
 	for _, cell in pairs(stage.Cells) do
-		pcall(cell.Viewport.Destroy)
+		if cell.Viewport then
+			pcall(cell.Viewport.Destroy)
+		end
 	end
 	stage.Cells = {}
 	if stage.RevealViewport then
@@ -3260,15 +3433,32 @@ function beginStage(result)
 		Parent = sc,
 	})
 
-	-- cells are created only while they are near the window (one viewport per visible pet)
+	-- cells are created only while they are near the window (one viewport per visible pet). A cell's frame
+	-- (rarity colours) appears at once; its pet viewport (PetBuilder Low: small, static, moving fast) is attached
+	-- under the per-frame time budget, so a pet that was never sculpted on this client cannot stall the strip.
 	local cells = stage.Cells
 	local function destroyCell(index)
 		local cell = cells[index]
 		if cell then
 			cells[index] = nil
-			pcall(cell.Viewport.Destroy)
+			if cell.Viewport then
+				pcall(cell.Viewport.Destroy)
+			end
 			cell.Frame:Destroy()
 		end
+	end
+	local function attachViewport(cell)
+		if cell.Viewport then
+			return
+		end
+		cell.Viewport = CloudUI.PetViewport(cell.Frame, cell.Def, UDim2.new(1, -8, 1, -24), {
+			Position = UDim2.new(0.5, 0, 0, 4),
+			AnchorPoint = Vector2.new(0.5, 0),
+			Animate = false,
+			Spin = "sway",
+			Detail = K.STRIP_DETAIL,
+			ZIndex = 2,
+		})
 	end
 	local function makeCell(index)
 		local cellDef = PetCatalog.Get(strip[index])
@@ -3282,13 +3472,6 @@ function beginStage(result)
 		corner(frame, 14)
 		local frameStroke = stroke(frame, color, 3, 0)
 		Theme.Gradient(frame, Colors.Mist, Colors.MistDeep:Lerp(color, 0.5), 90)
-		local viewport = CloudUI.PetViewport(frame, cellDef, UDim2.new(1, -8, 1, -24), {
-			Position = UDim2.new(0.5, 0, 0, 4),
-			AnchorPoint = Vector2.new(0.5, 0),
-			Animate = false,
-			Spin = "sway",
-			ZIndex = 2,
-		})
 		local tag = makeFrame(frame, "RarityBar", {
 			AnchorPoint = Vector2.new(0.5, 1),
 			Position = UDim2.new(0.5, 0, 1, -6),
@@ -3297,7 +3480,7 @@ function beginStage(result)
 			BackgroundColor3 = color,
 		})
 		round(tag)
-		local cell = { Frame = frame, Viewport = viewport, Stroke = frameStroke }
+		local cell = { Frame = frame, Viewport = nil, Stroke = frameStroke, Def = cellDef }
 		cells[index] = cell
 		return cell
 	end
@@ -3312,6 +3495,25 @@ function beginStage(result)
 			if index < first or index > last then
 				destroyCell(index)
 			end
+		end
+		-- pet viewports, nearest to the pointer first, under the frame's build budget
+		local budget = Warm.Budget()
+		local centre = (x + K.STRIP.W / 2) / cellW + 0.5
+		while Warm.Allows(budget) do
+			local best, bestD = nil, math.huge
+			for index, cell in pairs(cells) do
+				if not cell.Viewport then
+					local d = math.abs(index - centre)
+					if d < bestD then
+						best, bestD = cell, d
+					end
+				end
+			end
+			if not best then
+				break
+			end
+			attachViewport(best)
+			budget.Count = budget.Count + 1
 		end
 	end
 	layoutCells(startX)
@@ -3558,13 +3760,16 @@ function beginStage(result)
 		stage.LandedAt = os.clock()
 		local winner = cells[target]
 		if winner then
+			attachViewport(winner) -- (normally attached long before it lands)
 			winner.Stroke.Color = GOLD
 			winner.Stroke.Thickness = 5
 			winner.Frame.ZIndex = 4
 			local grow = Util.Create("UIScale", { Scale = 1, Parent = winner.Frame })
 			tween(grow, 0.35, { Scale = 1.1 }, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
-			winner.Viewport.SetAnimated(true)
-			winner.Viewport.SetExcited(1)
+			if winner.Viewport then
+				winner.Viewport.SetAnimated(true)
+				winner.Viewport.SetExcited(1)
+			end
 		end
 		status.Text = def.Rarity .. "!"
 		status.TextColor3 = rarityText(def)
@@ -3779,6 +3984,17 @@ end
 function MenuController.GetButton(id)
 	local entry = Entries[id]
 	return entry and entry.Button or nil
+end
+
+-- true while a window, the odds popup or the roulette stage covers the screen (the tutorial folds its card and
+-- hides its menu pointer meanwhile)
+function MenuController.IsOpen()
+	return openId ~= nil or Odds.Gui ~= nil or Spin.Stage ~= nil
+end
+
+-- Debug helper (smoke tests): true once `petId` was pre-sculpted at the roulette strip's detail.
+function MenuController.IsPrewarmed(petId)
+	return Warm.Done[petId] == true
 end
 
 function MenuController.Init()
