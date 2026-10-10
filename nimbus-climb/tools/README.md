@@ -26,6 +26,9 @@ python3 tools/render_model.py module:server/Services/LobbyBuilder:Build -o any.p
 * Evolved forms (`PetBuilder.Build(def, { Evolved = true })`): `pet:<id>:Evolved`, `pet:<id>:EvolvedLow`, and the sheet
   `python3 tools/render_model.py --grid pets:Evolved --views hero --margin 0.95 -o evolved.png` (the `hero` view is
   lower and more from the side, `--margin` lets the model fill more of each cell).
+* Second evolutions (`PetBuilder.Build(def, { Evolved = 2 })`, Epic pets and up): `pet:<id>:Evolved2`,
+  `pet:<id>:Evolved2Low`, and the sheet of the 13 pets that have one:
+  `python3 tools/render_model.py --grid pets:Evolved2 --views hero --margin 0.95 -o evolved2.png`.
 * Targets: `pet:<id>[:High|Low]`, `species:<Species>[:High|Low]`, `lobby`, `npcs`, `storm-altar`, `skydragon`,
   `token[:golden]`, `module:<path>:<func>[:lobby]`, several joined with `+`, or a `.json` dump from `--json`
   (`storm-altar` needs `server/Services/StormAltar.lua`; `npcs` and `storm-altar` build the lobby first).

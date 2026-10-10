@@ -804,7 +804,7 @@ def render_grid(models, view, cell, ss=2, outline=0.04, margin=0.84):
                  fill=(196, 40, 52), anchor="md")
             print("  %s: %s" % (m.get("label", "?"), sub))
         else:
-            small = "  ".join(s for s in sub.split("  ") if s and s not in ("High", "Low", "EvoHigh", "EvoLow"))
+            small = "  ".join(s for s in sub.split("  ") if s and s not in ("High", "Low", "EvoHigh", "EvoLow", "Evo2High", "Evo2Low"))
             text(draw, (x + cell // 2, y + cell + label_h - 3), "%s  %d parts" % (small, m.get("total", geom.count_all)),
                  max(9, cell // 24), fill=(84, 96, 122), anchor="md")
         stats.append((m.get("label", "?"), m.get("total", geom.count_all)))

@@ -337,7 +337,7 @@ def main():
 
     # -- server world ----------------------------------------------------------------------------
     # Pure content scenarios (need only the loaded modules):
-    pure_scenarios = ["contract", "catalog", "config_shape", "petbuilder", "layouts", "cannon", "courses"]
+    pure_scenarios = ["contract", "catalog", "config_shape", "petbuilder", "evolved", "layouts", "cannon", "courses"]
     server_scenarios = (
         ["mock_selftest", "load_modules"]
         + pure_scenarios

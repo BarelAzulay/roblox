@@ -5,6 +5,9 @@
 --                the v3 additions (remotes, Index rewards, tutorial gift, pet stats, the element wheel, Config.Art)
 --   petbuilder   PetBuilder.Build / Animate / GetHeight for every pet at both detail levels (High <= 350, Low <= 120
 --                parts), wings, flags, the species x wing x accessory matrix, and Stormfang's look vs the player's art
+--   evolved      PetBuilder.Build(def, { Evolved = 1 | 2 }): every pet's evolved form and the second evolution of
+--                the Epic pets and up, at both detail levels: part caps, wings + the second pair, MaxEvolution,
+--                growth per stage, clamping below Epic, part flags, Animate
 --   layouts      5 difficulties x N seeds: GenerateLayout + ValidateLayout + an INDEPENDENT audit of the
 --                ARCHITECTURE_V2.md rules, statistics per difficulty (steps, tokens, archetype and theme mix)
 --   cannon       ballistics of every CannonPad in the generated layouts
@@ -1625,6 +1628,106 @@ S.petbuilder = guarded("petbuilder", function()
 	holder:Destroy()
 	flushErrors("petbuilder")
 	flushWarnings("petbuilder")
+end)
+
+S.evolved = guarded("evolved", function()
+	local PB, PC = M["shared/PetBuilder"], M["shared/PetCatalog"]
+	if not (PB and PC and PB.MaxEvolution) then
+		T.fail("evolved needs PetBuilder (with MaxEvolution) and PetCatalog")
+		return
+	end
+	-- PetBuilder.lua header: Evolved High <= ~1560, Low <= ~380; second evolution High <= ~2000, Low <= ~520
+	local caps = { { High = 1560, Low = 380 }, { High = 2000, Low = 520 } }
+	local ascend = { Epic = true, Legendary = true, Mythic = true, Secret = true }
+	local holder = Instance.new("Folder")
+	holder.Name = "SmokeEvolved"
+	holder.Parent = workspace
+	local tally = {
+		max = T.tally("MaxEvolution is 2 for Epic, Legendary, Mythic and Secret pets, 1 for the others"),
+		build = T.tally("every pet builds its evolved form (Evolved = 1) and Epic+ pets their second evolution (Evolved = 2), High and Low"),
+		caps = T.tally("evolved forms stay within their part caps (High 1560 / Low 380; second evolution High 2000 / Low 520)"),
+		wings = T.tally("evolved forms keep WingL / WingR; second evolutions add a lower pair Wing2L / Wing2R (not the nine-tailed kitsune)"),
+		bigger = T.tally("every stage is taller than the one before (normal < evolved < second evolution)"),
+		clamp = T.tally("Evolved = 2 on a pet below Epic builds its first evolution"),
+		flags = T.tally("every evolved part is Anchored, CanCollide / CanTouch / CanQuery = false, Massless"),
+		animate = T.tally("Animate runs on second evolutions for 60 frames without errors or NaN and flaps the second wing pair"),
+	}
+	for _, def in ipairs(PC.Pets) do
+		local who = def.Id
+		local top = PB.MaxEvolution(def)
+		tally.max:case(top == (ascend[def.Rarity] and 2 or 1), who .. " (" .. tostring(def.Rarity) .. "): " .. tostring(top))
+		local heights = {}
+		local ok0, normal = pcall(PB.Build, def)
+		if ok0 and typeof(normal) == "Instance" then
+			heights[0] = normal:GetExtentsSize().Y
+			normal:Destroy()
+		end
+		local stageParts = {}
+		for stage = 1, top do
+			for _, level in ipairs({ "High", "Low" }) do
+				local label = who .. " stage " .. stage .. " " .. level
+				local ok, m = pcall(PB.Build, def, { Evolved = stage, Detail = level })
+				local built = ok and typeof(m) == "Instance" and m:IsA("Model") and m.PrimaryPart ~= nil
+				tally.build:case(built, label .. ": " .. tostring(m))
+				if built then
+					m.Parent = holder
+					m:PivotTo(CFrame.new(0, 3000, 0))
+					local n = countParts(m)
+					stageParts[stage .. level] = n
+					tally.caps:case(n >= 100 and n <= caps[stage][level], label .. ": " .. n .. " parts (cap " .. caps[stage][level] .. ")")
+					local w1 = m:FindFirstChild("WingL", true) ~= nil and m:FindFirstChild("WingR", true) ~= nil
+					local w2 = m:FindFirstChild("Wing2L", true) ~= nil and m:FindFirstChild("Wing2R", true) ~= nil
+					local want2 = stage == 2 and who ~= "phantom_kitsune"
+					tally.wings:case(w1 and w2 == want2, label .. ": WingL/R " .. tostring(w1) .. ", Wing2L/R " .. tostring(w2))
+					local bad = 0
+					for _, d in ipairs(m:GetDescendants()) do
+						if d:IsA("BasePart") and not (d.Anchored and not d.CanCollide and not d.CanTouch and not d.CanQuery and d.Massless) then
+							bad = bad + 1
+						end
+					end
+					tally.flags:case(bad == 0, label .. ": " .. bad .. " parts with wrong flags")
+					if level == "High" then
+						heights[stage] = m:GetExtentsSize().Y
+					end
+					if stage == 2 and level == "High" and want2 then
+						local wing2 = m:FindFirstChild("Wing2L", true)
+						local c0 = wing2.CFrame
+						local okA, err = true, nil
+						local nan = false
+						local moved = 0
+						for f = 1, 60 do
+							okA, err = pcall(PB.Animate, m, f / 30, { Flap = 1 })
+							if not okA then
+								break
+							end
+							if not finiteCFrame(wing2.CFrame) then
+								nan = true
+							end
+							moved = max(moved, (wing2.CFrame.Position - c0.Position).Magnitude)
+						end
+						tally.animate:case(okA and not nan and moved > 0.05, who .. ": " .. tostring(err or "ok") .. ", NaN " .. tostring(nan) .. ", Wing2L moved " .. fmt(moved, 2) .. " studs")
+					end
+					m:Destroy()
+				end
+			end
+		end
+		local h0, h1, h2 = heights[0] or 0, heights[1] or 0, heights[2]
+		tally.bigger:case(h0 > 0 and h1 > h0 and (top < 2 or (h2 or 0) > h1), who .. ": " .. fmt(h0, 2) .. " < " .. fmt(h1, 2) .. (h2 and (" < " .. fmt(h2, 2)) or "") .. " studs")
+		if top == 1 then
+			local okc, m = pcall(PB.Build, def, { Evolved = 2 })
+			local n = okc and typeof(m) == "Instance" and countParts(m) or -1
+			tally.clamp:case(n == stageParts["1High"] and m:FindFirstChild("Wing2L", true) == nil, who .. ": Evolved = 2 gives " .. n .. " parts, its evolved form " .. tostring(stageParts["1High"]))
+			if okc and typeof(m) == "Instance" then
+				m:Destroy()
+			end
+		end
+	end
+	for _, key in ipairs({ "max", "build", "caps", "wings", "bigger", "clamp", "flags", "animate" }) do
+		tally[key]:report()
+	end
+	holder:Destroy()
+	flushErrors("evolved")
+	flushWarnings("evolved")
 end)
 
 return S
