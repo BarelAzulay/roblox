@@ -958,7 +958,11 @@ scenario("dev", function()
 	if not Dev then
 		fail("client/Controllers/DevController.lua does not exist")
 	end
-	LocalPlayer:SetAttribute("NC_Dev", true)
+	-- DevService's hint lives on the developer's PlayerGui (only that player's client receives it)
+	local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui") or LocalPlayer:WaitForChild("PlayerGui", 5)
+	if pg then
+		pg:SetAttribute("NC_Dev", true)
+	end
 	advance(1)
 	if type(Dev.Open) == "function" then
 		Dev.Open()

@@ -719,6 +719,13 @@ local function serverScenarios()
 		mark = chat(owner, "/evolve all 2")
 		st = one(owner, mark, "DEV showcase: /evolve all 2").payload.Steps or {}
 		T.check(#st == epic and st[1].From == 1 and st[1].To == 2, "DEV showcase: /evolve all 2 plays every second evolution (" .. epic .. ")", #st .. " steps")
+		-- one chat line seen twice at once (Player.Chatted and a TextChatCommand both fire) runs once
+		advance(0.6)
+		mark = K.logSize()
+		Mock.FireSignal(owner, "Chatted", "/pet aurora 1")
+		Mock.FireSignal(owner, "Chatted", "/pet aurora 1")
+		advance(0.15)
+		T.eq(#shows(owner, mark), 1, "DEV showcase: the same chat line arriving twice at once runs once")
 		mark = chat(owner, "/clearpets")
 		e = one(owner, mark, "DEV showcase: /clearpets")
 		T.check(e.action == "Clear", "DEV showcase: /clearpets -> Clear", tostring(e.action))
@@ -1162,6 +1169,11 @@ local function clientScenarios()
 			{ "Dev_tokens", grantLabel, "tokens", Config.Dev.GrantTokens },
 			{ "Dev_tutorial", "Restart tutorial", "tutorial" },
 			{ "Dev_skiptutorial", "Skip tutorial", "skiptutorial" },
+			{ "Dev_evolveall", "Evolve every pet", "evolve", "all" },
+			{ "Dev_pets0", "Show all pets", "pets", "0" },
+			{ "Dev_pets1", "Show evolved pets", "pets", "1" },
+			{ "Dev_pets2", "Show Evolved II pets", "pets", "2" },
+			{ "Dev_clearpets", "Clear pet show", "clearpets" },
 		}
 		for _, e in ipairs(expected) do
 			local button = named(g, e[1])

@@ -58,9 +58,14 @@
 -- "good"); refusals get a "bad" toast. Rate limit: 4 commands per 2 seconds per player. Every command is logged with
 -- print("[NimbusClimb][Dev] ...") including the UserId. Nothing yields between reading and writing the profile.
 --
--- Chat: Player.Chatted (fires for the legacy chat and for TextChatService) of allowed players; "/allpets",
--- "/tokens 50000", "/reset", "/tutorial", "/skiptutorial", "/pet cloudy dragon 2", "/pets 1", "/evolve all",
--- "/clearpets", "/devhelp". Other "/" messages are left alone.
+-- Chat: "/allpets", "/tokens 50000", "/reset", "/tutorial", "/skiptutorial", "/pet cloudy dragon 2", "/pets 1",
+-- "/evolve all", "/clearpets", "/devhelp", typed in the GAME's chat (not Studio's command bar). Two ways in, one
+-- parser (onChatted): Player.Chatted of allowed players (the legacy chat), and one TextChatCommand per command
+-- (PrimaryAlias "/<command>", children of TextChatService, made at Init when the place uses TextChatService):
+-- the new chat only hands a "/" message to the game when a TextChatCommand claims it, and claimed commands stay
+-- out of the public chat. Their Triggered event fires for every player; the permission check is the same.
+-- The same text from the same player again within DUPLICATE_WINDOW seconds is dropped (both ways may fire).
+-- Other "/" messages are left alone.
 -- Studio auto grant: with Config.Dev.StudioAutoGrant in Studio, every allowed player gets allpets + tokens once per
 -- server, right after their profile loads (a provisional profile waits until DataService.ProfileRebased says it
 -- recovered).
@@ -100,6 +105,7 @@ local RATE_COUNT = 4 -- commands ...
 local RATE_WINDOW = 2 -- ... per this many seconds, per player
 local MAX_COMMAND_LENGTH = 32
 local MAX_CHAT_LENGTH = 200
+local DUPLICATE_WINDOW = 0.35 -- seconds: one chat line seen twice (Player.Chatted + TextChatCommand) runs once
 local GROUP_OWNER_RANK = 255
 local TOAST_SECONDS = 4
 local HELP_SECONDS = 8
@@ -162,6 +168,8 @@ local devs = {} -- [player] = true: allowed when they joined (only decides who h
 local recent = {} -- [player] = { os.clock() of the commands accepted in the current window }
 local rateWarned = {} -- [player] = os.clock() of the last "slow down" toast
 local chatConns = {} -- [player] = Chatted connection
+local lastChat = {} -- [player] = { Text, At }: the last chat line handled (duplicates are dropped)
+local chatCommandsMade = false
 local autoGranted = {} -- [userId] = true once the Studio auto grant ran in this server
 local initialized = false
 local ready = false -- Init finished with the tools on (Config.Dev.Enabled and a DataService)
@@ -901,6 +909,13 @@ local function onChatted(player, message)
 	if not KNOWN[word] then
 		return -- not one of ours (/e dance, /w name ...): leave it alone
 	end
+	-- the same line through both ways in (Player.Chatted and a TextChatCommand) runs once
+	local now = os.clock()
+	local last = lastChat[player]
+	if last and last.Text == message and now - last.At < DUPLICATE_WINDOW then
+		return
+	end
+	lastChat[player] = { Text = message, At = now }
 	local arg = nil
 	if word == "tokens" and rest ~= "" then
 		arg = parseAmount(rest)
@@ -923,6 +938,47 @@ local function connectChat(player)
 	chatConns[player] = player.Chatted:Connect(function(message)
 		onChatted(player, message)
 	end)
+end
+
+-- The new chat (TextChatService) only hands a "/" message to the game when a TextChatCommand claims it: one per
+-- command. Skipped for the legacy chat and wherever TextChatCommand cannot be made.
+local function makeChatCommands()
+	if chatCommandsMade then
+		return
+	end
+	chatCommandsMade = true
+	local okService, tcs = pcall(function()
+		return game:GetService("TextChatService")
+	end)
+	if not okService or not tcs then
+		return
+	end
+	local okVersion, version = pcall(function()
+		return tcs.ChatVersion
+	end)
+	if okVersion and version ~= nil and version ~= Enum.ChatVersion.TextChatService then
+		return -- the legacy chat: Player.Chatted sees every message
+	end
+	for _, name in ipairs(DevService.Commands) do
+		local ok = pcall(function()
+			local command = Instance.new("TextChatCommand")
+			command.Name = "NimbusDev_" .. name
+			command.PrimaryAlias = "/" .. name
+			command.Triggered:Connect(function(source, text)
+				local okPlayer, player = pcall(function()
+					return Players:GetPlayerByUserId(source.UserId)
+				end)
+				if okPlayer and player then
+					onChatted(player, text)
+				end
+			end)
+			command.Parent = tcs
+		end)
+		if not ok then
+			return -- no TextChatCommand here (an old engine, a test world): Player.Chatted still works
+		end
+	end
+	print(TAG .. "chat commands registered with TextChatService")
 end
 
 ----------------------------------------------------------------------
@@ -989,6 +1045,7 @@ local function onPlayerRemoving(player)
 		end)
 	end
 	chatConns[player] = nil
+	lastChat[player] = nil
 	rankCache[player] = nil
 	devs[player] = nil
 	recent[player] = nil
@@ -1039,6 +1096,7 @@ function DevService.Init(deps)
 		return
 	end
 	ready = true
+	makeChatCommands()
 
 	if hasSignal(DataService, "ProfileLoaded") then
 		DataService.ProfileLoaded:Connect(function(player)

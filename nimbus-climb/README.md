@@ -274,11 +274,16 @@ server checks the permission again on every single command, so other players can
 | **+1M tokens** | Adds `Config.Dev.GrantTokens` Cloud Tokens (1,000,000). |
 | **Restart tutorial** | Plays the tutorial again from step 1. Its rewards are not paid a second time. |
 | **Skip tutorial** | Ends the tutorial (without its finish reward). |
+| **Evolve every pet** | Plays every pet's evolution animation one after another in front of you (`/evolve all`). |
+| **Show all pets** / **Show evolved pets** / **Show Evolved II pets** | Lines up every pet at that stage in front of you (`/pets`, `/pets 1`, `/pets 2`). |
+| **Clear pet show** | Removes the showcase pets and stops an evolution (`/clearpets`). |
 | **Reset my data** | Back to a brand-new player: tokens, pets, items, stats, Pet Index progress and rewards are wiped, and the tutorial starts again as for a new player. Tap once ("Are you sure?"), then tap again to confirm. Not during a climb. |
 
 Close it with the red X, `Esc` or gamepad B. Every change answers with a "DEV: ..." toast.
 
-**Chat commands** (type them in the chat; not case-sensitive):
+**Chat commands** (type them in the game's chat while playing: click the chat bubble at the top left of the game
+view or press `/`; not case-sensitive). Not in Studio's command bar at the bottom of the Studio window: that box
+runs Lua code and the game never sees what you type there.
 
 | Command | What it does |
 |---|---|
