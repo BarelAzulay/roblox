@@ -13,8 +13,10 @@
 --                 slides in there at join and leaves after four seconds
 --   bottom-left   Currency stack (Cloud Tokens now: cloud coin + big abbreviated number, "+n" while in a
 --                 match; Cash and Gems rows appear by themselves once those player attributes exist),
---                 above the vitals: heart badge + health bar (damage trail, low-health pulse, DOWNED
---                 state), stamina bar and a dash-ready pip. Raised on touch devices to clear the thumbstick.
+--                 above the vitals card: heart badge + thick HP tube (white damage trail, hit flash + shake,
+--                 low-health pulse, DOWNED state), lightning badge + stamina tube (dims when run dry) and
+--                 the dash ring (cooldown sweep). Raised on touch devices to clear the thumbstick; short
+--                 touch screens get a compact card (VG.Compact) so it never sits on the hotbar.
 --   top-right     The currency stack moves here on short screens (landscape phones) where there is no
 --                 room above the raised vitals; the toast stack (NotifyController) then starts below it.
 --
@@ -106,6 +108,7 @@ local K = {
 	TRAIL_SPEED = 0.6, -- ... then drains this much of the bar per second
 	HIT_SECONDS = 0.32, -- damage flash + card shake
 	SHAKE_PX = 5,
+	STAMINA_RECOVER = 15, -- after running dry the stamina row stays dimmed up to this (MovementController's resume point)
 	TITLE_CARD_SECONDS = 4,
 	LEAVE_CONFIRM_SECONDS = 3,
 	GO_SECONDS = 1.0, -- how long "GO!" replaces the timer
@@ -113,23 +116,25 @@ local K = {
 }
 
 -- VG: geometry of the vitals card in design px (1080p), width 236-340 (the bars stretch with it; the badges
--- and the dash ring keep their size). Left column: the heart badge over the lightning badge, both overlapping
--- the card's left edge like the coins of the currency pills above (same column). Compact: short touch screens
--- (landscape phones), where the regular card would squeeze the gap above the hotbar.
+-- and the dash ring keep their size). H = the layout slot, CARD_H = the card drawn in it (from the top).
+-- Left column: the heart badge over the lightning badge, both overlapping the card's left edge like the coins
+-- of the currency pills above (same column). Regular: the dash ring ends the stamina row. Compact (short touch
+-- screens, landscape phones, where the slot sits right on the hotbar): a flatter card that leaves a gap at the
+-- bottom of its slot, with a bigger dash ring at the right end spanning both rows.
 local VG = {
 	Regular = {
-		H = K.VITALS_H, CARD_X = 20, CARD_CORNER = 22,
+		H = K.VITALS_H, CARD_H = K.VITALS_H, CARD_X = 20, CARD_CORNER = 22,
 		BADGE_X = 28, HEART = 52, HEART_Y = 26, HEART_TEXT = 34, BOLT = 36, BOLT_Y = 72,
 		HP_X = 46, HP_Y = 8, HP_H = 36, HP_TEXT = 26, PAD_R = 10,
 		ST_X = 40, ST_Y = 61, ST_H = 22,
-		RING = 40, RING_Y = 71, RING_GAP = 8, RING_FACE = 22, RING_TEXT = 20,
+		RING = 40, RING_Y = 71, RING_GAP = 8, RING_FACE = 22, RING_TEXT = 20, RING_SPAN = false,
 	},
 	Compact = {
-		H = 80, CARD_X = 18, CARD_CORNER = 20,
-		BADGE_X = 25, HEART = 46, HEART_Y = 23, HEART_TEXT = 30, BOLT = 32, BOLT_Y = 62,
-		HP_X = 42, HP_Y = 7, HP_H = 32, HP_TEXT = 24, PAD_R = 9,
-		ST_X = 36, ST_Y = 52, ST_H = 20,
-		RING = 34, RING_Y = 62, RING_GAP = 7, RING_FACE = 20, RING_TEXT = 18,
+		H = 80, CARD_H = 70, CARD_X = 18, CARD_CORNER = 20,
+		BADGE_X = 24, HEART = 44, HEART_Y = 22, HEART_TEXT = 30, BOLT = 28, BOLT_Y = 54,
+		HP_X = 40, HP_Y = 7, HP_H = 30, HP_TEXT = 23, PAD_R = 9,
+		ST_X = 34, ST_Y = 45, ST_H = 18,
+		RING = 46, RING_Y = 35, RING_GAP = 8, RING_FACE = 30, RING_TEXT = 22, RING_SPAN = true,
 	},
 	COMPACT_SPARE = 10, -- use Compact when Regular leaves less than this above the minimum touch raise
 }
@@ -141,8 +146,24 @@ local MUTED = Colors.Muted or Colors.CloudShade
 local GOLD = Colors.Gold or Colors.Token
 local INK = Colors.TextStroke or Colors.Ink
 local HEART_RED = Color3.fromRGB(232, 84, 104)
-local BOLT_BLUE = Color3.fromRGB(70, 156, 236)
-local BAR_EDGE = Theme.Darken(NAVY, 0.3) -- outline of the bars and the dash ring
+-- VS: the vitals card's colours and the dash ring's sweep sequences
+local VS = {
+	BoltBlue = Color3.fromRGB(70, 156, 236),
+	Edge = Theme.Darken(NAVY, 0.3), -- outline of the tubes and the dash ring
+	TrackTop = Color3.fromRGB(12, 16, 40), -- the dark inset track of the tubes and the ring
+	TrackBottom = Color3.fromRGB(40, 52, 104),
+	Grey = Color3.fromRGB(128, 140, 168), -- a drained badge / a dash you cannot afford
+	Arc = Color3.fromRGB(128, 214, 255), -- the bright cooldown sweep
+	-- a hard step in the middle of each half-disc's gradient (partial sweep), or no step at all (full ring)
+	Step = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0),
+		NumberSequenceKeypoint.new(0.499, 0),
+		NumberSequenceKeypoint.new(0.501, 1),
+		NumberSequenceKeypoint.new(1, 1),
+	}),
+	Solid = NumberSequence.new(0),
+}
+local Vitals = {} -- builders and painters of the vitals card (one table keeps the chunk's locals down)
 local CUR = Theme.Currency or {}
 
 -- Currency rows, top to bottom. Tokens is always shown (and sits right above the HP bar); the others appear
@@ -188,7 +209,7 @@ local H = { -- health
 	HitAt = -10, HitFx = false, -- last damage (flash + shake running while HitFx)
 }
 -- stamina + dash ring: Dim 0 = bright .. 1 = empty (eased), Charge = drawn cooldown sweep 0..1
-local St = { Frac = 1, Dim = 0, DimDrawn = -1, Charge = -1, Ready = nil, Afford = nil }
+local St = { Frac = 1, Dim = 0, DimDrawn = -1, Drained = false, Charge = -1, Ready = nil, Afford = nil }
 local Tk = { RunSeen = 0 } -- the "+n" match chip
 local Mt = { -- match panel bookkeeping
 	Base = 0, At = 0, Phase = nil, Last = nil, GoUntil = 0, Rows = 1, Chips = {}, Count = 0,
@@ -905,27 +926,13 @@ end
 -- Build: vitals card (bottom-left)
 ----------------------------------------------------------------------
 -- One card in the style of the currency pills: a glossy navy plate with a thick outline; the heart badge
--- over a thick HP tube ("117 / 117", white damage trail, hit flash, low-health pulse); the lightning badge
--- over a matching stamina tube (a notch marks one dash's cost); the dash ring at the end of the stamina row
--- (a sweep that fills clockwise while the dash recharges). Shapes are Frames (no font glyphs, no images).
-
--- the dash ring's sweep: a hard step in the middle of each half-disc's gradient, or no step at all (full)
-local SWEEP = {
-	Step = NumberSequence.new({
-		NumberSequenceKeypoint.new(0, 0),
-		NumberSequenceKeypoint.new(0.499, 0),
-		NumberSequenceKeypoint.new(0.501, 1),
-		NumberSequenceKeypoint.new(1, 1),
-	}),
-	Solid = NumberSequence.new(0),
-	TrackTop = Color3.fromRGB(12, 16, 40), -- the dark inset track of the bars and the ring
-	TrackBottom = Color3.fromRGB(40, 52, 104),
-	Grey = Color3.fromRGB(128, 140, 168), -- a drained badge / a dash you cannot afford
-	Arc = Color3.fromRGB(128, 214, 255), -- the bright cooldown sweep
-}
+-- beside a thick HP tube ("117 / 117", white damage trail, hit flash + card shake, low-health pulse); the
+-- lightning badge beside a matching stamina tube (eases on drain / refill, dims when run dry); the dash ring
+-- (a sweep that fills clockwise while the dash recharges). Shapes are Frames (no font glyphs, no images);
+-- the parts are placed by setVitalsGeometry (VG.Regular / VG.Compact).
 
 -- Glossy fill of a vitals tube: a soft light top, the base colour, a gentle darker band at the bottom.
-local function barSequence(color)
+function Vitals.BarSequence(color)
 	return ColorSequence.new({
 		ColorSequenceKeypoint.new(0, Theme.Lighten(color, 0.45)),
 		ColorSequenceKeypoint.new(0.4, color),
@@ -938,15 +945,15 @@ end
 -- A chunky tube: dark inset track with a rounded outline, an optional white damage trail behind a gradient
 -- fill with a highlight strip, a white flash layer on the fill and an optional centred number.
 -- opts: Color, Trail (bool), Text. Placed and sized by setVitalsGeometry.
-local function newVitalBar(parent, name, opts)
+function Vitals.NewBar(parent, name, opts)
 	local root = newFrame(parent, name, {
 		BackgroundTransparency = 0,
 		BackgroundColor3 = WHITE,
 		ZIndex = 2,
 	})
 	round(root)
-	Theme.Stroke(root, BAR_EDGE, 3, 0)
-	Theme.Gradient(root, SWEEP.TrackTop, SWEEP.TrackBottom, 90)
+	Theme.Stroke(root, VS.Edge, 3, 0)
+	Theme.Gradient(root, VS.TrackTop, VS.TrackBottom, 90)
 
 	local inner = newFrame(root, "Inner", {
 		Position = UDim2.fromOffset(3, 3),
@@ -971,7 +978,7 @@ local function newVitalBar(parent, name, opts)
 	round(fill)
 	local gradient = Instance.new("UIGradient")
 	gradient.Rotation = 90
-	gradient.Color = barSequence(opts.Color)
+	gradient.Color = Vitals.BarSequence(opts.Color)
 	gradient.Parent = fill
 	local shine = newFrame(fill, "Shine", {
 		Position = UDim2.new(0, 7, 0.1, 0),
@@ -1020,7 +1027,7 @@ local function newVitalBar(parent, name, opts)
 		end
 	end
 	function bar.SetColor(color)
-		gradient.Color = barSequence(color)
+		gradient.Color = Vitals.BarSequence(color)
 	end
 	function bar.Invalidate()
 		shownFill = -1 -- the size changed: re-check the highlight strip on the next SetFraction
@@ -1035,7 +1042,7 @@ end
 
 -- A heart from a square turned 45 degrees and two round lobes, filling `fraction` of its square parent.
 -- Everything is in scale units, so it follows the badge's size.
-local function newHeartShape(parent, name, fraction, color, zIndex)
+function Vitals.HeartShape(parent, name, fraction, color, zIndex)
 	local box = newFrame(parent, name, {
 		AnchorPoint = Vector2.new(0.5, 0.5),
 		Position = UDim2.fromScale(0.5, 0.5),
@@ -1069,7 +1076,7 @@ local function newHeartShape(parent, name, fraction, color, zIndex)
 end
 
 -- A chunky lightning bolt (a zig-zag of three rounded bars) filling `fraction` of its square parent.
-local function newBoltShape(parent, name, fraction, color, zIndex)
+function Vitals.BoltShape(parent, name, fraction, color, zIndex)
 	local box = newFrame(parent, name, {
 		AnchorPoint = Vector2.new(0.5, 0.5),
 		Position = UDim2.fromScale(0.5, 0.5),
@@ -1097,7 +1104,7 @@ local function newBoltShape(parent, name, fraction, color, zIndex)
 	return box
 end
 
-local function setShapeTransparency(box, transparency)
+function Vitals.SetShapeTransparency(box, transparency)
 	for _, part in ipairs(box:GetChildren()) do
 		if part:IsA("GuiObject") then
 			part.BackgroundTransparency = transparency
@@ -1108,7 +1115,7 @@ end
 -- The dash ring: a round face with the dash glyph inside a ring whose sweep fills clockwise from 12 o'clock
 -- as the cooldown runs out. The sweep is two half-discs, each clipped to its half of the ring, with a
 -- hard-step transparency gradient turned to the sweep angle (see setSweep). Sized by setVitalsGeometry.
-local function newDashRing(parent)
+function Vitals.NewDashRing(parent)
 	local root = newFrame(parent, "DashRing", {
 		AnchorPoint = Vector2.new(0.5, 0.5),
 		BackgroundTransparency = 0,
@@ -1116,8 +1123,8 @@ local function newDashRing(parent)
 		ZIndex = 3,
 	})
 	round(root)
-	Theme.Stroke(root, BAR_EDGE, 3, 0)
-	Theme.Gradient(root, SWEEP.TrackTop, SWEEP.TrackBottom, 90)
+	Theme.Stroke(root, VS.Edge, 3, 0)
+	Theme.Gradient(root, VS.TrackTop, VS.TrackBottom, 90)
 	local sweep = newFrame(root, "Sweep", {
 		Position = UDim2.fromOffset(2, 2),
 		Size = UDim2.new(1, -4, 1, -4),
@@ -1133,11 +1140,11 @@ local function newDashRing(parent)
 			Position = UDim2.fromScale((side == "Right") and -1 or 0, 0),
 			Size = UDim2.fromScale(2, 1),
 			BackgroundTransparency = 0,
-			BackgroundColor3 = SWEEP.Arc,
+			BackgroundColor3 = VS.Arc,
 		})
 		round(disc)
 		local g = Instance.new("UIGradient")
-		g.Transparency = SWEEP.Solid
+		g.Transparency = VS.Solid
 		g.Parent = disc
 		halves[i] = { Disc = disc, Gradient = g }
 	end
@@ -1168,15 +1175,17 @@ setVitalsGeometry = function(g)
 	end
 	UI.VitalsGeometry = g
 	UI.Card.Position = UDim2.fromOffset(g.CARD_X, 0)
-	UI.Card.Size = UDim2.new(1, -g.CARD_X, 1, 0)
+	UI.Card.Size = UDim2.new(1, -g.CARD_X, 0, g.CARD_H)
 	UI.CardCorner.CornerRadius = UDim.new(0, g.CARD_CORNER)
 	UI.RimCorner.CornerRadius = UDim.new(0, g.CARD_CORNER - 2)
 
+	-- the ring ends the stamina row, or (RING_SPAN) both rows
+	local ringRoom = g.RING + g.RING_GAP
 	UI.HpBar.Root.Position = UDim2.fromOffset(g.HP_X, g.HP_Y)
-	UI.HpBar.Root.Size = UDim2.new(1, -(g.HP_X + g.PAD_R), 0, g.HP_H)
+	UI.HpBar.Root.Size = UDim2.new(1, -(g.HP_X + g.PAD_R + (g.RING_SPAN and ringRoom or 0)), 0, g.HP_H)
 	UI.HpBar.Label.TextSize = g.HP_TEXT
 	UI.StBar.Root.Position = UDim2.fromOffset(g.ST_X, g.ST_Y)
-	UI.StBar.Root.Size = UDim2.new(1, -(g.ST_X + g.PAD_R + g.RING + g.RING_GAP), 0, g.ST_H)
+	UI.StBar.Root.Size = UDim2.new(1, -(g.ST_X + g.PAD_R + ringRoom), 0, g.ST_H)
 	UI.HpBar.Invalidate()
 	UI.StBar.Invalidate()
 
@@ -1225,27 +1234,27 @@ local function buildVitals(holder)
 	Theme.Stroke(rim, WHITE, 1.5, 0.82)
 
 	-- health tube with the damage trail, then the thinner stamina tube (ends left of the dash ring)
-	UI.HpBar = newVitalBar(body, "HealthBar", { Color = Colors.Health, Trail = true, Text = "100 / 100" })
-	UI.StBar = newVitalBar(body, "StaminaBar", { Color = Colors.Stamina })
-	UI.Ring = newDashRing(body)
+	UI.HpBar = Vitals.NewBar(body, "HealthBar", { Color = Colors.Health, Trail = true, Text = "100 / 100" })
+	UI.StBar = Vitals.NewBar(body, "StaminaBar", { Color = Colors.Stamina })
+	UI.Ring = Vitals.NewDashRing(body)
 
 	-- lightning badge (under the heart), then the heart badge on top
-	local bolt, boltGradient = newBadge(body, "StaminaBadge", 36, BOLT_BLUE, Theme.Lighten(BOLT_BLUE, 0.45))
+	local bolt, boltGradient = newBadge(body, "StaminaBadge", 36, VS.BoltBlue, Theme.Lighten(VS.BoltBlue, 0.45))
 	bolt.AnchorPoint = Vector2.new(0.5, 0.5)
 	bolt.ZIndex = 5
-	local boltShadow = newBoltShape(bolt, "BoltShadow", 0.68, Theme.Darken(BOLT_BLUE, 0.6), 2)
+	local boltShadow = Vitals.BoltShape(bolt, "BoltShadow", 0.68, Theme.Darken(VS.BoltBlue, 0.6), 2)
 	boltShadow.Position = UDim2.new(0.5, 0, 0.5, 2)
 	UI.Bolt = {
 		Badge = bolt, Gradient = boltGradient, Shadow = boltShadow,
-		Shape = newBoltShape(bolt, "Bolt", 0.68, WHITE, 3),
+		Shape = Vitals.BoltShape(bolt, "Bolt", 0.68, WHITE, 3),
 	}
 
 	local heart = newBadge(body, "Heart", 52, HEART_RED, Theme.Lighten(HEART_RED, 0.38))
 	heart.AnchorPoint = Vector2.new(0.5, 0.5)
 	heart.ZIndex = 6
-	UI.HeartShadow = newHeartShape(heart, "HeartShadow", 0.58, Theme.Darken(HEART_RED, 0.6), 2)
+	UI.HeartShadow = Vitals.HeartShape(heart, "HeartShadow", 0.58, Theme.Darken(HEART_RED, 0.6), 2)
 	UI.HeartShadow.Position = UDim2.new(0.5, 0, 0.5, 3)
-	UI.HeartShape = newHeartShape(heart, "HeartShape", 0.58, WHITE, 3)
+	UI.HeartShape = Vitals.HeartShape(heart, "HeartShape", 0.58, WHITE, 3)
 	UI.HeartScale = newScale(heart, 1)
 	UI.Heart = heart
 	UI.HeartGlyph = newText(heart, "Glyph", "!", "Display", 34, WHITE, {
@@ -1905,12 +1914,12 @@ end
 -- Turns the two half-disc gradients so the ring shows `charge` (0..1) clockwise from 12 o'clock. A gradient
 -- at Rotation r hides the half-plane its direction points into, so the right half shows the arc for
 -- r = 0..180 and the left half the rest for r = 180..360.
-local function setSweep(charge)
+function Vitals.SetSweep(charge)
 	local ring = UI.Ring
 	local solid = charge >= 0.999
 	if solid ~= ring.Solid then
 		ring.Solid = solid
-		local sequence = solid and SWEEP.Solid or SWEEP.Step
+		local sequence = solid and VS.Solid or VS.Step
 		for _, half in ipairs(ring.Halves) do
 			half.Gradient.Transparency = sequence
 		end
@@ -1924,9 +1933,9 @@ end
 
 -- Ready: a bright face inside a full bright ring; recharging: a dark face, the sweep filling; out of
 -- stamina for a dash: the sweep turns grey.
-local function paintRing(ready, afford)
+function Vitals.PaintRing(ready, afford)
 	local ring = UI.Ring
-	local sweepColor = afford and SWEEP.Arc or SWEEP.Grey
+	local sweepColor = afford and VS.Arc or VS.Grey
 	for _, half in ipairs(ring.Halves) do
 		half.Disc.BackgroundColor3 = sweepColor
 	end
@@ -1942,12 +1951,12 @@ local function paintRing(ready, afford)
 end
 
 -- dim 0 = bright .. 1 = empty: the tube greys out and the lightning badge fades
-local function paintStaminaDim(dim)
-	local base = BOLT_BLUE:Lerp(SWEEP.Grey, 0.85 * dim)
+function Vitals.PaintStaminaDim(dim)
+	local base = VS.BoltBlue:Lerp(VS.Grey, 0.85 * dim)
 	UI.Bolt.Gradient.Color = badgeSequence(base, Theme.Lighten(base, 0.45))
-	setShapeTransparency(UI.Bolt.Shape, 0.5 * dim)
-	setShapeTransparency(UI.Bolt.Shadow, 0.5 * dim)
-	UI.StBar.SetColor(Colors.Stamina:Lerp(SWEEP.Grey, 0.7 * dim))
+	Vitals.SetShapeTransparency(UI.Bolt.Shape, 0.5 * dim)
+	Vitals.SetShapeTransparency(UI.Bolt.Shadow, 0.5 * dim)
+	UI.StBar.SetColor(Colors.Stamina:Lerp(VS.Grey, 0.7 * dim))
 end
 
 local function updateStamina(dt, now)
@@ -1967,10 +1976,16 @@ local function updateStamina(dt, now)
 	end
 	UI.StBar.SetFraction(St.Frac)
 
-	-- dim when drained: a little below one dash's cost, fully when empty (eased, repainted on change only)
+	-- dim: a little below one dash's cost, fully once run dry until running is possible again (eased,
+	-- repainted on change only)
 	local cost = physics.DashStaminaCost or 35
-	local dimGoal = 0
 	if value <= 0.5 then
+		St.Drained = true
+	elseif value >= K.STAMINA_RECOVER then
+		St.Drained = false
+	end
+	local dimGoal = 0
+	if St.Drained then
 		dimGoal = 1
 	elseif value < cost then
 		dimGoal = 0.35
@@ -1981,7 +1996,7 @@ local function updateStamina(dt, now)
 	end
 	if math.abs(St.Dim - St.DimDrawn) > 0.02 or (St.Dim == dimGoal and St.DimDrawn ~= dimGoal) then
 		St.DimDrawn = St.Dim
-		paintStaminaDim(St.Dim)
+		Vitals.PaintStaminaDim(St.Dim)
 	end
 
 	-- dash ring: the sweep follows the cooldown, the face lights up once a dash is possible
@@ -1989,7 +2004,7 @@ local function updateStamina(dt, now)
 	local charge = 1 - cd
 	if math.abs(charge - St.Charge) > 0.004 then
 		St.Charge = charge
-		setSweep(charge)
+		Vitals.SetSweep(charge)
 	end
 	local afford = value >= cost
 	local ready = (cd <= 0.001) and afford
@@ -1999,7 +2014,7 @@ local function updateStamina(dt, now)
 		end
 		St.Ready = ready
 		St.Afford = afford
-		paintRing(ready, afford)
+		Vitals.PaintRing(ready, afford)
 	end
 end
 

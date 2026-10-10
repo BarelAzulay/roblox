@@ -326,34 +326,46 @@ end
 ----------------------------------------------------------------------
 -- GUI helpers (all text through Theme roles)
 ----------------------------------------------------------------------
-local function styledLabel(text, role, color, props)
-	local ok, made = pcall(Theme.Label, text, role, { Scaled = true, Color = color, Stroke = 0.35, Props = props })
-	if ok and made then
-		return made
+-- World text rule (ARCHITECTURE_V3.md): hints floating over the course are PIXEL-sized BillboardGuis (constant
+-- on-screen size: titles >= 22 px, info lines >= 18 px at 1080p, outlined glyphs on a compact solid plate that
+-- sizes itself to its lines, LightInfluence 0, MaxDistance ~100-120); signs on surfaces are SurfaceGuis at 50-60
+-- px per stud with FIXED text sizes (titles >= 1 stud, info lines >= 0.6 stud). Never TextScaled in the world.
+local TEXT_INK = Theme.Colors.TextStroke or C.Ink
+local HINT_TITLE = 30 -- px
+local HINT_INFO = 19 -- px
+local SIGN_INFO = 30 -- px at 50 px per stud = 0.6 stud
+
+-- Fixed-size outlined label. place = { x, y, w, h } fractions of the parent, or nil for an auto-sized line
+-- inside a list layout (order = LayoutOrder).
+local function worldText(parent, text, role, size, color, place, order, wrap)
+	local props = { TextWrapped = wrap == true, LayoutOrder = order or 0 }
+	if place then
+		props.Position = UDim2.new(place[1], 0, place[2], 0)
+		props.Size = UDim2.new(place[3], 0, place[4], 0)
+	else
+		props.AutomaticSize = Enum.AutomaticSize.XY
+		props.Size = UDim2.fromOffset(0, size + 4)
 	end
-	local label = Instance.new("TextLabel")
-	label.BackgroundTransparency = 1
-	label.Text = text
-	label.TextScaled = true
-	label.TextColor3 = color
-	pcall(Theme.Style, label, role, { Scaled = true, Color = color })
-	if props then
+	local ok, label = pcall(Theme.Label, text, role, {
+		Size = size,
+		Color = color,
+		Stroke = 1, -- the glyph outline replaces the classic stroke
+		Outline = math.max(2, math.floor(size / 16 + 0.5)),
+		OutlineColor = TEXT_INK,
+		Props = props,
+	})
+	if not ok or not label then
+		label = Instance.new("TextLabel")
+		label.BackgroundTransparency = 1
+		label.Text = text
+		label.TextSize = size
+		label.TextColor3 = color
+		label.TextStrokeTransparency = 0
+		pcall(Theme.Style, label, role, { Size = size, Color = color, Stroke = 0 })
 		for k, v in pairs(props) do
 			label[k] = v
 		end
 	end
-	return label
-end
-
--- label filling a horizontal band (y, h are 0..1 fractions of the parent)
-local function addText(parent, text, role, color, y, h, props)
-	local p = { Size = UDim2.new(1, 0, h, 0), Position = UDim2.new(0, 0, y, 0), TextWrapped = true }
-	if props then
-		for k, v in pairs(props) do
-			p[k] = v
-		end
-	end
-	local label = styledLabel(text, role, color, p)
 	label.Parent = parent
 	return label
 end
@@ -366,16 +378,55 @@ local function addGradient(target, top, bottom)
 	return g
 end
 
--- World-space-sized BillboardGui (scale units are studs).
-local function billboardOn(part, widthStuds, heightStuds, yOffset, maxDistance)
+-- Pixel-sized hint tag on `part`. Its bottom edge sits `lift` studs above the part (world space) and it grows
+-- upwards, so it never sinks into what it labels. Returns the compact plate; add lines with hintLine.
+local function hintTag(part, lift, maxDistance, edge)
 	local gui = Instance.new("BillboardGui")
-	gui.Size = UDim2.new(widthStuds, 0, heightStuds, 0)
-	gui.StudsOffset = Vector3.new(0, yOffset or 0, 0)
+	gui.Name = "HintTag"
+	gui.Size = UDim2.fromOffset(420, 120)
+	gui.SizeOffset = Vector2.new(0, 0.5)
+	gui.StudsOffsetWorldSpace = Vector3.new(0, lift or 0, 0)
 	gui.AlwaysOnTop = false
 	gui.LightInfluence = 0
-	gui.MaxDistance = maxDistance or 140
+	gui.MaxDistance = maxDistance or 110
+	gui.ClipsDescendants = false
 	gui.Parent = part
-	return gui
+	-- dark plate: gold or pale text straight on the sky is only 1.2 - 2.1 : 1, on this plate 7 : 1 or better
+	local plate = Instance.new("Frame")
+	plate.Name = "Plate"
+	plate.AnchorPoint = Vector2.new(0.5, 1)
+	plate.Position = UDim2.new(0.5, 0, 1, 0)
+	plate.Size = UDim2.fromOffset(120, 0)
+	plate.AutomaticSize = Enum.AutomaticSize.XY
+	plate.BackgroundColor3 = C.Panel
+	plate.BackgroundTransparency = 0.06
+	plate.BorderSizePixel = 0
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 14)
+	corner.Parent = plate
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = edge or C.Ink
+	stroke.Thickness = 3
+	stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	stroke.Parent = plate
+	local pad = Instance.new("UIPadding")
+	pad.PaddingTop = UDim.new(0, 5)
+	pad.PaddingBottom = UDim.new(0, 7)
+	pad.PaddingLeft = UDim.new(0, 16)
+	pad.PaddingRight = UDim.new(0, 16)
+	pad.Parent = plate
+	local layout = Instance.new("UIListLayout")
+	layout.FillDirection = Enum.FillDirection.Vertical
+	layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	layout.SortOrder = Enum.SortOrder.LayoutOrder
+	layout.Padding = UDim.new(0, 1)
+	layout.Parent = plate
+	plate.Parent = gui
+	return plate
+end
+
+local function hintLine(plate, text, role, size, color, order)
+	return worldText(plate, text, role, size, color, nil, order)
 end
 
 local function surfaceOn(part, face, pixelsPerStud)
@@ -386,6 +437,23 @@ local function surfaceOn(part, face, pixelsPerStud)
 	gui.LightInfluence = 0
 	gui.Parent = part
 	return gui
+end
+
+-- Canvas size (px) of a SurfaceGui on `face` of `part` at `pps` pixels per stud.
+local function facePixels(part, face, pps)
+	local s = part.Size
+	if face == Enum.NormalId.Top or face == Enum.NormalId.Bottom then
+		return s.X * pps, s.Z * pps
+	elseif face == Enum.NormalId.Left or face == Enum.NormalId.Right then
+		return s.Z * pps, s.Y * pps
+	end
+	return s.X * pps, s.Y * pps
+end
+
+-- The biggest fixed text size (px, Roblox caps TextSize at 100) for a glyph filling `k` of the face's short side.
+local function faceTextSize(part, face, pps, k)
+	local w, h = facePixels(part, face, pps)
+	return math.max(SIGN_INFO, math.min(100, math.floor(math.min(w, h) * k)))
 end
 
 -- chunky dark sign panel for SurfaceGuis
@@ -404,20 +472,6 @@ local function panelFrame(parent, transparency)
 	stroke.Parent = f
 	f.Parent = parent
 	return f
-end
-
--- Dark rounded chip that backs a hint label floating in the open. Gold or pale text straight on the sky or on
--- a lit plate is only 1.0 - 2.1 : 1 (gold on the haze is 1.2 : 1); on this panel it is 7 : 1 or better.
--- Returns the frame the labels go into (a little inner padding keeps the text off the outline).
-local function hintChip(gui)
-	local chip = panelFrame(gui, 0.16)
-	local pad = Instance.new("UIPadding")
-	pad.PaddingLeft = UDim.new(0.05, 0)
-	pad.PaddingRight = UDim.new(0.05, 0)
-	pad.PaddingTop = UDim.new(0.06, 0)
-	pad.PaddingBottom = UDim.new(0.06, 0)
-	pad.Parent = chip
-	return chip
 end
 
 ----------------------------------------------------------------------
@@ -743,7 +797,7 @@ function KB.Bounce(ctx, step, look)
 	local glyph = blk(ctx, "Decor", "PadGlyph", Vector3.new(padSize * 0.7, 0.05, padSize * 0.7),
 		CFrame.new(pc + Vector3.new(0, 0.76, 0)), color, MAT.SmoothPlastic, 1)
 	local gui = surfaceOn(glyph, Enum.NormalId.Top, 60)
-	addText(gui, "▲", "Accent", C.Ink, 0.05, 0.9)
+	worldText(gui, "▲", "Accent", faceTextSize(glyph, Enum.NormalId.Top, 60, 0.75), C.Ink, { 0, 0.05, 1, 0.9 })
 	return main
 end
 
@@ -1012,10 +1066,9 @@ function KB.CannonPad(ctx, step, look)
 		ball(ctx, "Decor", "ArcDot", 0.75 - 0.035 * k, CFrame.new(p), C.Wind:Lerp(C.Text, 0.3), MAT.Neon, 0.45)
 	end
 	-- label
-	local gui = billboardOn(pad, 8, 3.4, 6.5, 100)
-	local chip = hintChip(gui)
-	addText(chip, "CANNON", "Accent", C.Gold, 0, 0.58)
-	addText(chip, "step on to launch!", "Body", C.Text, 0.6, 0.34)
+	local chip = hintTag(pad, 4.8, 100, C.Gold)
+	hintLine(chip, "CANNON", "Accent", HINT_TITLE, C.Gold, 1)
+	hintLine(chip, "step on to launch!", "Body", HINT_INFO, C.Text, 2)
 	return main
 end
 
@@ -1069,14 +1122,14 @@ function KB.PlateBridge(ctx, step, look)
 			addSparkles(plate, color, 4, 5, 1.4, 0.7)
 			-- dark ink on the lit plate colour: 5 - 7.7 : 1 (the soft white it used was only 1.8 : 1)
 			local gui = surfaceOn(plate, Enum.NormalId.Top, 60)
-			addText(gui, "HOLD", "Heading", C.Ink, 0.22, 0.56)
-			local sign = hintChip(billboardOn(plate, 9, 3.6, 5.5, 110))
+			worldText(gui, "HOLD", "Heading", faceTextSize(plate, Enum.NormalId.Top, 60, 0.25), C.Ink, { 0, 0.2, 1, 0.6 })
+			local sign = hintTag(plate, 3.7, 110, color)
 			if i == 1 then
-				addText(sign, "HOLD THE PLATE", "Accent", color:Lerp(C.Text, 0.3), 0, 0.58)
-				addText(sign, "so your team can cross", "Body", C.Text, 0.6, 0.34)
+				hintLine(sign, "HOLD THE PLATE", "Accent", 28, color:Lerp(C.Text, 0.3), 1)
+				hintLine(sign, "so your team can cross", "Body", HINT_INFO, C.Text, 2)
 			else
-				addText(sign, "HOLD TO LET THEM CROSS", "Accent", color:Lerp(C.Text, 0.3), 0, 0.58)
-				addText(sign, "then everyone moves on", "Body", C.Text, 0.6, 0.34)
+				hintLine(sign, "HOLD TO LET THEM CROSS", "Accent", 28, color:Lerp(C.Text, 0.3), 1)
+				hintLine(sign, "then everyone moves on", "Body", HINT_INFO, C.Text, 2)
 			end
 		end
 	end
@@ -1099,16 +1152,19 @@ local function buildBoard(ctx, F, localPos, face, title, body, accent)
 	for _, dz in ipairs({ -3.2, 3.2 }) do
 		cyl(ctx, "Signs", "BoardLeg", 1.0, 0.5, F * CFrame.new(localPos.X, localPos.Y - 3.3, localPos.Z + dz), C.Iron, MAT.Metal)
 	end
+	-- 430 x 280 px canvas: a 1-stud title, then 0.6-stud body lines
 	local gui = surfaceOn(board, face, 50)
 	local panel = panelFrame(gui, 0.04)
-	addText(panel, title, "Title", accent, 0.05, 0.2)
-	addText(panel, body, "Body", C.Text, 0.28, 0.66)
+	worldText(panel, title, "Title", 50, accent, { 0.03, 0.03, 0.94, 0.2 })
+	local lines = worldText(panel, body, "Body", SIGN_INFO, C.Text, { 0.05, 0.27, 0.9, 0.69 }, nil, true)
+	lines.TextYAlignment = Enum.TextYAlignment.Top
+	lines.LineHeight = 1.12
 end
 
 -- Decor heights vs the Headroom CourseLayout reserves (nothing of another step may enter that space, so keep
 -- every arch / flag / sign below it; CourseLayout.DECOR_HEAD must stay >= these tops, measured above the step top):
 --   Start       arch pillars 12.5, StartBeam top 15.9, bunting top 17.0      Headroom 18
---   Checkpoint  flag poles 9.0, orbs 9.9, label (billboard) top <= Headroom  Headroom >= 13 (Config.Course.Clearance)
+--   Checkpoint  flag poles 9.0, orbs 9.9, label from 10.0 (pixel-sized tag)  Headroom >= 13 (Config.Course.Clearance)
 --   Finish      rainbow pillars 14.4, FinishBeam top 17.8                    Headroom 18
 function KB.Start(ctx, step, look)
 	local main, F = buildBase(ctx, step, look, { Name = "StartPlatform", Big = true })
@@ -1131,16 +1187,16 @@ function KB.Start(ctx, step, look)
 	end
 	local sub = ctx.Diff.DisplayName .. " - " .. tostring(ctx.Layout.Archetype or "Straight") .. " course"
 	for _, face in ipairs({ Enum.NormalId.Front, Enum.NormalId.Back }) do
-		local gui = surfaceOn(beam, face, 50)
-		local title = addText(gui, "START", "Title", C.Text, 0.04, 0.62)
+		local gui = surfaceOn(beam, face, 50) -- 1100 x 170 px: the title 2 studs tall, the line 0.72 stud
+		local title = worldText(gui, "START", "Title", 100, C.Text, { 0, 0, 1, 0.66 })
 		addGradient(title, C.Text, trim:Lerp(C.Text, 0.35))
-		addText(gui, sub, "Script", trim:Lerp(C.Text, 0.4), 0.68, 0.28)
+		worldText(gui, sub, "Script", 36, trim:Lerp(C.Text, 0.4), { 0, 0.67, 1, 0.3 })
 	end
 	-- info boards on both sides
 	buildBoard(ctx, F, Vector3.new(-11.4, 3.6, -3), Enum.NormalId.Right, "HOW TO CLIMB",
-		"SHIFT  run\nSPACE  jump\nQ  dash  (tap DASH on mobile)\nCollect the floating clouds!", trim:Lerp(C.Text, 0.3))
+		"SHIFT  run\nSPACE  jump\nQ  dash (or tap DASH)\nGrab the floating clouds!", trim:Lerp(C.Text, 0.3))
 	buildBoard(ctx, F, Vector3.new(11.4, 3.6, -3), Enum.NormalId.Left, "TEAMWORK",
-		"Touch a flag to heal everyone and lift up downed friends.\nHold glowing plates to raise bridges.\nNobody gets left behind!",
+		"Flags heal everyone and\nlift up downed friends.\nHold plates for bridges.\nNobody gets left behind!",
 		C.Checkpoint:Lerp(C.Text, 0.3))
 	return main
 end
@@ -1170,22 +1226,20 @@ function KB.Checkpoint(ctx, step, look)
 		blk(ctx, "Decor", "BannerTrim", Vector3.new(4.1, 0.25, 0.2), F * CFrame.new(px - sgn * 2.2, 8.8, pz), look.Tint)
 		for _, face in ipairs({ Enum.NormalId.Front, Enum.NormalId.Back }) do
 			local gui = surfaceOn(banner, face, 60)
-			addText(gui, tostring(index), "Display", C.Text, 0.05, 0.9)
+			worldText(gui, tostring(index), "Display", faceTextSize(banner, face, 60, 0.7), C.Text, { 0, 0.05, 1, 0.9 })
 		end
 	end
-	-- The label sits right on top of the orbs (bottom edge at the orb tops, 10.0) and its top edge stays inside the
-	-- Headroom reserved for this step, so a later platform can never hang through the text.
-	local room = step.Headroom or Config.Course.Clearance
+	-- The label stands right on top of the orbs (bottom edge at the orb tops, 10.0) and grows upwards; it is
+	-- pixel-sized (World text rule), so it reads the same from any distance.
 	local labelBottom = orbY + 0.7
-	local labelH = max(2.4, min(4.2, room - 0.2 - labelBottom))
-	local gui = hintChip(billboardOn(orb, 10, labelH, labelBottom - orbY + labelH / 2, 170))
-	addText(gui, "Checkpoint " .. index .. "/" .. total, "Title", C.Text, 0, 0.55)
+	local gui = hintTag(orb, labelBottom - orbY, 120, C.Checkpoint)
+	hintLine(gui, "Checkpoint " .. index .. "/" .. total, "Title", 28, C.Text, 1)
 	local nextStage = ctx.Layout.Stages and ctx.Layout.Stages[index + 1]
 	local sub = "Final stretch - the finish is close!"
 	if nextStage and nextStage.Name then
 		sub = "Next: " .. nextStage.Name
 	end
-	addText(gui, sub, "Script", C.Checkpoint:Lerp(C.Text, 0.45), 0.58, 0.36)
+	hintLine(gui, sub, "Body", HINT_INFO, C.Checkpoint:Lerp(C.Text, 0.45), 2)
 	return main
 end
 
@@ -1220,14 +1274,14 @@ function KB.Finish(ctx, step, look)
 	local beam = blk(ctx, "Signs", "FinishBeam", Vector3.new(26, 3.6, 2), F * CFrame.new(0, 16, archZ), C.Panel)
 	blk(ctx, "Decor", "FinishGlow", Vector3.new(26, 0.25, 2.1), F * CFrame.new(0, 14.1, archZ), C.Gold, MAT.Neon, 0.1)
 	for _, face in ipairs({ Enum.NormalId.Front, Enum.NormalId.Back }) do
-		local gui = surfaceOn(beam, face, 50)
-		local title = addText(gui, "FINISH", "Title", C.Text, 0.03, 0.64)
+		local gui = surfaceOn(beam, face, 50) -- 1300 x 180 px: the title 2 studs tall, the line 0.72 stud
+		local title = worldText(gui, "FINISH", "Title", 100, C.Text, { 0, 0.02, 1, 0.64 })
 		addGradient(title, C.Gold:Lerp(C.Text, 0.4), C.Rainbow[1])
-		addText(gui, "you made it - together!", "Script", C.Text, 0.68, 0.28)
+		worldText(gui, "you made it - together!", "Script", 36, C.Text, { 0, 0.67, 1, 0.3 })
 	end
-	local sign = hintChip(billboardOn(orb, 10, 3.4, 4.6, 170))
-	addText(sign, "GOAL", "Title", C.Gold:Lerp(C.Text, 0.25), 0, 0.62)
-	addText(sign, "wait here for your team", "Script", C.Text, 0.64, 0.32)
+	local sign = hintTag(orb, 2.9, 120, C.Gold)
+	hintLine(sign, "GOAL", "Title", HINT_TITLE, C.Gold:Lerp(C.Text, 0.25), 1)
+	hintLine(sign, "wait here for your team", "Body", HINT_INFO, C.Text, 2)
 	return main
 end
 
@@ -1261,12 +1315,12 @@ local function buildDashHint(ctx, step)
 	local pole = pos + perp * 1.8
 	rod(ctx, "Decor", "DashPole", pole, pole + Vector3.new(0, 4.6, 0), 0.25, C.Brass, MAT.Metal)
 	local head = ball(ctx, "Decor", "DashBeacon", 0.9, CFrame.new(pole + Vector3.new(0, 4.8, 0)), C.Gold, MAT.Neon, 0.1)
-	local gui = hintChip(billboardOn(head, 8, 3.6, 2.6, 130))
-	addText(gui, "DASH!", "Accent", C.Gold, 0, 0.62)
+	local gui = hintTag(head, 0.8, 110, C.Gold)
+	hintLine(gui, "DASH!", "Accent", 32, C.Gold, 1)
 	if step.Kind == "PlateBridge" then
-		addText(gui, "or hold the plate for a bridge", "Body", C.Text, 0.64, 0.32)
+		hintLine(gui, "or hold the plate for a bridge", "Body", HINT_INFO, C.Text, 2)
 	else
-		addText(gui, "press Q  or tap DASH", "Body", C.Text, 0.64, 0.32)
+		hintLine(gui, "press Q  or tap DASH", "Body", HINT_INFO, C.Text, 2)
 	end
 end
 

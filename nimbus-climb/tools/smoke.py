@@ -366,6 +366,8 @@ def main():
     client_scenarios.insert(client_scenarios.index("client_final"), "client_storm")
     server_files.append("smoke_polish_portals.lua"); client_files.append("smoke_polish_portals.lua"); server_scenarios.insert(server_scenarios.index("final_checks"), "polish_portals"); client_scenarios.insert(client_scenarios.index("client_final"), "client_polish_portals"); mobile_scenarios.append("client_polish_portals_mobile")  # portal lock-in + outside countdown (smoke_polish_portals.lua: both worlds)
     client_files.append("smoke_polish_guitool.lua"); client_scenarios.insert(client_scenarios.index("client_final"), "client_gui_dump")  # offline GUI renderer: tools/dump_gui.lua walks PlayerGui + the widget gallery (smoke_polish_guitool.lua: client world)
+    client_files.append("smoke_polish_vitals.lua"); client_scenarios.insert(client_scenarios.index("client_final"), "client_polish_vitals"); mobile_scenarios.append("client_polish_vitals_mobile")  # HP / stamina vitals card (smoke_polish_vitals.lua: client + phone worlds)
+    server_files.append("smoke_polish_worldtext.lua"); client_files.append("smoke_polish_worldtext.lua"); server_scenarios.insert(server_scenarios.index("final_checks"), "polish_worldtext"); client_scenarios.insert(client_scenarios.index("client_final"), "client_polish_worldtext")  # World text rule: census of every BillboardGui / SurfaceGui, home nameplates (smoke_polish_worldtext.lua: both worlds)
     if args.list:
         print("server:", ", ".join(server_scenarios))
         print("client:", ", ".join(client_scenarios + mobile_scenarios))

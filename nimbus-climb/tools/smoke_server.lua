@@ -1414,7 +1414,7 @@ S.lobby = guarded("lobby", function()
 	local centres = {}
 	local spotProblems = T.tally("every SpotInfo has Index/Folder/Center/SpawnCFrame/NameLabel/SubLabel/PodiumCFrame on solid ground")
 	local ringProblems = T.tally("spots stand on the outer ring (radius " .. Config.Lobby.SpotRingRadius .. ")")
-	local freeProblems = T.tally("unowned spots read 'Free spot' / 'Step in to claim'")
+	local freeProblems = T.tally("unowned spots read 'Free home' / 'Step in to claim'")
 	for i = 1, Config.Lobby.SpotCount do
 		local sp = info.Spots and info.Spots[i]
 		if sp then
@@ -1427,7 +1427,7 @@ S.lobby = guarded("lobby", function()
 				spotProblems:case(sp.NameLabel:IsDescendantOf(sp.Folder) or sp.NameLabel:IsDescendantOf(folder), "spot " .. i .. ": nameplate is outside the lobby")
 				local horiz = math.sqrt((sp.Center.X - Config.Lobby.Origin.X) ^ 2 + (sp.Center.Z - Config.Lobby.Origin.Z) ^ 2)
 				ringProblems:case(math.abs(horiz - Config.Lobby.SpotRingRadius) <= 30, "spot " .. i .. " is " .. fmt(horiz) .. " from the origin")
-				freeProblems:case(sp.NameLabel.Text == "Free spot" and sp.SubLabel.Text == "Step in to claim", "spot " .. i .. " reads '" .. sp.NameLabel.Text .. "' / '" .. sp.SubLabel.Text .. "'")
+				freeProblems:case(sp.NameLabel.Text == "Free home" and sp.SubLabel.Text == "Step in to claim", "spot " .. i .. " reads '" .. sp.NameLabel.Text .. "' / '" .. sp.SubLabel.Text .. "'")
 				for j = 1, #centres do
 					if (centres[j] - sp.Center).Magnitude < 20 then
 						spotProblems:case(false, "spots " .. j .. " and " .. i .. " overlap")

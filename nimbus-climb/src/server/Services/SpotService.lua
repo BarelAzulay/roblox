@@ -63,6 +63,7 @@ local CULL_INTERVAL = 0.5 -- seconds between proximity checks
 local REFRESH_INTERVAL = 1 -- seconds between profile signature checks
 local PROFILE_WAIT = 20 -- give up waiting for a profile after this many seconds
 local REMOTE_COOLDOWN = 0.25 -- per player per remote
+local HEADSHOT_RETRY = 120 -- seconds before a failed headshot request may be tried again
 local WELCOME_DELAY = 4 -- seconds after assignment before the "your spot" toast
 
 local initialized = false
@@ -78,7 +79,8 @@ local conns = {} -- [Player] = { RBXScriptConnection... }
 local shows = {} -- [index] = showcase record (see makeShow)
 local lastSig = {} -- [index] = last nameplate signature
 local lastGo = {} -- [Player] = os.clock() of the last GoToSpot
-local headshots = {} -- [userId] = content string | false (failed) : the GetUserThumbnailAsync cache
+local headshots = {} -- [userId] = content string : the GetUserThumbnailAsync cache
+local headshotFailed = {} -- [userId] = os.clock() of the last failed request (retried after HEADSHOT_RETRY)
 local headshotPending = {} -- [userId] = true while a request runs
 local refreshQueued = {} -- [Player] = true while a deferred refresh is pending
 local notifyRemote = nil
@@ -236,7 +238,8 @@ local function loadHeadshot(player, index)
 		setAvatar(index, "Headshot", cached)
 		return
 	end
-	if cached == false or headshotPending[userId] then
+	local failedAt = headshotFailed[userId]
+	if headshotPending[userId] or (failedAt and os.clock() - failedAt < HEADSHOT_RETRY) then
 		return
 	end
 	headshotPending[userId] = true
@@ -247,8 +250,9 @@ local function loadHeadshot(player, index)
 		headshotPending[userId] = nil
 		if ok and type(content) == "string" and content ~= "" then
 			headshots[userId] = content
+			headshotFailed[userId] = nil
 		else
-			headshots[userId] = false
+			headshotFailed[userId] = os.clock()
 			return
 		end
 		-- still the owner of that spot? (they may have left while the request ran)
@@ -551,7 +555,9 @@ local function setShowcasePet(index, petId)
 		tag.NameLabel.Text = tostring(def.Name or petId)
 		tag.RarityLabel.Text = tostring(def.Rarity or "")
 		tag.RarityPill.BackgroundColor3 = color:Lerp(Theme.Colors.Panel, 0.2)
-		tag.Stroke.Color = color
+		-- a very dark rarity colour (Secret) would vanish against the navy plate: lift the outline
+		local luma = 0.299 * color.R + 0.587 * color.G + 0.114 * color.B
+		tag.Stroke.Color = (luma < 0.35) and color:Lerp(Theme.Colors.Muted or Theme.Colors.White, 0.55) or color
 		tag.Gui.Enabled = true
 	end
 end

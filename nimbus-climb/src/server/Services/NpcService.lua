@@ -422,10 +422,12 @@ local function textWidth(text, size, font)
 	return string.len(text) * size * 0.56
 end
 
--- A rounded pill exactly as wide as its (fixed-size, outlined) text plus padding. Returns pill, label.
-local function textPill(parent, name, text, role, size, padX, height, minW, thickness)
+-- A rounded pill as wide as its (fixed-size, outlined) text plus padding (+8% and the outline as a safety
+-- margin, so a slightly wider glyph never truncates). `extraRight` keeps room for a corner badge. Returns pill, label.
+local function textPill(parent, name, text, role, size, padX, height, minW, thickness, extraRight)
 	local font = Theme.Fonts[role] or Theme.Fonts.Body
-	local width = math.min(PLATE_W, math.max(minW, math.ceil(textWidth(text, size, font)) + padX * 2 + 4))
+	local textW = math.ceil(textWidth(text, size, font) * 1.08 + thickness * 2)
+	local width = math.min(PLATE_W + 40, math.max(minW, textW + padX * 2 + (extraRight or 0)))
 	local frame = make("Frame", {
 		Name = name,
 		AnchorPoint = Vector2.new(0.5, 1),
@@ -440,9 +442,9 @@ local function textPill(parent, name, text, role, size, padX, height, minW, thic
 		OutlineColor = INK,
 		Props = {
 			Name = (name == "NamePill") and "Name" or "Title",
-			AnchorPoint = Vector2.new(0.5, 0.5),
-			Position = UDim2.fromScale(0.5, 0.5),
-			Size = UDim2.new(1, -padX, 1, 0),
+			AnchorPoint = Vector2.new(0, 0.5),
+			Position = UDim2.new(0, padX, 0.5, 0),
+			Size = UDim2.new(1, -(padX * 2 + (extraRight or 0)), 1, 0),
 			TextWrapped = false,
 			TextTruncate = Enum.TextTruncate.AtEnd,
 		},
@@ -484,7 +486,7 @@ local function buildNameplate(parent, def, accent, offsetY)
 	stroke(titlePill, Theme.Colors.Navy or Theme.Colors.Ink, 2.5)
 
 	-- name pill: dark navy card, accent outline, big outlined name
-	local namePill = textPill(plate, "NamePill", def.Name or "Friend", "Title", NAME_PX, 18, NAME_PX + 18, 150, 2.5)
+	local namePill = textPill(plate, "NamePill", def.Name or "Friend", "Title", NAME_PX, 16, NAME_PX + 18, 150, 2.5, 10)
 	namePill.Position = UDim2.new(0.5, 0, 1, -(titleH - 4))
 	corner(namePill, 16)
 	stroke(namePill, accent, 3.5)

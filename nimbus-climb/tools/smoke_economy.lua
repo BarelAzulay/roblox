@@ -40,7 +40,7 @@ local planar, distance = K.planar, K.distance
 local Players = game:GetService("Players")
 local S = {}
 
-local CLOUD = "\226\152\129" -- cloud sign used on the nameplates
+local TOKENS_WORD = "Cloud Tokens" -- the nameplate info line spells the currency out (World text polish)
 local BULLET = "\226\128\162"
 local abs, floor, max, min = math.abs, math.floor, math.max, math.min
 
@@ -437,18 +437,18 @@ S.spots = guarded("spots", function()
 		T.eq(aSpot, info.Spots[aSpot.Index], "GetSpot returns the SpotInfo from LobbyInfo.Spots")
 		T.eq(profileOf(alice).SpotIndex, aSpot.Index, "the spot index is stored in the profile")
 		T.eq(aSpot.NameLabel.Text, alice.DisplayName, "the nameplate shows the owner's display name")
-		local pets, tokens = tostring(aSpot.SubLabel.Text):match("^(%d+) pets? " .. BULLET .. " ([%d,]+) " .. CLOUD .. "$")
-		T.check(pets == "0" and tokens ~= nil, "the sub label reads '<n> pets " .. BULLET .. " <tokens> " .. CLOUD .. "'", aSpot.SubLabel.Text)
+		local pets, tokens = tostring(aSpot.SubLabel.Text):match("^(%d+) pets? " .. BULLET .. " ([%d,]+) " .. TOKENS_WORD .. "$")
+		T.check(pets == "0" and tokens ~= nil, "the sub label reads '<n> pets " .. BULLET .. " <tokens> " .. TOKENS_WORD .. "'", aSpot.SubLabel.Text)
 		T.eq(tokens and tokens:gsub(",", ""), tostring(alice:GetAttribute("CloudTokens")), "...with the owner's token count")
 	end
 	local freeLabels = 0
 	for i = 1, count do
-		if info.Spots[i].NameLabel.Text == "Free spot" and info.Spots[i].SubLabel.Text == "Step in to claim" then
+		if info.Spots[i].NameLabel.Text == "Free home" and info.Spots[i].SubLabel.Text == "Step in to claim" then
 			freeLabels = freeLabels + 1
 		end
 	end
 	local _, owned = taken()
-	T.eq(freeLabels, count - owned, "every unowned spot reads 'Free spot' / 'Step in to claim' (" .. owned .. " of " .. count .. " are owned)")
+	T.eq(freeLabels, count - owned, "every unowned spot reads 'Free home' / 'Step in to claim' (" .. owned .. " of " .. count .. " are owned)")
 
 	-- new players take the lowest free spot, one each
 	local before = lowestFree()
@@ -468,7 +468,7 @@ S.spots = guarded("spots", function()
 	Mock.RemovePlayer(bob)
 	advance(1.0)
 	if bobIndex then
-		T.eq(info.Spots[bobIndex].NameLabel.Text, "Free spot", "leaving frees the spot: nameplate back to 'Free spot'")
+		T.eq(info.Spots[bobIndex].NameLabel.Text, "Free home", "leaving frees the spot: nameplate back to 'Free home'")
 		T.eq(subOf(bobIndex), "Step in to claim", "...and 'Step in to claim'")
 		T.check(info.Spots[bobIndex].Folder:FindFirstChild("ShowcasePet", true) == nil, "...and the podium is empty")
 		local reused = freshPlayers(1, "Reuse")[1]
@@ -674,7 +674,7 @@ S.spots = guarded("spots", function()
 	T.check(qs.Folder:FindFirstChild("ShowcasePet", true) == nil, "the podium empties when the owner has no pets")
 	Mock.RemovePlayer(Q)
 	advance(1.2)
-	T.eq(qs.NameLabel.Text, "Free spot", "the showcase owner leaving frees the nameplate too")
+	T.eq(qs.NameLabel.Text, "Free home", "the showcase owner leaving frees the nameplate too")
 	T.check(qs.Folder:FindFirstChild("ShowcasePet", true) == nil, "...and removes the showcase pet")
 	tutorialFlow()
 	flushErrors("spots")

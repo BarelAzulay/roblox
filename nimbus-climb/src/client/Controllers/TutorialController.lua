@@ -88,6 +88,11 @@ local K = {
 	SPIN = 1.5,
 	TRAIL_MAX = 90,
 	TRAIL_HIDE = 10,
+	-- floating guide sign (1080p design px, scaled by the screen factor)
+	SIGN_W = 340,
+	SIGN_H = 96,
+	SIGN_NAME = 24,
+	SIGN_INFO = 19,
 	SPARKLES = 10,
 	RESOLVE_RETRY = 2,
 	-- confetti (gui px at factor 1)
@@ -682,7 +687,10 @@ local function layout()
 
 	-- floating sign above the world arrow follows the readability rule too
 	if W.labelGui then
-		W.labelGui.Size = UDim2.fromOffset(math.floor(230 * k), math.floor(66 * k))
+		W.labelGui.Size = UDim2.fromOffset(math.floor(K.SIGN_W * k), math.floor(K.SIGN_H * k))
+		if W.signScale then
+			W.signScale.Scale = k
+		end
 	end
 end
 
@@ -1762,13 +1770,15 @@ local function buildWorldGuide()
 	}, trailEnd)
 	W.beam = beam
 
-	-- floating sign with the target's name and the distance
+	-- floating sign with the target's name and the distance (World text rule: pixel-sized, the name 24 px and the
+	-- distance 19 px at 1080p on a compact plate sized to its text; a UIScale follows the screen-height factor).
+	-- AlwaysOnTop with a long MaxDistance on purpose: it is the way-finder, seen from anywhere in the lobby.
 	local anchor = make("Part", "SignAnchor", { Size = Vector3.new(0.2, 0.2, 0.2), Transparency = 1 }, folder)
 	finishArrowPart(anchor)
 	W.labelAnchor = anchor
 	local k = Theme.ScreenFactor()
 	local signGui = make("BillboardGui", "GuideSign", {
-		Size = UDim2.fromOffset(math.floor(230 * k), math.floor(66 * k)),
+		Size = UDim2.fromOffset(math.floor(K.SIGN_W * k), math.floor(K.SIGN_H * k)),
 		AlwaysOnTop = true,
 		LightInfluence = 0,
 		MaxDistance = 4000,
@@ -1776,24 +1786,41 @@ local function buildWorldGuide()
 	}, anchor)
 	W.labelGui = signGui
 	local card = box("Card", {
-		BackgroundTransparency = 0.06,
+		BackgroundTransparency = 0.04,
 		BackgroundColor3 = C.Navy,
 		AnchorPoint = Vector2.new(0.5, 0.5),
 		Position = UDim2.fromScale(0.5, 0.5),
-		Size = UDim2.fromScale(1, 1),
+		Size = UDim2.fromOffset(150, 0),
+		AutomaticSize = Enum.AutomaticSize.XY,
 	}, signGui)
-	corner(card, 12)
-	stroke(card, C.Gold, 2, 0)
-	W.signName = label(card, "Name", "", "Heading", Theme.ScaledSize(20), C.Gold, {
-		Position = UDim2.fromScale(0.04, 0.06),
-		Size = UDim2.fromScale(0.92, 0.5),
+	corner(card, 14)
+	stroke(card, C.Gold, 3, 0)
+	make("UIPadding", "Pad", {
+		PaddingTop = UDim.new(0, 5),
+		PaddingBottom = UDim.new(0, 7),
+		PaddingLeft = UDim.new(0, 16),
+		PaddingRight = UDim.new(0, 16),
+	}, card)
+	make("UIListLayout", "List", {
+		FillDirection = Enum.FillDirection.Vertical,
+		HorizontalAlignment = Enum.HorizontalAlignment.Center,
+		SortOrder = Enum.SortOrder.LayoutOrder,
+		Padding = UDim.new(0, 1),
+	}, card)
+	W.signScale = make("UIScale", "ReadScale", { Scale = k }, card)
+	W.signName = label(card, "Name", "", "Heading", K.SIGN_NAME, C.Gold, {
+		AutomaticSize = Enum.AutomaticSize.XY,
+		Size = UDim2.fromOffset(0, K.SIGN_NAME + 4),
 		TextScaled = false,
-		TextTruncate = Enum.TextTruncate.AtEnd,
+		TextWrapped = false,
+		LayoutOrder = 1,
 	})
-	W.signDistance = label(card, "Distance", "", "Label", Theme.ScaledSize(17), C.White, {
-		Position = UDim2.fromScale(0.04, 0.54),
-		Size = UDim2.fromScale(0.92, 0.4),
-		TextTruncate = Enum.TextTruncate.AtEnd,
+	W.signDistance = label(card, "Distance", "", "Label", K.SIGN_INFO, C.White, {
+		AutomaticSize = Enum.AutomaticSize.XY,
+		Size = UDim2.fromOffset(0, K.SIGN_INFO + 4),
+		TextScaled = false,
+		TextWrapped = false,
+		LayoutOrder = 2,
 	})
 end
 

@@ -691,14 +691,14 @@ local function keyRow(parent, y, rowH, keyText, descText)
 	local chip = Instance.new("Frame")
 	chip.Name = "KeyChip"
 	chip.Size = UDim2.new(0.27, 0, rowH, 0)
-	chip.Position = UDim2.new(0.045, 0, y, 0)
+	chip.Position = UDim2.new(0.04, 0, y, 0)
 	chip.BackgroundColor3 = rgb(58, 66, 100)
 	chip.BorderSizePixel = 0
 	rounded(chip, 12)
 	outline(chip, C.TextGold, 2.5, 0.25)
 	chip.Parent = parent
 	signText(chip, keyText, "Heading", SIGN_INFO, C.TextGold, "Key", 0, 0, 1, 1)
-	signText(parent, descText, "Body", SIGN_INFO, C.Text, "Desc", 0.35, y, 0.62, rowH, Enum.TextXAlignment.Left)
+	signText(parent, descText, "Body", SIGN_INFO, C.Text, "Desc", 0.335, y, 0.64, rowH, Enum.TextXAlignment.Left)
 end
 
 ----------------------------------------------------------------------
@@ -2418,28 +2418,34 @@ end
 
 -- Board that explains the roulettes: price, and which rarities each one can give.
 local function buildRarityBoard(parent, cf)
-	-- 700 x 450 px canvas (14 x 9 studs): a 1.04-stud header, then one row per roulette: the name and the price
+	-- 700 x 450 px canvas (14 x 9 studs): a 1-stud header, then one row per roulette: the name and the price
 	-- (0.6 stud) over rarity pills that spell out what it can pay (0.6 stud)
 	local face = noticeBoard(parent, cf, 14, 9, "RarityBoard")
 	local gui = surfaceGui(face, Enum.NormalId.Front)
 	local panel = signPanel(gui)
-	signText(panel, "WINGED PETS", "Title", 52, C.Gold, "Header", 0.04, 0.018, 0.92, 0.125)
-	signText(panel, "Pricier roulette = rarer pets", "Body", SIGN_INFO, C.Text, "Sub", 0.04, 0.142, 0.92, 0.08)
 	local H = 450
+	signText(panel, "WINGED PETS", "Title", 50, C.Gold, "Header", 0.04, 6 / H, 0.92, 54 / H)
+	signText(panel, "Pricier roulette = rarer pets", "Body", SIGN_INFO, C.Text, "Sub", 0.04, 60 / H, 0.92, 34 / H)
 	for i, roulette in ipairs(Config.Roulettes) do
-		local top = 108 + (i - 1) * 80
+		local top = 102 + (i - 1) * 84
 		local y = top / H
 		local color = roulette.Color or C.Rose
 		signText(panel, roulette.DisplayName or roulette.Id, "Heading", SIGN_INFO, color:Lerp(C.Text, 0.35), "Name" .. i, 0.04, y, 0.6, 36 / H, Enum.TextXAlignment.Left)
 		signText(panel, priceText(roulette.Price or 0), "Body", SIGN_INFO, C.TextGold, "Price" .. i, 0.6, y, 0.36, 36 / H, Enum.TextXAlignment.Right)
 		local pills = plainFrame(panel, "Rarities" .. i, {
-			Position = UDim2.new(0.04, 0, (top + 40) / H, 0),
-			Size = UDim2.new(0.92, 0, 38 / H, 0),
+			Position = UDim2.new(0.04, 0, (top + 38) / H, 0),
+			Size = UDim2.new(0.92, 0, 36 / H, 0),
 		})
-		local layout = listLayout(pills, Enum.FillDirection.Horizontal, 8, Enum.HorizontalAlignment.Left)
+		local layout = listLayout(pills, Enum.FillDirection.Horizontal, 10, Enum.HorizontalAlignment.Left)
 		layout.VerticalAlignment = Enum.VerticalAlignment.Center
 		for k, rarity in ipairs(oddsRarities(roulette)) do
-			tagPill(pills, "Rarity_" .. rarity.Id, rarity.Id, "Body", SIGN_INFO, rarity.Color:Lerp(C.Navy, 0.18), k)
+			local pill = tagPill(pills, "Rarity_" .. rarity.Id, rarity.Id, "Body", SIGN_INFO, rarity.Color:Lerp(C.Navy, 0.18), k)
+			local pad = pill:FindFirstChildOfClass("UIPadding")
+			if pad then -- a slim pill: the row keeps a clear gap to the next roulette
+				pad.PaddingTop = UDim.new(0, 0)
+				pad.PaddingBottom = UDim.new(0, 0)
+			end
+			pill.Size = UDim2.fromOffset(0, 34)
 		end
 	end
 	gui.Parent = face
