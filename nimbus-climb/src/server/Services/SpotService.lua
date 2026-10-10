@@ -255,10 +255,12 @@ local function loadHeadshot(player, index)
 			headshotFailed[userId] = os.clock()
 			return
 		end
-		-- still the owner of that spot? (they may have left while the request ran)
-		local now = spotOf[player]
-		if now and owners[now] == player and player.Parent then
-			setAvatar(now, "Headshot", content)
+		-- wherever this user owns a home now: matched by UserId, so a player who left and rejoined while the
+		-- request ran (a new Player object) still gets it; a home freed meanwhile keeps its "+"
+		for index, owner in pairs(owners) do
+			if owner.UserId == userId and owner.Parent then
+				setAvatar(index, "Headshot", content)
+			end
 		end
 	end)
 end
