@@ -315,11 +315,13 @@ local function catalogElements(PC, Config)
 	if PC.Get(CONTRACT.v3.stormfang.petId) then
 		T.eq(elementOf(CONTRACT.v3.stormfang.petId), CONTRACT.v3.stormfang.element, "Stormfang is a " .. CONTRACT.v3.stormfang.element .. " pet")
 	end
-	local speciesRule = T.tally("species elements follow the doc (Phoenix -> Flame, Penguin -> Frost)")
+	-- (dark Secret pets may be Shadow instead: "dark Secrets -> Shadow")
+	local speciesRule = T.tally("species elements follow the doc (Phoenix -> Flame, Penguin -> Frost; dark Secrets may be Shadow)")
 	for _, def in ipairs(PC.Pets) do
-		if def.Look.Species == "Phoenix" and def.Rarity ~= CONTRACT.v3.secretRarity then
+		local darkSecret = def.Rarity == CONTRACT.v3.secretRarity and def.Element == "Shadow"
+		if def.Look.Species == "Phoenix" and not darkSecret then
 			speciesRule:case(def.Element == "Flame", def.Id .. ": Phoenix with Element " .. tostring(def.Element))
-		elseif def.Look.Species == "Penguin" then
+		elseif def.Look.Species == "Penguin" and not darkSecret then
 			speciesRule:case(def.Element == "Frost", def.Id .. ": Penguin with Element " .. tostring(def.Element))
 		end
 	end

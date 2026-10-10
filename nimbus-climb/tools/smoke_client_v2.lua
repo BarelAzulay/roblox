@@ -5,8 +5,11 @@
 --   client_menu        MenuController: 6 icon tiles (v3), Inventory / Pets / Shop (roulettes + items) / Stats windows,
 --                      the roulette spin + reveal, OpenPanel, Esc, one window at a time; v3 Pet Index window
 --                      (IndexController: group tiles, ??? silhouettes, CLAIM -> IndexClaim, Unlocked: x/N, Stormfang art)
+--                      and, once the catalog has elements, the element badges (Index cards + detail with Strong vs /
+--                      Weak vs, the Elements help card, the Pets panel, the roulette odds list)
 --   client_pets        PetController: followers of every player (High / Low detail), culling, snapping, clean-up;
---                      v3 NPC pets (NpcController idle + dialog through ProximityPromptService) and the sky dragon
+--                      v3 NPC pets (NpcController idle + dialog through ProximityPromptService), the sky dragon and,
+--                      once the Storm Altar is built, the client-side hover / pulse of the Stormfang showcase
 --   client_hotbar      HotbarController: 4 slots, keys 1-4, dimmed in the lobby, UseItem remote, cooldown
 --   client_tokens      TokenFx: the client-side coin spin + bob (rates, amplitude, culling, release of collected coins)
 --   client_layout_rule NO text from the HUD / toasts / countdown / party / results / menu / hotbar in the middle of
@@ -77,6 +80,63 @@ end
 
 local function countGui()
 	return #gui():GetDescendants()
+end
+
+-- v3 elements (ARCHITECTURE_V3.md section 11): a pet's element ids the way the game resolves them
+-- (PetCatalog.ElementsOf, then GetElements, then def.Element); {} while the catalog has no elements yet
+local function petElements(PetCatalog, def)
+	if type(def) ~= "table" then
+		return {}
+	end
+	local raw
+	if type(PetCatalog.ElementsOf) == "function" then
+		local ok, got = pcall(PetCatalog.ElementsOf, def)
+		raw = ok and got or nil
+	end
+	if raw == nil and type(PetCatalog.GetElements) == "function" then
+		local ok, got = pcall(PetCatalog.GetElements, def.Id)
+		raw = ok and got or nil
+	end
+	if raw == nil then
+		raw = def.Elements or def.Element
+	end
+	if type(raw) == "string" then
+		raw = { raw }
+	end
+	local out = {}
+	for _, e in ipairs(type(raw) == "table" and raw or {}) do
+		if type(e) == "string" then
+			out[#out + 1] = e
+		end
+	end
+	return out
+end
+
+-- the shown element badge of `element` under `root`: a label reading the element name on a pill coloured with
+-- Config.Elements.Info[element].Color (the label itself or one of its two closest GUI ancestors); nil when none.
+-- `skip(label)` -> true ignores a label (e.g. the badges on the grid cards when the detail view is checked).
+local function elementBadge(root, element, skip)
+	local Config = KC.env()
+	local info = Config.Elements and Config.Elements.Info and Config.Elements.Info[element]
+	local want = info and info.Color
+	if not root or not want then
+		return nil
+	end
+	local function close(c)
+		return typeof(c) == "Color3" and math.sqrt(((c.R - want.R) * 255) ^ 2 + ((c.G - want.G) * 255) ^ 2 + ((c.B - want.B) * 255) ^ 2) <= 80
+	end
+	for _, d in ipairs(texts(root, true)) do
+		if (tostring(d.Text):gsub("<[^>]*>", "")):lower():find(element:lower(), 1, true) and not (skip and skip(d)) then
+			local cur, depth = d, 0
+			while cur and cur:IsA("GuiObject") and depth <= 2 do
+				if cur.BackgroundTransparency < 0.5 and close(cur.BackgroundColor3) then
+					return d
+				end
+				cur, depth = cur.Parent, depth + 1
+			end
+		end
+	end
+	return nil
 end
 
 local function press(keyName, processed)
@@ -709,6 +769,95 @@ local function indexWindowChecks(PetCatalog)
 		end
 		T.check(bannerShown(), "Pet Index: once discovered, Stormfang's detail card shows the player's art (Config.Art.StormfangImage)")
 	end
+	-- v3 elements (ARCHITECTURE_V3.md section 11): coloured element pills on discovered cards (never on ??? cards), the
+	-- detail view with "Strong vs X / Weak vs Y", and the "Elements" help card with the whole chart
+	local mascotDef = PetCatalog.Get(CONTRACT.v2.mascotPetId)
+	local mascotElement = petElements(PetCatalog, mascotDef)[1]
+	if mascotElement then
+		feed({ Discovered = discovered, IndexClaimed = { Common = true } })
+		Index.Open("Mythic")
+		advance(1.5)
+		local tile = descendantNamed(window, "IndexPet_" .. mascotDef.Id)
+		T.check(tile ~= nil and elementBadge(tile, mascotElement) ~= nil, "Pet Index: a discovered pet's card shows its element badge (" .. mascotElement .. ", coloured from Config.Elements.Info)")
+		if hidden then
+			local hiddenElement = petElements(PetCatalog, hidden)[1]
+			local hiddenTile = descendantNamed(window, "IndexPet_" .. hidden.Id)
+			T.check(hiddenTile ~= nil and (hiddenElement == nil or findText(hiddenElement:lower(), hiddenTile) == nil), "Pet Index: an undiscovered card does not give away its element", hiddenElement)
+		end
+		local pick = tile and (tile:IsA("GuiButton") and tile or tile:FindFirstChildWhichIsA("TextButton", true) or tile:FindFirstChildWhichIsA("ImageButton", true))
+		if pick then
+			Mock.Click(pick)
+			advance(0.6)
+		end
+		-- what the chart says about the mascot's element (Config.Elements.Strong: attacker -> defenders)
+		local strongMap = Config.Elements.Strong or {}
+		local strong, weak = {}, {}
+		for _, e in ipairs(strongMap[mascotElement] or {}) do
+			strong[#strong + 1] = e
+		end
+		for attacker, list in pairs(strongMap) do
+			for _, e in ipairs(list) do
+				if e == mascotElement then
+					weak[#weak + 1] = attacker
+				end
+			end
+		end
+		local matchup = {}
+		for _, d in ipairs(texts(window, true)) do
+			local t = (tostring(d.Text):gsub("<[^>]*>", "")):lower()
+			if t:find("strong vs", 1, true) or t:find("weak vs", 1, true) then
+				matchup[#matchup + 1] = t
+			end
+		end
+		local joined = table.concat(matchup, "\n")
+		local matchupOk = #matchup > 0
+		for _, e in ipairs(strong) do
+			matchupOk = matchupOk and joined:find("strong vs[^\n/]*" .. e:lower()) ~= nil
+		end
+		for _, e in ipairs(weak) do
+			matchupOk = matchupOk and joined:find("weak vs[^\n/]*" .. e:lower()) ~= nil
+		end
+		local function onCard(d)
+			local cur = d
+			while cur and cur ~= window do
+				if cur.Name:find("^IndexPet_") then
+					return true
+				end
+				cur = cur.Parent
+			end
+			return false
+		end
+		T.check(matchupOk and elementBadge(window, mascotElement, onCard) ~= nil, "Pet Index: the detail view shows the element badge with 'Strong vs " .. table.concat(strong, ", ") .. " / Weak vs " .. table.concat(weak, ", ") .. "'", joined ~= "" and joined or allShownText():sub(1, 300))
+		-- the Elements help card: every element of the chart (opened by its button when it is not shown already)
+		local function missingElements()
+			local out = {}
+			for _, e in ipairs(Config.Elements.Order or {}) do
+				if not findText(e:lower(), window) then
+					out[#out + 1] = e
+				end
+			end
+			return out
+		end
+		local helpButton
+		for _, d in ipairs(window:GetDescendants()) do
+			if d:IsA("GuiButton") and isShown(d) and (d.Name == "Elements" or (d:IsA("TextButton") and (tostring(d.Text):gsub("<[^>]*>", "")):lower():find("^%s*elements%s*$") ~= nil)) then
+				helpButton = d
+				break
+			end
+		end
+		local toggled = false
+		if #missingElements() > 0 and helpButton then
+			Mock.Click(helpButton)
+			advance(0.6)
+			toggled = true
+		end
+		local missing = missingElements()
+		T.check(#missing == 0, "Pet Index: an 'Elements' help card shows the chart with all " .. #(Config.Elements.Order or {}) .. " elements", "missing: " .. table.concat(missing, ", "))
+		if toggled and isShown(helpButton) then
+			Mock.Click(helpButton)
+			advance(0.4)
+		end
+	end
 	-- Esc closes; OpenPanel("Index") opens it again
 	press("Escape")
 	advance(0.6)
@@ -840,6 +989,11 @@ S.client_menu = guarded("client_menu", function()
 				shown = shown and findText(line:lower(), inv) ~= nil
 			end
 			T.check(shown, "...and its perks (PetCatalog.PerkLabel)", table.concat(perkLines, " / "))
+			-- v3 (ARCHITECTURE_V3.md section 11): the Pets panel shows the selected pet's element badge
+			local element = petElements(PetCatalog, def)[1]
+			if element then
+				T.check(detail ~= nil and elementBadge(detail, element) ~= nil, "...and its element badge (" .. element .. ", coloured from Config.Elements.Info)", detail and allShownText():sub(1, 300) or "no Detail card")
+			end
 			local mark = #serverCalls("EquipPet")
 			local equip = descendantNamed(inv, "Equip")
 			if T.check(equip ~= nil and equip:IsA("TextButton") and isShown(equip), "an Equip button is shown for an unequipped pet") then
@@ -999,6 +1153,16 @@ S.client_menu = guarded("client_menu", function()
 				sum = sum + o.Chance * 100
 			end
 			T.check(missing == 0 and percentOk == #list, "...with every possible pet and its chance in percent (PetCatalog.GetOdds)", missing .. " pets missing, " .. percentOk .. " of " .. #list .. " chances right")
+			-- v3 (ARCHITECTURE_V3.md section 11): every pet of the odds list wears its element badge
+			if #list > 0 and petElements(PetCatalog, PetCatalog.Get(list[1].PetId))[1] then
+				local badges = T.tally("...and every pet of the odds list shows its element badge (Config.Elements.Info colour)")
+				for _, o in ipairs(list) do
+					local cell = popup and descendantNamed(popup, "Cell_" .. o.PetId)
+					local element = petElements(PetCatalog, PetCatalog.Get(o.PetId))[1]
+					badges:case(element ~= nil and elementBadge(cell, element) ~= nil, o.PetId .. ": " .. tostring(element) .. (cell and "" or " (no cell)"))
+				end
+				badges:report()
+			end
 			local totals = 0
 			for _, d in ipairs(popup and popup:GetDescendants() or {}) do
 				if d.Name == "Chance" and d:IsA("TextLabel") then
@@ -1476,6 +1640,75 @@ local function skyDragonChecks()
 	advance(0.5)
 end
 
+-- v3: the Stormfang showcase on the Storm Altar (ARCHITECTURE_V3.md section 10). The server builds it standing still;
+-- the client hovers / pulses it (ShowcaseController, NPC-controller style). The client world has no server, so the
+-- real LobbyBuilder + StormAltar build it here, standing in for replication. Checked once the altar is in the build.
+local function showcaseChecks()
+	local Config = env()
+	local PC = require(Mock.GetPath(ROOTS["shared"] .. "/PetCatalog"))
+	local services = Mock.GetPath(ROOTS["server"]):FindFirstChild("Services")
+	local altarModule = services and services:FindFirstChild("StormAltar")
+	local lobbyModule = services and services:FindFirstChild("LobbyBuilder")
+	if not altarModule or not lobbyModule or not PC.Get(CONTRACT.v3.stormfang.petId) then
+		T.info("*Storm Altar showcase: not in this build yet (needs server/Services/StormAltar and the stormfang pet)")
+		return
+	end
+	local okL, info = pcall(function()
+		return require(lobbyModule).Build()
+	end)
+	if not okL or type(info) ~= "table" then
+		T.warn("Storm Altar showcase: LobbyBuilder.Build could not run in the client world, the client animation is not checked", tostring(info))
+		return
+	end
+	local okA, err = pcall(function()
+		return require(altarModule).Build(info)
+	end)
+	local showcase = workspace:FindFirstChild("StormfangShowcase", true)
+	if not okA or not showcase then
+		T.warn("Storm Altar showcase: StormAltar.Build did not build a StormfangShowcase in the client world, the client animation is not checked", tostring(err))
+	else
+		-- stand next to the altar, looking at it
+		local at = showcase:GetPivot().Position
+		local look = typeof(info.AltarSite) == "CFrame" and info.AltarSite.LookVector or Vector3.new(0, 0, -1)
+		Mock.Teleport(LocalPlayer, at + look * 24 + Vector3.new(0, 3, 0))
+		local cam = workspace.CurrentCamera
+		cam.CFrame = CFrame.lookAt(at + look * 40 + Vector3.new(0, 12, 0), at)
+		advance(1)
+		local neon = {}
+		for _, d in ipairs(showcase:GetDescendants()) do
+			if d:IsA("BasePart") and d.Material == Enum.Material.Neon then
+				neon[#neon + 1] = { part = d, t = d.Transparency, c = d.Color }
+			end
+		end
+		local instances = Mock.CountDescendants(showcase)
+		local p0 = showcase:GetPivot()
+		local moved, pulsed = 0, false
+		for _ = 1, 20 do
+			advance(0.1)
+			local p = showcase:GetPivot()
+			moved = max(moved, (p.Position - p0.Position).Magnitude, (p.LookVector - p0.LookVector).Magnitude)
+			for _, n in ipairs(neon) do
+				local c = n.part.Color
+				if abs(n.part.Transparency - n.t) > 0.02 or abs(c.R - n.c.R) + abs(c.G - n.c.G) + abs(c.B - n.c.B) > 0.02 then
+					pulsed = true
+				end
+			end
+		end
+		T.check((moved > 0.02 or pulsed) and moved < 6, "Storm Altar: the client hovers / pulses the Stormfang showcase", "moved " .. fmt(moved, 3) .. ", neon pulse " .. tostring(pulsed))
+		T.eq(Mock.CountDescendants(showcase), instances, "Storm Altar: no instances are created while the showcase is animated")
+		cam.CFrame = CFrame.new()
+	end
+	-- clean up what stood in for replication
+	for _, name in ipairs({ "StormAltar", "NimbusLobby" }) do
+		local inst = workspace:FindFirstChild(name, true)
+		if inst then
+			inst:Destroy()
+		end
+	end
+	Mock.Teleport(LocalPlayer, Vector3.new(0, 20, 0))
+	advance(0.5)
+end
+
 S.client_pets = guarded("client_pets", function()
 	local Config = env()
 	local PC = require(Mock.GetPath(ROOTS["shared"] .. "/PetCatalog"))
@@ -1646,6 +1879,7 @@ S.client_pets = guarded("client_pets", function()
 	advance(0.5)
 	npcClientChecks()
 	skyDragonChecks()
+	showcaseChecks()
 	flushErrors("client_pets")
 	flushWarnings("client_pets")
 end)

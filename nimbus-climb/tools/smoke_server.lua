@@ -656,6 +656,31 @@ S.contract = guarded("contract", function()
 					T.fail(key .. "." .. name .. " exists", "nil")
 				end
 			end
+			-- 'pending': members another engineer adds this round; absent as a whole is fine, partly landed is not
+			local pending = spec.pending
+			if type(pending) == "table" then
+				local landed, absent = {}, {}
+				for _, kind in ipairs({ "functions", "signals", "fields" }) do
+					for _, name in ipairs(pending[kind] or {}) do
+						if m[name] ~= nil then
+							landed[#landed + 1] = name
+							local ok = (kind == "fields") or (kind == "functions" and isCallable(m[name])) or (kind == "signals" and type(m[name]) == "table" and isCallable(m[name].Connect) and isCallable(m[name].Fire))
+							if not ok then
+								problems = problems + 1
+								T.fail(key .. "." .. name .. " is a " .. kind:sub(1, -2) .. " (tools/contract.json pending group)", "got " .. type(m[name]))
+							end
+						else
+							absent[#absent + 1] = name
+						end
+					end
+				end
+				if #landed == 0 then
+					T.info("*" .. key .. ": " .. table.concat(absent, ", ") .. " not in this build yet (" .. tostring(pending._comment or "pending") .. ")")
+				elseif #absent > 0 then
+					problems = problems + 1
+					T.fail(key .. ": the whole pending group is defined", table.concat(landed, ", ") .. " defined but " .. table.concat(absent, ", ") .. " missing")
+				end
+			end
 		end
 	end
 	T.check(problems == 0, "all modules expose their ARCHITECTURE.md API", problems .. " member(s) missing")

@@ -19,7 +19,8 @@
 //   bad-require         require(script.Parent.Missing) / require(Shared.Missing).
 //   module-return       a ModuleScript that does not end with `return <value>`.
 //   too-many-locals     more than 200 active locals in one function (does not compile).
-//   contract            a public member listed in tools/contract.json is not defined.
+//   contract            a public member listed in tools/contract.json is not defined (a 'pending' group of members
+//                       that is being added this round may be absent entirely, but not partly).
 //   asset-id            an asset id / web URL outside Config.Art (rbxassetid://, rbxthumb://, http(s)://). The only
 //                       asset the game may reference is the player's own upload, Config.Art.StormfangImage
 //                       (tools/contract.json v3.artImage); built-in rbxasset:// content is fine.
@@ -718,6 +719,18 @@ function checkContract(file, ast) {
 		if (!defined.has(name)) {
 			const sev = dynamic ? "warning" : "error";
 			report(last, sev, "contract", "public member '" + name + "' (ARCHITECTURE.md / _V2 / _V3, tools/contract.json) is not defined" + (dynamic ? " (module fills its table dynamically; verify at runtime)" : ""));
+		}
+	}
+	// 'pending': members being added this round; nothing defined yet is fine, a partly defined group is not
+	const pending = entry.pending || {};
+	const pendingNames = [...(pending.functions || []), ...(pending.signals || []), ...(pending.fields || [])];
+	const landed = pendingNames.filter((name) => defined.has(name));
+	if (landed.length > 0) {
+		for (const name of pendingNames) {
+			if (!defined.has(name)) {
+				const sev = dynamic ? "warning" : "error";
+				report(last, sev, "contract", "public member '" + name + "' (tools/contract.json pending group) is not defined although " + landed.join(", ") + " of its group is");
+			}
 		}
 	}
 }
