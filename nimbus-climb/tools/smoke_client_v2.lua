@@ -123,7 +123,7 @@ local function elementBadge(root, element, skip)
 		return nil
 	end
 	local function close(c)
-		return typeof(c) == "Color3" and math.sqrt(((c.R - want.R) * 255) ^ 2 + ((c.G - want.G) * 255) ^ 2 + ((c.B - want.B) * 255) ^ 2) <= 80
+		return typeof(c) == "Color3" and math.sqrt(((c.R - want.R) * 255) ^ 2 + ((c.G - want.G) * 255) ^ 2 + ((c.B - want.B) * 255) ^ 2) <= 45
 	end
 	for _, d in ipairs(texts(root, true)) do
 		if (tostring(d.Text):gsub("<[^>]*>", "")):lower():find(element:lower(), 1, true) and not (skip and skip(d)) then
@@ -137,6 +137,21 @@ local function elementBadge(root, element, skip)
 		end
 	end
 	return nil
+end
+
+-- failure detail for elementBadge: what the labels reading the element name look like (or that there are none)
+local function describeBadge(root, element)
+	if not root then
+		return "no container"
+	end
+	local out = {}
+	for _, d in ipairs(texts(root, true)) do
+		if (tostring(d.Text):gsub("<[^>]*>", "")):lower():find(element:lower(), 1, true) and #out < 3 then
+			local c = d.BackgroundColor3
+			out[#out + 1] = string.format("'%s' background (%d, %d, %d) transparency %.2f", tostring(d.Text), floor(c.R * 255 + 0.5), floor(c.G * 255 + 0.5), floor(c.B * 255 + 0.5), d.BackgroundTransparency)
+		end
+	end
+	return #out > 0 and table.concat(out, "; ") or ("no shown label reads '" .. element .. "'")
 end
 
 local function press(keyName, processed)
@@ -778,7 +793,7 @@ local function indexWindowChecks(PetCatalog)
 		Index.Open("Mythic")
 		advance(1.5)
 		local tile = descendantNamed(window, "IndexPet_" .. mascotDef.Id)
-		T.check(tile ~= nil and elementBadge(tile, mascotElement) ~= nil, "Pet Index: a discovered pet's card shows its element badge (" .. mascotElement .. ", coloured from Config.Elements.Info)")
+		T.check(tile ~= nil and elementBadge(tile, mascotElement) ~= nil, "Pet Index: a discovered pet's card shows its element badge (" .. mascotElement .. ", coloured from Config.Elements.Info)", describeBadge(tile, mascotElement))
 		if hidden then
 			local hiddenElement = petElements(PetCatalog, hidden)[1]
 			local hiddenTile = descendantNamed(window, "IndexPet_" .. hidden.Id)
@@ -992,7 +1007,7 @@ S.client_menu = guarded("client_menu", function()
 			-- v3 (ARCHITECTURE_V3.md section 11): the Pets panel shows the selected pet's element badge
 			local element = petElements(PetCatalog, def)[1]
 			if element then
-				T.check(detail ~= nil and elementBadge(detail, element) ~= nil, "...and its element badge (" .. element .. ", coloured from Config.Elements.Info)", detail and allShownText():sub(1, 300) or "no Detail card")
+				T.check(detail ~= nil and elementBadge(detail, element) ~= nil, "...and its element badge (" .. element .. ", coloured from Config.Elements.Info)", describeBadge(detail, element))
 			end
 			local mark = #serverCalls("EquipPet")
 			local equip = descendantNamed(inv, "Equip")
@@ -1644,7 +1659,6 @@ end
 -- the client hovers / pulses it (ShowcaseController, NPC-controller style). The client world has no server, so the
 -- real LobbyBuilder + StormAltar build it here, standing in for replication. Checked once the altar is in the build.
 local function showcaseChecks()
-	local Config = env()
 	local PC = require(Mock.GetPath(ROOTS["shared"] .. "/PetCatalog"))
 	local services = Mock.GetPath(ROOTS["server"]):FindFirstChild("Services")
 	local altarModule = services and services:FindFirstChild("StormAltar")
@@ -1653,16 +1667,37 @@ local function showcaseChecks()
 		T.info("*Storm Altar showcase: not in this build yet (needs server/Services/StormAltar and the stormfang pet)")
 		return
 	end
+	-- what the stand-in builds add to the workspace (right away, before any controller runs) is removed afterwards
+	local existing, built = {}, {}
+	for _, c in ipairs(workspace:GetChildren()) do
+		existing[c] = true
+	end
+	local function noteBuilt()
+		for _, c in ipairs(workspace:GetChildren()) do
+			if not existing[c] and not c:IsA("Camera") and not c:IsA("Terrain") then
+				existing[c] = true
+				built[#built + 1] = c
+			end
+		end
+	end
+	local function cleanUp()
+		for _, c in ipairs(built) do
+			c:Destroy()
+		end
+	end
 	local okL, info = pcall(function()
 		return require(lobbyModule).Build()
 	end)
+	noteBuilt()
 	if not okL or type(info) ~= "table" then
+		cleanUp()
 		T.warn("Storm Altar showcase: LobbyBuilder.Build could not run in the client world, the client animation is not checked", tostring(info))
 		return
 	end
 	local okA, err = pcall(function()
 		return require(altarModule).Build(info)
 	end)
+	noteBuilt()
 	local showcase = workspace:FindFirstChild("StormfangShowcase", true)
 	if not okA or not showcase then
 		T.warn("Storm Altar showcase: StormAltar.Build did not build a StormfangShowcase in the client world, the client animation is not checked", tostring(err))
@@ -1699,12 +1734,7 @@ local function showcaseChecks()
 		cam.CFrame = CFrame.new()
 	end
 	-- clean up what stood in for replication
-	for _, name in ipairs({ "StormAltar", "NimbusLobby" }) do
-		local inst = workspace:FindFirstChild(name, true)
-		if inst then
-			inst:Destroy()
-		end
-	end
+	cleanUp()
 	Mock.Teleport(LocalPlayer, Vector3.new(0, 20, 0))
 	advance(0.5)
 end

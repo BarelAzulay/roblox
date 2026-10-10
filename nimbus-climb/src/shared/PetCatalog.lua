@@ -4,10 +4,11 @@
 --
 -- API (contract in ARCHITECTURE_V2.md section 2 and ARCHITECTURE_V3.md section 2):
 --   PetCatalog.Species                    array of species names PetBuilder understands
---   PetCatalog.Pets                       array of PetDef, sorted by rarity order, then Name
+--   PetCatalog.Pets                       array of PetDef, sorted by rarity order, then Name (a Signature pet
+--                                         leads its rarity)
 --   PetCatalog.ById                       map id -> PetDef
 --   PetCatalog.Get(id)                    -> PetDef|nil
---   PetCatalog.ListByRarity(rarityId)     -> { PetDef... } (sorted by Name)
+--   PetCatalog.ListByRarity(rarityId)     -> { PetDef... } (same order as Pets)
 --   PetCatalog.GetRarity(rarityId)        -> { Id, Order, Color }|nil          (from Config.Rarities)
 --   PetCatalog.RollPet(rouletteId, rng)   -> petId|nil   weighted rarity (Roulette.Odds), then uniform pet
 --   PetCatalog.GetOdds(rouletteId)        -> { { PetId, Rarity, Chance }... }  Chance sums to 1
@@ -20,6 +21,16 @@
 --   PetCatalog.GetStats(petId, level)     -> { Income, Power, Health, Speed } | nil
 --                                            base * Config.PetStats.RarityScale[rarity] * (1 + 0.1 * (level - 1))
 --   PetCatalog.TotalCount()               -> number of pets in the catalog (Secret pets included)
+--   v3 elements (ARCHITECTURE_V3.md section 11, chart in Config.Elements):
+--   PetCatalog.ElementsOf(def)            -> { element... }  a pet's Element, or a fused hybrid's Elements
+--                                            (deduplicated, only names from Config.Elements.Order; {} otherwise)
+--   PetCatalog.GetElements(petId)         -> { element... }  ElementsOf(Get(petId)); {} for unknown pets
+--   PetCatalog.ElementMultiplier(attackElement, defendElement) -> number
+--                                            StrongMultiplier (1.5) when the attacker beats the defender,
+--                                            WeakMultiplier (0.75) when the defender beats the attacker, else 1.
+--                                            Either side may also be a list (a dual-element hybrid): the attacker
+--                                            uses its best element, a dual defender combines both matchups
+--                                            (clamped to weak .. strong). Unknown / nil elements count as x1.
 -- Extras (nothing depends on them): PerkOrder, PerkNames, Accessories, WingStyles, Roles, RoleBlurbs,
 --   StatOrder, StatNames, SpecialKinds, GetRarityOdds, PerkLines, GetIndexGroup, IsRollable, Validate.
 --
@@ -32,6 +43,11 @@
 --             (Blast / Pounce / Beam / Storm / Freeze deal damage, Freeze also slows, Heal restores HP,
 --             Shield absorbs damage); Power is its base strength at rarity scale 1 (scale it like Stats);
 --             Color tints the effect.
+--   Element = one of Config.Elements.Order, chosen by species, look and theme (Phoenix / flame looks -> Flame,
+--             Penguin / icy -> Frost, Frog / Axolotl / watery -> Water, Bunny / Panda / leafy -> Nature,
+--             Bear / Dog / earthy -> Earth, Owl / electric / windy sky pets -> Storm, Unicorn / halo -> Celestial,
+--             dark Secrets -> Shadow). Every element has at least 3 pets across several rarities.
+--   Signature = true (optional): the player's own creature (Stormfang); it leads its rarity in every list.
 --
 -- Secret pets (Rarity "Secret") come only from a roulette that sets `AllowSecret = true` (the gems-only Secret
 -- roulette of phase 2). No current roulette does, so RollPet / GetOdds / PossiblePets never offer them.
@@ -46,11 +62,12 @@ local PetCatalog = {}
 PetCatalog.Species = {
 	"Cat", "Dog", "Fox", "Bunny", "Bear", "Panda", "Dragon",
 	"Owl", "Slime", "Unicorn", "Phoenix", "Frog", "Penguin", "Axolotl",
+	"Stormfang", -- the player's own armoured storm lynx (ARCHITECTURE_V3.md section 10)
 }
 
 -- Values PetBuilder supports for the optional / enumerated Look fields.
 PetCatalog.Accessories = { "Horns", "Crown", "Halo", "Leaf", "Mushroom", "Scarf", "Antlers", "Flower" }
-PetCatalog.WingStyles = { "Feather", "Bat", "Fairy", "Cloud", "Crystal", "Flame" }
+PetCatalog.WingStyles = { "Feather", "Bat", "Fairy", "Cloud", "Crystal", "Flame", "StormCloud" } -- StormCloud: Stormfang's ride
 
 -- Perk display order + player-facing names (keys match Config.Pets.PerkCaps).
 PetCatalog.PerkOrder = { "MaxHealth", "TokenBonus", "StaminaRegen", "CheckpointHeal" }
@@ -104,6 +121,7 @@ local RAW = {
 			Glow = false, WingStyle = "Feather", WingColor = C(226, 208, 182),
 		},
 		Perks = { TokenBonus = 0.03 },
+		Element = "Earth",
 		Role = "Economy",
 		Stats = Stats(10, 3, 28, 11),
 		Special = Special("fetch_dash", "Fetch Dash", "Pounce", 22, C(236, 196, 128)),
@@ -116,6 +134,7 @@ local RAW = {
 			Glow = false, WingStyle = "Fairy", WingColor = C(244, 200, 214),
 		},
 		Perks = { MaxHealth = 0.03 },
+		Element = "Celestial",
 		Role = "Combat",
 		Stats = Stats(2, 9, 52, 13),
 		Special = Special("marshmallow_pounce", "Marshmallow Pounce", "Pounce", 34, C(244, 186, 204)),
@@ -128,6 +147,7 @@ local RAW = {
 			Glow = false, Accessory = "Leaf", WingStyle = "Fairy", WingColor = C(170, 222, 190),
 		},
 		Perks = { StaminaRegen = 0.04 },
+		Element = "Water",
 		Role = "Combat",
 		Stats = Stats(2, 10, 50, 12),
 		Special = Special("puddle_splash", "Puddle Splash", "Blast", 30, C(120, 196, 232)),
@@ -140,6 +160,7 @@ local RAW = {
 			Glow = false, WingStyle = "Feather", WingColor = C(244, 220, 172),
 		},
 		Perks = { CheckpointHeal = 0.04 },
+		Element = "Nature",
 		Role = "Economy",
 		Stats = Stats(11, 2, 24, 13),
 		Special = Special("honey_hug", "Honey Hug", "Heal", 26, C(246, 196, 92)),
@@ -152,6 +173,7 @@ local RAW = {
 			Glow = false, Accessory = "Scarf", WingStyle = "Feather", WingColor = C(210, 170, 128),
 		},
 		Perks = { MaxHealth = 0.04 },
+		Element = "Earth",
 		Role = "Combat",
 		Stats = Stats(3, 8, 70, 7),
 		Special = Special("cosy_guard", "Cosy Guard", "Shield", 36, C(220, 156, 100)),
@@ -164,6 +186,7 @@ local RAW = {
 			Glow = false, WingStyle = "Feather", WingColor = C(92, 112, 152),
 		},
 		Perks = { TokenBonus = 0.02, StaminaRegen = 0.02 },
+		Element = "Frost",
 		Role = "Economy",
 		Stats = Stats(9, 3, 30, 9),
 		Special = Special("snowball_toss", "Snowball Toss", "Freeze", 16, C(186, 220, 250)),
@@ -178,6 +201,7 @@ local RAW = {
 			Glow = false, Accessory = "Leaf", WingStyle = "Feather", WingColor = C(234, 160, 90),
 		},
 		Perks = { TokenBonus = 0.06 },
+		Element = "Flame",
 		Role = "Combat",
 		Stats = Stats(2, 11, 50, 14),
 		Special = Special("leaf_pounce", "Leaf Pounce", "Pounce", 38, C(232, 134, 60)),
@@ -190,6 +214,7 @@ local RAW = {
 			Glow = false, Accessory = "Leaf", WingStyle = "Feather", WingColor = C(206, 224, 204),
 		},
 		Perks = { MaxHealth = 0.06 },
+		Element = "Nature",
 		Role = "Combat",
 		Stats = Stats(3, 9, 68, 7),
 		Special = Special("bamboo_bash", "Bamboo Bash", "Blast", 32, C(140, 200, 110)),
@@ -202,6 +227,7 @@ local RAW = {
 			Glow = false, Accessory = "Flower", WingStyle = "Fairy", WingColor = C(248, 200, 222),
 		},
 		Perks = { CheckpointHeal = 0.08 },
+		Element = "Water",
 		Role = "Economy",
 		Stats = Stats(11, 2, 32, 7),
 		Special = Special("sticky_bounce", "Sticky Bounce", "Shield", 30, C(246, 170, 200)),
@@ -214,6 +240,7 @@ local RAW = {
 			Glow = false, WingStyle = "Feather", WingColor = C(176, 144, 112),
 		},
 		Perks = { StaminaRegen = 0.08 },
+		Element = "Storm",
 		Role = "Economy",
 		Stats = Stats(10, 3, 26, 11),
 		Special = Special("drowsy_lullaby", "Drowsy Lullaby", "Freeze", 18, C(190, 170, 230)),
@@ -226,6 +253,7 @@ local RAW = {
 			Glow = false, Accessory = "Flower", WingStyle = "Feather", WingColor = C(242, 204, 138),
 		},
 		Perks = { TokenBonus = 0.04, MaxHealth = 0.03 },
+		Element = "Earth",
 		Role = "Economy",
 		Stats = Stats(12, 3, 28, 10),
 		Special = Special("sunny_bark", "Sunny Bark", "Heal", 24, C(250, 212, 96)),
@@ -238,6 +266,7 @@ local RAW = {
 			Glow = false, WingStyle = "Fairy", WingColor = C(170, 218, 232),
 		},
 		Perks = { StaminaRegen = 0.05, CheckpointHeal = 0.05 },
+		Element = "Water",
 		Role = "Combat",
 		Stats = Stats(3, 8, 56, 9),
 		Special = Special("bubble_barrier", "Bubble Barrier", "Shield", 34, C(150, 220, 240)),
@@ -252,6 +281,7 @@ local RAW = {
 			Glow = false, Accessory = "Flower", WingStyle = "Fairy", WingColor = C(240, 186, 220),
 		},
 		Perks = { TokenBonus = 0.08, CheckpointHeal = 0.06 },
+		Element = "Nature",
 		Role = "Economy",
 		Stats = Stats(12, 3, 26, 13),
 		Special = Special("petal_breeze", "Petal Breeze", "Heal", 28, C(244, 170, 210)),
@@ -264,6 +294,7 @@ local RAW = {
 			Glow = false, Accessory = "Mushroom", WingStyle = "Fairy", WingColor = C(226, 148, 148),
 		},
 		Perks = { CheckpointHeal = 0.12, MaxHealth = 0.04 },
+		Element = "Nature",
 		Role = "Economy",
 		Stats = Stats(11, 3, 30, 11),
 		Special = Special("spore_cloud", "Spore Cloud", "Storm", 18, C(176, 214, 132)),
@@ -276,6 +307,7 @@ local RAW = {
 			Glow = false, Accessory = "Scarf", WingStyle = "Crystal", WingColor = C(166, 216, 242),
 		},
 		Perks = { MaxHealth = 0.08, StaminaRegen = 0.08 },
+		Element = "Frost",
 		Role = "Combat",
 		Stats = Stats(2, 10, 62, 9),
 		Special = Special("snow_burst", "Snow Burst", "Freeze", 22, C(170, 224, 250)),
@@ -288,6 +320,7 @@ local RAW = {
 			Glow = false, WingStyle = "Bat", WingColor = C(80, 88, 122),
 		},
 		Perks = { StaminaRegen = 0.12, TokenBonus = 0.05 },
+		Element = "Storm",
 		Role = "Combat",
 		Stats = Stats(3, 12, 50, 13),
 		Special = Special("static_storm", "Static Storm", "Storm", 24, C(150, 170, 255)),
@@ -300,6 +333,7 @@ local RAW = {
 			Glow = false, Accessory = "Flower", WingStyle = "Feather", WingColor = C(244, 192, 204),
 		},
 		Perks = { MaxHealth = 0.09, TokenBonus = 0.07 },
+		Element = "Nature",
 		Role = "Economy",
 		Stats = Stats(10, 4, 34, 8),
 		Special = Special("blossom_rain", "Blossom Rain", "Heal", 30, C(246, 182, 200)),
@@ -314,6 +348,7 @@ local RAW = {
 			Glow = true, Accessory = "Antlers", WingStyle = "Crystal", WingColor = C(148, 212, 226),
 		},
 		Perks = { TokenBonus = 0.14, StaminaRegen = 0.08 },
+		Element = "Frost",
 		Role = "Combat",
 		Stats = Stats(3, 11, 56, 14),
 		Special = Special("aurora_beam", "Aurora Beam", "Beam", 42, C(130, 230, 210)),
@@ -326,6 +361,7 @@ local RAW = {
 			Glow = true, Accessory = "Halo", WingStyle = "Feather", WingColor = C(112, 126, 196),
 		},
 		Perks = { MaxHealth = 0.10, CheckpointHeal = 0.15 },
+		Element = "Celestial",
 		Role = "Combat",
 		Stats = Stats(2, 10, 64, 11),
 		Special = Special("moonlight_ward", "Moonlight Ward", "Shield", 40, C(222, 214, 255)),
@@ -338,6 +374,7 @@ local RAW = {
 			Glow = true, WingStyle = "Cloud", WingColor = C(150, 128, 224),
 		},
 		Perks = { StaminaRegen = 0.14, CheckpointHeal = 0.12 },
+		Element = "Water",
 		Role = "Economy",
 		Stats = Stats(12, 3, 30, 9),
 		Special = Special("stardust_swirl", "Stardust Swirl", "Storm", 20, C(176, 146, 244)),
@@ -350,6 +387,7 @@ local RAW = {
 			Glow = false, Accessory = "Flower", WingStyle = "Feather", WingColor = C(246, 222, 236),
 		},
 		Perks = { TokenBonus = 0.12, MaxHealth = 0.08 },
+		Element = "Celestial",
 		Role = "Economy",
 		Stats = Stats(12, 4, 30, 11),
 		Special = Special("sugar_rush", "Sugar Rush", "Heal", 30, C(246, 170, 214)),
@@ -364,6 +402,7 @@ local RAW = {
 			Glow = true, WingStyle = "Flame", WingColor = C(244, 138, 54),
 		},
 		Perks = { CheckpointHeal = 0.22, MaxHealth = 0.10 },
+		Element = "Flame",
 		Role = "Combat",
 		Stats = Stats(3, 12, 60, 13),
 		Special = Special("phoenix_flare", "Phoenix Flare", "Blast", 44, C(255, 140, 60)),
@@ -376,6 +415,7 @@ local RAW = {
 			Glow = true, Accessory = "Crown", WingStyle = "Feather", WingColor = C(246, 210, 118),
 		},
 		Perks = { MaxHealth = 0.14, TokenBonus = 0.16 },
+		Element = "Earth",
 		Role = "Economy",
 		Stats = Stats(12, 4, 36, 7),
 		Special = Special("golden_aegis", "Golden Aegis", "Shield", 38, C(255, 210, 110)),
@@ -388,6 +428,7 @@ local RAW = {
 			Glow = true, Accessory = "Horns", WingStyle = "Bat", WingColor = C(126, 98, 196),
 		},
 		Perks = { TokenBonus = 0.20, StaminaRegen = 0.14 },
+		Element = "Shadow",
 		Role = "Combat",
 		Stats = Stats(3, 12, 62, 11),
 		Special = Special("dusk_storm", "Dusk Storm", "Storm", 28, C(176, 124, 236)),
@@ -402,6 +443,7 @@ local RAW = {
 			Glow = false, Accessory = "Horns", WingStyle = "Cloud", WingColor = C(200, 225, 255),
 		},
 		Perks = { MaxHealth = 0.12, TokenBonus = 0.25 },
+		Element = "Storm",
 		Role = "Combat",
 		Stats = Stats(3, 12, 70, 11),
 		Special = Special("cloud_breath", "Cloud Breath", "Beam", 50, C(196, 228, 255)),
@@ -414,14 +456,31 @@ local RAW = {
 			Glow = true, Accessory = "Halo", WingStyle = "Crystal", WingColor = C(190, 200, 250),
 		},
 		Perks = { CheckpointHeal = 0.25, StaminaRegen = 0.18 },
+		Element = "Celestial",
 		Role = "Economy",
 		Stats = Stats(12, 4, 36, 12),
 		Special = Special("wishing_star", "Wishing Star", "Heal", 40, C(214, 204, 255)),
 	},
 
-	------------------------------------------------------------ Secret (3): 1 Economy, 2 Combat
+	------------------------------------------------------------ Secret (4): 1 Economy, 3 Combat
 	-- Gems-only Secret roulette (phase 2). Dark bodies with an iridescent second colour and glowing eyes;
 	-- every perk is above the best Mythic value for the same perk.
+	-- Stormfang is the player's own creature (ARCHITECTURE_V3.md section 10, branding/stormfang-*.png): its own
+	-- species riding its own storm cloud, the top of the Secret tier, listed first among the Secrets.
+	{
+		Id = "stormfang", Name = "Stormfang", Rarity = "Secret", Signature = true,
+		Blurb = "A storm lynx in thunder-forged armour. It pounces in a flash of blue lightning, long before the thunder.",
+		Look = {
+			-- charcoal armour, electric-blue neon, glowing blue eyes, a dark navy storm cloud to ride
+			Species = "Stormfang", Primary = C(42, 44, 51), Secondary = C(47, 180, 255), Eye = C(47, 180, 255),
+			Glow = true, WingStyle = "StormCloud", WingColor = C(46, 58, 102),
+		},
+		Perks = { MaxHealth = 0.20, StaminaRegen = 0.30 },
+		Element = "Storm",
+		Role = "Combat",
+		Stats = Stats(3, 13, 74, 15),
+		Special = Special("storm_pounce", "Storm Pounce", "Pounce", 56, C(47, 180, 255)),
+	},
 	{
 		Id = "eclipse_dragon", Name = "Eclipse Dragon", Rarity = "Secret",
 		Blurb = "Born when the sun hid behind the moon. Its scales shift from violet to teal to gold.",
@@ -430,6 +489,7 @@ local RAW = {
 			Glow = true, Accessory = "Horns", WingStyle = "Bat", WingColor = C(110, 72, 196),
 		},
 		Perks = { MaxHealth = 0.16, CheckpointHeal = 0.30 },
+		Element = "Shadow",
 		Role = "Combat",
 		Stats = Stats(3, 12, 72, 12),
 		Special = Special("eclipse_nova", "Eclipse Nova", "Blast", 52, C(156, 96, 255)),
@@ -442,6 +502,7 @@ local RAW = {
 			Glow = true, Accessory = "Crown", WingStyle = "Flame", WingColor = C(176, 72, 230),
 		},
 		Perks = { StaminaRegen = 0.20, CheckpointHeal = 0.28 },
+		Element = "Flame",
 		Role = "Combat",
 		Stats = Stats(2, 12, 66, 14),
 		Special = Special("shadowflame_storm", "Shadowflame Storm", "Storm", 34, C(222, 86, 255)),
@@ -454,6 +515,7 @@ local RAW = {
 			Glow = true, Accessory = "Halo", WingStyle = "Fairy", WingColor = C(150, 132, 240),
 		},
 		Perks = { TokenBonus = 0.30, MaxHealth = 0.15 },
+		Element = "Shadow",
 		Role = "Economy",
 		Stats = Stats(12, 4, 36, 13),
 		Special = Special("foxfire_ward", "Foxfire Ward", "Shield", 44, C(124, 252, 228)),
@@ -489,15 +551,20 @@ for _, def in ipairs(RAW) do
 	table.insert(PetCatalog.Pets, def)
 	PetCatalog.ById[def.Id] = def
 end
+-- rarity order, then the player's own creature (Signature) first, then Name
 table.sort(PetCatalog.Pets, function(a, b)
 	local oa, ob = rarityOrder(a.Rarity), rarityOrder(b.Rarity)
 	if oa ~= ob then
 		return oa < ob
 	end
+	local sa, sb = a.Signature == true, b.Signature == true
+	if sa ~= sb then
+		return sa
+	end
 	return a.Name < b.Name
 end)
 
--- rarityId -> { PetDef... } (already sorted by Name because Pets is)
+-- rarityId -> { PetDef... } (already in display order because Pets is)
 local byRarity = {}
 for _, r in ipairs(rarityList) do
 	byRarity[r.Id] = {}
@@ -838,6 +905,117 @@ function PetCatalog.GetIndexGroup(groupId)
 end
 
 ----------------------------------------------------------------------
+-- v3: elements (ARCHITECTURE_V3.md section 11; the chart lives in Config.Elements)
+----------------------------------------------------------------------
+
+local function elementConfig()
+	local E = Config.Elements
+	if type(E) == "table" then
+		return E
+	end
+	return {}
+end
+
+-- element name -> true for every name in Config.Elements.Order
+local validElements = {}
+for _, e in ipairs(elementConfig().Order or {}) do
+	if type(e) == "string" then
+		validElements[e] = true
+	end
+end
+
+-- A pet definition's elements: `Elements` (a fused hybrid, phase 2) or its single `Element`. Deduplicated, in
+-- the given order, unknown names dropped. Always a fresh table.
+function PetCatalog.ElementsOf(def)
+	local out = {}
+	if type(def) ~= "table" then
+		return out
+	end
+	local raw = def.Elements
+	if type(raw) ~= "table" then
+		raw = { def.Element }
+	end
+	local seen = {}
+	for _, e in ipairs(raw) do
+		if type(e) == "string" and validElements[e] and not seen[e] then
+			seen[e] = true
+			table.insert(out, e)
+		end
+	end
+	return out
+end
+
+-- The elements of a catalog pet ({} for unknown ids).
+function PetCatalog.GetElements(petId)
+	return PetCatalog.ElementsOf(PetCatalog.Get(petId))
+end
+
+local function beats(attack, defend)
+	local strong = elementConfig().Strong
+	local list = type(strong) == "table" and strong[attack]
+	if type(list) ~= "table" then
+		return false
+	end
+	for _, e in ipairs(list) do
+		if e == defend then
+			return true
+		end
+	end
+	return false
+end
+
+local function multipliers()
+	local E = elementConfig()
+	local strong = tonumber(E.StrongMultiplier) or 1.5
+	local weak = tonumber(E.WeakMultiplier) or 0.75
+	return strong, weak
+end
+
+-- one element against one element
+local function singleMultiplier(attack, defend)
+	if not validElements[attack] or not validElements[defend] then
+		return 1
+	end
+	local strong, weak = multipliers()
+	if beats(attack, defend) then
+		return strong -- checked first, so the Celestial <-> Shadow rivals both hit hard
+	elseif beats(defend, attack) then
+		return weak
+	end
+	return 1
+end
+
+local function elementList(v)
+	if type(v) == "table" then
+		return v
+	end
+	return { v }
+end
+
+-- Damage multiplier of an attack element against a defending element (see the API notes at the top).
+function PetCatalog.ElementMultiplier(attackElement, defendElement)
+	local attackers = elementList(attackElement)
+	local defenders = elementList(defendElement)
+	local strong, weak = multipliers()
+	local best = nil
+	for _, a in ipairs(attackers) do
+		local m = 1
+		for _, d in ipairs(defenders) do
+			m = m * singleMultiplier(a, d)
+		end
+		if m > strong then
+			m = strong
+		elseif m < weak then
+			m = weak
+		end
+		if best == nil or m > best then
+			best = m
+		end
+	end
+	return best or 1
+end
+
+----------------------------------------------------------------------
 -- Self-check (extra): returns ok, { problem strings }. Run once at load and warns in the output.
 ----------------------------------------------------------------------
 function PetCatalog.Validate()
@@ -864,6 +1042,7 @@ function PetCatalog.Validate()
 	end
 
 	local seenIds, seenNames, seenSpecials = {}, {}, {}
+	local elementPets, elementRarities = {}, {}
 	for _, def in ipairs(PetCatalog.Pets) do
 		local id = tostring(def.Id)
 		if seenIds[id] then
@@ -912,6 +1091,13 @@ function PetCatalog.Validate()
 		if not roleSet[def.Role] then
 			bad(id .. ": unknown role " .. tostring(def.Role))
 		end
+		if type(def.Element) ~= "string" or not validElements[def.Element] then
+			bad(id .. ": Element " .. tostring(def.Element) .. " is not in Config.Elements.Order")
+		else
+			elementPets[def.Element] = (elementPets[def.Element] or 0) + 1
+			elementRarities[def.Element] = elementRarities[def.Element] or {}
+			elementRarities[def.Element][tostring(def.Rarity)] = true
+		end
 		local stats = def.Stats
 		if type(stats) ~= "table" then
 			bad(id .. ": missing Stats")
@@ -952,6 +1138,22 @@ function PetCatalog.Validate()
 			end
 			if typeof(special.Color) ~= "Color3" then
 				bad(id .. ": Special.Color must be a Color3")
+			end
+		end
+	end
+
+	-- Every element needs at least 3 pets spread over several rarities (battle teams can build around any of them).
+	local order = elementConfig().Order
+	if type(order) ~= "table" or #order == 0 then
+		bad("Config.Elements.Order is missing")
+	else
+		for _, e in ipairs(order) do
+			local nRarities = 0
+			for _ in pairs(elementRarities[e] or {}) do
+				nRarities = nRarities + 1
+			end
+			if (elementPets[e] or 0) < 3 or nRarities < 2 then
+				bad("element " .. tostring(e) .. " has " .. (elementPets[e] or 0) .. " pet(s) in " .. nRarities .. " rarities (needs 3+ in 2+)")
 			end
 		end
 	end
