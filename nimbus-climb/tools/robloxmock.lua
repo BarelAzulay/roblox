@@ -5760,9 +5760,11 @@ service("Lighting", {
 		end,
 	},
 })
-for _, n in ipairs({ "ReplicatedStorage", "ReplicatedFirst", "ServerScriptService", "ServerStorage", "StarterPack", "Teams", "Chat", "SoundService", "TextChatService", "StarterPlayerScripts", "StarterCharacterScripts" }) do
+for _, n in ipairs({ "ReplicatedStorage", "ReplicatedFirst", "ServerScriptService", "ServerStorage", "StarterPack", "Teams", "Chat", "SoundService", "StarterPlayerScripts", "StarterCharacterScripts" }) do
 	service(n, {})
 end
+-- TextChatService: the default chat of new places (no TextChatCommand class here: commands that need one are skipped)
+service("TextChatService", { props = { ChatVersion = T.enum("ChatVersion", "TextChatService"), CreateDefaultCommands = T.bool(true), CreateDefaultTextChannels = T.bool(true) } })
 service("StarterPlayer", { props = { CharacterWalkSpeed = T.num(16), CharacterJumpPower = T.num(50), CharacterJumpHeight = T.num(7.2), CharacterUseJumpPower = T.bool(false), CharacterMaxHealth = T.num(100), CameraMaxZoomDistance = T.num(128), CameraMinZoomDistance = T.num(0.5), AutoJumpEnabled = T.bool(true) } })
 service("StarterGui", {
 	props = { ScreenOrientation = T.any(nil), ShowDevelopmentGui = T.bool(true), ResetPlayerGuiOnSpawn = T.bool(true) },
