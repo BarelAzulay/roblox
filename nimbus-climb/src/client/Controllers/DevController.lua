@@ -85,7 +85,8 @@ local K = {
 	OPEN_GUARD = 0.4, -- seconds after opening during which the panel's buttons ignore taps
 	SEND_GAP = 0.35, -- seconds between two commands sent from this panel
 	-- design px kept free at the top of the side-toast column: its two newest toasts (the answer to a DEV button
-	-- of up to 3 lines and one more of up to 4; NotifyController.lua: 18 px text, 8 px padding, 8 px gap)
+	-- of up to 3 lines and one more of up to 4). KEEP IN SYNC with NotifyController.lua's toast: 18 px text,
+	-- 8 px padding above and below, TOAST_GAP 8
 	TOAST_ROOM = 200,
 	BACK_ACTION = "NimbusDevBack",
 }

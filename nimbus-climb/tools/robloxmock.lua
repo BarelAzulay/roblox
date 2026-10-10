@@ -1651,7 +1651,7 @@ for name in ("KeyCode UserInputType Font FontWeight FontStyle ContextActionPrior
 	.. "ChatVersion TextChatMessageStatus VRDeviceType AdornCullingMode HandlesStyle SelectionMode InputType "
 	.. "GamepadType UITheme CenterDialogType CustomCameraMode LeftRight PlayerChatType RenderPriority "
 	.. "SoundType CompletionState AssetType PrivilegeType MaterialPattern WaterDirection WrapLayer TerrainFace "
-	.. "AvatarContextMenuOption AvatarJointUpgrade BreakpointRemoveReason ConnectionError NormalId"):gmatch("%S+") do
+	.. "AvatarContextMenuOption AvatarJointUpgrade BreakpointRemoveReason ConnectionError NormalId CreatorType"):gmatch("%S+") do
 	OPEN_ENUMS[name] = true
 end
 

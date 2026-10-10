@@ -424,7 +424,7 @@ local function finish(player, track, skipped)
 		track.Step = #steps + 1 -- one past the end: later phases can append steps and resume from here
 	end
 	local stored = persist(player, track)
-	if not skipped and stored then
+	if not skipped and stored and not track.Replay then
 		local amount = finishTokens()
 		if amount > 0 and addTokens(player, amount) then
 			track.Reward = amount
@@ -567,6 +567,22 @@ local function loadPlayer(player)
 end
 
 -- The stored profile changed under us (recovered load / another server): merge forward, never back.
+-- Drops the running tutorial and reads it again from the profile (used by the developer tools after they rewind
+-- the stored tutorial). opts.Replay = true marks a replay of a tutorial that was already finished once: its finish
+-- reward is not paid again. Returns true when the player's tutorial is running again.
+local function reloadPlayer(player, opts)
+	if not isLivePlayer(player) then
+		return false
+	end
+	tracks[player] = nil
+	local ok = loadPlayer(player)
+	local track = tracks[player]
+	if track and type(opts) == "table" and opts.Replay == true then
+		track.Replay = true
+	end
+	return ok == true
+end
+
 local function onProfileRebased(player)
 	local track = tracks[player]
 	if not track then
@@ -718,6 +734,10 @@ end
 ----------------------------------------------------------------------
 -- Public API
 ----------------------------------------------------------------------
+
+function TutorialService.Reload(player, opts)
+	return reloadPlayer(player, opts)
+end
 
 function TutorialService.GetState(player)
 	local track = player and tracks[player]
