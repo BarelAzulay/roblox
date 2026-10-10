@@ -91,6 +91,13 @@ fine details (claws, beaks, nostrils, inner ears, feather/fur tufts). Cute and a
 * **Readability rule:** at a 1920x1080 screen, body text >= 18 px, small captions >= 15 px, buttons >= 20 px, titles
   28–44 px; everything scales with screen height (factor clamp(viewportY / 1080, 0.8, 1.25)) and phones never go
   below 14 px. Every text has a stroke or sits on a solid panel so it reads on any background.
+* **World text rule (added after the player's playtest: "letters too small, when you zoom a little you can barely
+  read it"):** text in the 3D world must stay readable from normal camera distances. Name/info tags above things
+  (BillboardGui) are sized in PIXELS (offset UDim2, never studs-scale for text), so they keep a constant on-screen size:
+  names >= 22 px and info lines >= 18 px at 1080p, with a dark stroke, a compact solid backing plate sized to the text
+  (no huge empty panels), sensible MaxDistance (~60-120 studs) and LightInfluence 0. Big signs on surfaces (SurfaceGui)
+  use PixelsPerStud ~40-60 and letters at least ~1 stud tall for titles and ~0.6 stud for info lines, so they read
+  from ~30 studs. Never a fixed small TextSize inside a studs-sized billboard. Every new sign follows this.
 * **Terrain** (`workspace.Terrain`, smooth terrain) may be used for organic shapes (cloud islands, ground). Use
   `Terrain:SetMaterialColor` to tint materials. Terrain is static: build it once at boot.
 
