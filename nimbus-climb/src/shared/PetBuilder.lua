@@ -1380,7 +1380,6 @@ local STORM_MASKS = {
 		". . R . .",
 		". B G B .",
 		"B G C G B",
-		"B G C G B",
 		". B G B .",
 		". . R . .",
 	},
@@ -1451,9 +1450,10 @@ end
 
 -- A ridge spike: a plate blade in three chunky steps from its root `a` back to its point `b` (root size {w, h}).
 local function stormSpike(g, a, b, w, h)
+	w = w or 2
 	local len = max(abs(b[2] - a[2]), abs(b[3] - a[3]))
 	local step = len / 3 + 0.6
-	stair(g, "Plate", a, b, { w or 2, max(h or 2, step), step }, { 1, max(1.2, step * 0.7), step }, 3)
+	stair(g, "Plate", a, b, { w, max(h or 2, step), step }, { max(1, floor(w / 2)), max(1.2, step * 0.7), step }, 3)
 end
 
 local function rbox(g, key, c, size, round)
@@ -1481,7 +1481,7 @@ SPECIES.Stormfang = function(ctx)
 	pair(function(s)
 		-- the white mask: big brows sweeping up and out to the ear roots, the cheeks under the eyes flaring into
 		-- a jagged ruff
-		stair(g, "Mask", { s * 3.4, 10, -5.8 }, { s * 7, 12.2, -3.6 }, { 3.6, 2.4, 2.6 }, { 2.2, 1.8, 2.2 }, 2)
+		stair(g, "Mask", { s * 3.4, 10, -5.8 }, { s * 7.2, 12.4, -3.2 }, { 3.4, 2, 2.4 }, { 2, 1.6, 2 }, 2)
 		box(g, "Mask", { s * 5.6, 3.6, -5.6 }, { 4.2, 3.4, 3.4 })
 		stair(g, "Mask", { s * 7, 5.6, -3 }, { s * 11.4, 7, -0.6 }, { 2.8, 3, 4.4 }, { 1.6, 1.2, 1.4 }, 2)
 		if H then
@@ -1524,11 +1524,8 @@ SPECIES.Stormfang = function(ctx)
 		box(g, "Plate", { 0, -4.6, -4.6 }, { 5, 3.6, 1.6 })
 	end
 	pair(function(s)
-		-- haunches and hind feet
+		-- haunches
 		box(g, "Fur", { s * 3.8, -8, 3.8 }, { 4.4, 5, 6 })
-		if H then
-			box(g, "Plate", { s * 4.2, -10.4, 0.6 }, { 3.4, 1.6, 4 })
-		end
 		-- front legs: a dark under-suit with two armour rings
 		box(g, "Base", { s * 4, -6, -4.2 }, { 3.4, 6, 3.4 })
 		if H then
@@ -1558,10 +1555,15 @@ SPECIES.Stormfang = function(ctx)
 		end
 	end)
 
+	-- the spine ridge between the shoulder blades
+	if H then
+		stormSpike(g, { 0, 0.4, 4 }, { 0, 3.4, 9 }, 3, 2.4)
+	end
+
 	-------------------------------------------------- face + gems
 	addEyes(ctx, 6, 9, "Fierce", true)
 	if H then
-		stormMask(ctx, STORM_MASKS.Brow, 0, 11, { Plate = true, Fur = true })
+		stormMask(ctx, STORM_MASKS.Brow, 0, 12, { Plate = true, Fur = true })
 		stormMask(ctx, STORM_MASKS.Chest, 0, -2.6, { Plate = true })
 		pair(function(s)
 			stormMask(ctx, STORM_MASKS.Shoulder, s * 7, 0.4, { Plate = true, Bevel = true })

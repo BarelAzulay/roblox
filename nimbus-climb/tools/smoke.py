@@ -350,6 +350,7 @@ def main():
     ]
     mobile_scenarios = ["client_mobile"]
     client_files = ["smoke_client.lua", "smoke_client_v2.lua"]
+    server_files.append("smoke_dev.lua"); client_files.append("smoke_dev.lua"); server_scenarios.insert(server_scenarios.index("final_checks"), "dev_tools"); client_scenarios.insert(client_scenarios.index("client_final"), "client_dev"); mobile_scenarios.append("client_dev_mobile")  # owner-only developer tools (smoke_dev.lua: both worlds, ARGS.context picks the half)
     if args.list:
         print("server:", ", ".join(server_scenarios))
         print("client:", ", ".join(client_scenarios + mobile_scenarios))

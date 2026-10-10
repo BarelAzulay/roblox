@@ -80,7 +80,7 @@ local RING_C, RING_D = 12.2, 3.2 -- stone ring: centre radius and radial depth (
 local RING_N = 22 -- stones around (one centred on the front, one on the back)
 local RIM_R, RIM_D, RIM_H, RIM_N = 6.9, 1.5, 0.8, 16 -- inner portal rim
 local DISC_S = 10.3 -- side of the four turned squares of the portal disc (union radius 6.2 .. 7.3)
-local HOVER = 5 -- gap between the walking surface and the showcase's lowest point
+local HOVER = 2.4 -- gap between the walking surface and the showcase's lowest point
 local PROWL = math.rad(-8) -- forward lean of the showcase (nose down)
 local BRIDGE_W = 8
 local STEP_RUN = 1.1
@@ -589,13 +589,18 @@ end
 ----------------------------------------------------------------------
 local STONE_COLORS = { C.Stone, C.StoneB, C.StoneC }
 
--- crystal stones (index around the ring -> shard spec): w, body h, tip steps, tip h, foot steps, foot h, lean
+-- Crystal stones (ring index -> shard). As in the art seen from its front (the plaza): the head crystal, the
+-- biggest (a diamond), rises at the far side behind the showcase, a medium pair flanks it, a smaller pair stands
+-- at the near sides and a low diamond gem is set into the near stone (index 0, facing the plaza).
+-- W = width, H = body height, Steps / Tip = stepped point, FootSteps / Foot = stepped lower point,
+-- Lean = degrees outwards, Mount = height of the stacked mount stone.
+local HEAD = RING_N / 2
 local CRYSTALS = {
-	[0] = { W = 3.4, H = 3.2, Steps = 4, Tip = 2.8, FootSteps = 2, Foot = 1.2, Lean = 3, Mount = 2.4 },
-	[3] = { W = 2.4, H = 3.2, Steps = 3, Tip = 2.2, Lean = 9, Mount = 3.2 },
-	[-3] = { W = 2.4, H = 3.2, Steps = 3, Tip = 2.2, Lean = 9, Mount = 3.2 },
-	[7] = { W = 2.1, H = 2.6, Steps = 3, Tip = 1.8, Lean = 11, Mount = 2.8 },
-	[-7] = { W = 2.1, H = 2.6, Steps = 3, Tip = 1.8, Lean = 11, Mount = 2.8 },
+	[HEAD] = { W = 3.6, H = 5.2, Steps = 4, Tip = 3.8, FootSteps = 2, Foot = 1.4, Lean = 3, Mount = 2.6 },
+	[HEAD - 3] = { W = 2.4, H = 3.4, Steps = 3, Tip = 2.4, Lean = 9, Mount = 3.2 },
+	[HEAD + 3] = { W = 2.4, H = 3.4, Steps = 3, Tip = 2.4, Lean = 9, Mount = 3.2 },
+	[HEAD - 7] = { W = 2.1, H = 2.6, Steps = 3, Tip = 1.8, Lean = 11, Mount = 2.8 },
+	[HEAD + 7] = { W = 2.1, H = 2.6, Steps = 3, Tip = 1.8, Lean = 11, Mount = 2.8 },
 }
 
 local function buildRing(parent, A)
@@ -606,15 +611,12 @@ local function buildRing(parent, A)
 	for i = 0, RING_N - 1 do
 		local deg = i * step
 		local key = i
-		if key > RING_N / 2 then
-			key = key - RING_N
-		end
 		local spec = CRYSTALS[key]
 		local h = 1.6 + math.floor(hash(i, 1, 21) * 4) * 0.4
 		if spec then
 			h = spec.Mount - 0.9
-		elseif key == RING_N / 2 then
-			h = 2.4 -- the back stone carries the gem
+		elseif key == 0 then
+			h = 2.4 -- the near stone carries the gem
 		end
 		local color = STONE_COLORS[(i % #STONE_COLORS) + 1]
 		local cf = polarCF(A, deg, RING_C, h / 2)
@@ -651,7 +653,7 @@ end
 local function buildCrystals(parent, A, tops)
 	local m = newModel(parent, "Crystals")
 	local step = 360 / RING_N
-	local frontTip = nil
+	local headTip = nil
 	for key, spec in pairs(CRYSTALS) do
 		local deg = key * step
 		local baseY = (tops[key] or (spec.Mount + 0.2)) - 0.25
@@ -661,8 +663,8 @@ local function buildCrystals(parent, A, tops)
 		-- lean outwards a little (-Z of the polar frame points away from the centre)
 		local base = polarCF(A, deg, RING_C, baseY) * CFrame.Angles(-math.rad(spec.Lean), 0, 0)
 		local _, tip = crystal(m, base, spec.W, spec.H, spec.Steps, spec.Tip, spec.FootSteps, spec.Foot)
-		if key == 0 then
-			frontTip = baseY + tip
+		if key == HEAD then
+			headTip = baseY + tip
 			-- two small side shards leaning away from the big one
 			local mountTop = tops[key] or (spec.Mount + 0.2)
 			for _, s in ipairs({ -1, 1 }) do
@@ -671,11 +673,11 @@ local function buildCrystals(parent, A, tops)
 			end
 		end
 	end
-	-- the diamond gem set into the outer face of the back stone (Glass rim around a Neon core)
-	local back = polarCF(A, 180, RING_C + RING_D / 2 + 0.05, 1.3) * CFrame.Angles(0, 0, math.rad(45))
-	block(m, "GemRim", back, Vector3.new(1.7, 1.7, 0.5), C.CrystalGlass, { Material = MAT.Glass, Transparency = 0.3, Shadow = false })
-	block(m, "GemCore", back * CFrame.new(0, 0, -0.08), Vector3.new(1.05, 1.05, 0.5), C.CrystalCore, { Material = MAT.Neon, Shadow = false })
-	return m, frontTip
+	-- the low diamond gem set into the outer face of the near stone (Glass rim around a Neon core)
+	local near = polarCF(A, 0, RING_C + RING_D / 2 + 0.05, 1.3) * CFrame.Angles(0, 0, math.rad(45))
+	block(m, "GemRim", near, Vector3.new(1.7, 1.7, 0.5), C.CrystalGlass, { Material = MAT.Glass, Transparency = 0.3, Shadow = false })
+	block(m, "GemCore", near * CFrame.new(0, 0, -0.08), Vector3.new(1.05, 1.05, 0.5), C.CrystalCore, { Material = MAT.Neon, Shadow = false })
+	return m, headTip
 end
 
 local function buildPortal(parent, A)
@@ -974,7 +976,7 @@ local function buildSign(parent, A, landing, outward, titleY)
 	-- poster beside the bridge landing, turned towards players walking in from the street
 	if landing and outward then
 		local lat = Vector3.new(-outward.Z, 0, outward.X)
-		local base = Vector3.new(landing.X, A.Position.Y, landing.Z) + lat * 6.4 - outward * 2.6
+		local base = Vector3.new(landing.X, A.Position.Y, landing.Z) + lat * 8.2 - outward * 2.2
 		local facing = Vector3.new(landing.X, A.Position.Y, landing.Z) + outward * 22
 		local cf = flatLook(base, facing)
 		for _, s in ipairs({ -1, 1 }) do
@@ -984,7 +986,8 @@ local function buildSign(parent, A, landing, outward, titleY)
 			block(m, "PosterGemGlass", tip, Vector3.new(0.7, 1.1, 0.7), C.CrystalGlass, { Material = MAT.Glass, Transparency = 0.3, Shadow = false })
 			block(m, "PosterGemCore", tip, Vector3.new(0.4, 1.0, 0.4), C.CrystalCore, { Material = MAT.Neon, Shadow = false })
 		end
-		block(m, "PosterFrame", cf * CFrame.new(0, 5.4, 0.25), Vector3.new(6.8, 8.2, 0.3), C.StoneDeep, { Shadow = false })
+		block(m, "PosterFrame", cf * CFrame.new(0, 5.4, 0.25), Vector3.new(6.9, 8.3, 0.36), C.StoneLight, { Shadow = false })
+		block(m, "PosterBack", cf * CFrame.new(0, 5.4, 0.46), Vector3.new(6.1, 7.5, 0.1), C.StoneB, { Shadow = false })
 		local board = block(m, "PosterBoard", cf * CFrame.new(0, 5.4, 0), Vector3.new(6.4, 7.8, 0.3), C.Storm, { Shadow = false })
 		posterGui(board)
 	end
@@ -1219,8 +1222,8 @@ function StormAltar.Build(lobbyInfo)
 		buildPrompt(model, A)
 	end)
 	section("lights", function()
-		-- the big front crystal glows softly onto the stones and the cloud
-		local glow = invisible(model, "CrystalGlow", polarCF(A, 0, RING_C - 1.5, 5.5))
+		-- the head crystal glows softly onto the stones and the cloud
+		local glow = invisible(model, "CrystalGlow", polarCF(A, 180, RING_C - 1.5, 7))
 		pointLight(glow, 1, 10)
 		sparkles(glow, 1.5, 1, 0.35)
 	end)
