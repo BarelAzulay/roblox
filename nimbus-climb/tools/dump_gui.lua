@@ -35,6 +35,10 @@
 --                         WorldMirror: the pixel billboard at its own size, the eye-level countdown face at the
 --                         size it has on this screen from <studs> away (default 36, a friend outside the lock
 --                         walls) over a sketch of the swirl, and the face's canvas at 1:1
+--   homepads[:<tier>]     no game HUD: a Phase 2 home (real LobbyBuilder + HomeBuilder + TycoonCatalog) built half way
+--                         to house tier <tier> (default 2) with its buy pads; every pad sign (pixel billboards at
+--                         their own size), the "FREE HOME" signpost of a free plot and the Collector's cash screen
+--                         (from 30 studs and at canvas size) mirrored flat into the ScreenGui WorldMirror
 --
 -- Every dumped node: absolute screen position/size (top bar inset included), cumulative UIScale, ZIndex, Rotation,
 -- clipping, background colour/transparency, legacy border, UICorner radius in px, UIStrokes (colour, thickness in
@@ -1404,6 +1408,140 @@ local function portalScene(id, members, distance, width, height)
 end
 
 ----------------------------------------------------------------------
+-- homepads: the world GUIs of a Phase 2 home (server/Services/HomeBuilder.lua), mirrored flat like the portal's
+----------------------------------------------------------------------
+local function homePadsScene(tier, width, height)
+	Config = req("shared/Config")
+	local okMetrics, why = installMetrics()
+	if not okMetrics then
+		note("text metrics: " .. tostring(why))
+	end
+	ensureRemotes()
+	Mock.SetViewport(width, height)
+	local context = Mock.Context
+	Mock.Context = "server"
+	local LobbyBuilder = req("server/Services/LobbyBuilder")
+	local HB = req("server/Services/HomeBuilder", true)
+	local TC = req("shared/TycoonCatalog", true)
+	if not HB or not TC then
+		Mock.Context = context
+		fail("homepads needs server/Services/HomeBuilder.lua and shared/TycoonCatalog.lua")
+	end
+	local lobby = LobbyBuilder.Build()
+	HB.Init(lobby)
+	local spot, free = lobby.Spots[1], lobby.Spots[2]
+	HB.SetOwner(spot, LocalPlayer)
+	tier = max(1, min(4, floor(tonumber(tier) or 2)))
+	local tierId = TC.HouseTiers[tier].Id
+	local home = { Stations = {}, Prestige = 0 }
+	for _, def in ipairs(TC.Stations) do
+		local cap = (def.TierCaps and def.TierCaps[tierId]) or 0
+		if def.Id == "House" then
+			cap = tier
+		elseif def.Id ~= "Press1" and def.Id ~= "Collector" then
+			cap = floor(cap / 2)
+		end
+		if cap > 0 and not def.ComingSoon then
+			home.Stations[def.Id] = min(cap, def.MaxLevel)
+		end
+	end
+	HB.BuildHome(spot, home)
+	HB.SetPads(spot, TC.AvailablePads(home))
+	HB.SetCollector(spot, 12345, 50000)
+	advance(0.3)
+	Mock.Context = context
+
+	local pg = LocalPlayer:WaitForChild("PlayerGui")
+	local screen = make("ScreenGui", { Name = "WorldMirror", IgnoreGuiInset = true, ResetOnSpawn = false, ZIndexBehavior = Enum.ZIndexBehavior.Sibling })
+	local vp = Mock.Viewport
+	local x, y, rowH = 24, 104, 0
+	local function place(w, h, caption)
+		w = max(w, utf8len(caption) * 10 + 12)
+		if x > 24 and x + w > vp.X - 24 then
+			x, y, rowH = 24, y + rowH + 56, 0
+		end
+		local px, py = x, y
+		x = x + w + 36
+		rowH = max(rowH, h)
+		return px, py
+	end
+	local pads = {}
+	for _, d in ipairs(spot.Folder:GetDescendants()) do
+		if d:IsA("BillboardGui") and d.Name == "PadSign" then
+			pads[#pads + 1] = d
+		end
+	end
+	table.sort(pads, function(a, b)
+		return a:GetFullName() < b:GetFullName()
+	end)
+	for _, gui in ipairs(pads) do
+		local w, h = canvasOf(gui)
+		local node, id = gui, "?"
+		for _ = 1, 6 do
+			node = node.Parent
+			if not node then
+				break
+			end
+			if node:GetAttribute("StationId") then
+				id = node:GetAttribute("StationId")
+				break
+			end
+		end
+		local px, py = place(w, h, id)
+		mirrorCell(screen, gui, px, py, 1, id)
+	end
+	-- a PixelsPerStud surface sign: its canvas is the adornee's face size x PixelsPerStud
+	local function surface(gui, caption)
+		if not gui then
+			note("homepads: no " .. caption)
+			return
+		end
+		local part = gui.Adornee or gui.Parent
+		local fw, fh = 4, 2
+		if part and part:IsA("BasePart") then
+			local sz = part.Size
+			if gui.Face == Enum.NormalId.Top or gui.Face == Enum.NormalId.Bottom then
+				fw, fh = sz.X, sz.Z
+			elseif gui.Face == Enum.NormalId.Left or gui.Face == Enum.NormalId.Right then
+				fw, fh = sz.Z, sz.Y
+			else
+				fw, fh = sz.X, sz.Y
+			end
+		end
+		local pps = gui.PixelsPerStud or 50
+		local w, h = fw * pps, fh * pps
+		for _, scale in ipairs({ onScreenScale(gui, 30), 1 }) do
+			local cap = (scale == 1) and (caption .. " canvas") or (caption .. fmt(" from 30 studs (x%.2f)", scale))
+			local px, py = place(w * scale, h * scale, cap)
+			local cell = make("Frame", { Name = gui.Name, BackgroundTransparency = 1, Position = UDim2.fromOffset(px, py), Size = UDim2.fromOffset(w * scale, h * scale) }, screen)
+			for _, c in ipairs(gui:GetChildren()) do
+				if c:IsA("GuiObject") then
+					c:Clone().Parent = cell
+				end
+			end
+			if math.abs(scale - 1) > 1e-3 then
+				deepScale(cell, scale)
+			end
+			label(screen, cap, 18, {
+				Name = "Caption",
+				Position = UDim2.fromOffset(px, py - 30),
+				Size = UDim2.fromOffset(max(utf8len(cap) * 10 + 12, w * scale), 24),
+				TextXAlignment = Enum.TextXAlignment.Left,
+				TextStrokeTransparency = 0.2,
+				TextStrokeColor3 = NAVY,
+			})
+		end
+	end
+	local claim = free and free.Folder and free.Folder:FindFirstChild("ClaimGui", true)
+	surface(claim, "Claim sign")
+	local cash = spot.Folder:FindFirstChild("CashGui", true)
+	surface(cash, "Collector screen")
+	screen.Parent = pg
+	advance(0.1)
+	return okMetrics
+end
+
+----------------------------------------------------------------------
 -- boot
 ----------------------------------------------------------------------
 local function boot(width, height, touch, keepTitle)
@@ -1482,6 +1620,11 @@ else
 	elseif name == "portal" then
 		-- the world GUIs of one portal (no game HUD)
 		local okMetrics = portalScene(fields[2], fields[3], fields[4], width, height)
+		data = walk()
+		data.metrics = okMetrics and "font" or "mock"
+	elseif name == "homepads" then
+		-- the world GUIs of a Phase 2 home (no game HUD)
+		local okMetrics = homePadsScene(fields[2], width, height)
 		data = walk()
 		data.metrics = okMetrics and "font" or "mock"
 	else

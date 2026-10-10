@@ -40,7 +40,7 @@ except ImportError as exc:  # pragma: no cover
 # Lua world (booted the way tools/smoke.py boots one)
 # ---------------------------------------------------------------------------------------------------
 ENGINES = ["luajit21", "luajit20", "lua54", "lua53", "lua55", "lua52"]
-CLIENT_KINDS = {"skydragon", "dragon"}
+CLIENT_KINDS = {"skydragon", "dragon", "homegarden", "homegym"}
 
 
 def load_engine(preferred=None):

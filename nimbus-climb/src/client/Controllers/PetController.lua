@@ -7,10 +7,14 @@
 --                                      by the PivotTo fallback (debug helper for the smoke tests)
 --
 -- What it does
---   * Reads the player attribute `EquippedPets` (csv of pet ids, Config.Attr.EquippedPets) of EVERY player
---     and keeps one follower per player. Ids unknown to PetCatalog are ignored, at most
---     Config.Pets.MaxEquipped are used. All pets are drawn on this client only (workspace.ClientPets, one
---     Folder per owner named after the UserId); the server pays nothing.
+--   * Reads the player attribute `EquippedPets` (csv of pet KEYS, Config.Attr.EquippedPets) of EVERY player
+--     and keeps one follower per player. A key is a plain pet id (Normal copy), "petId@Golden" / "petId@Rainbow"
+--     (tier copies: PetBuilder draws the finish from Look.Finish) or "hyb:<uid>" (a fused hybrid). Every follower is
+--     built from PetKeys.DefOf(key); hybrids need their record, which the server publishes for the equipped ones in
+--     the attribute `EquippedHybrids` ("uid=Body/Style/Tier/Rarity[/Seed];...", PetService). Keys that cannot be
+--     described (unknown pets, a hybrid without its record yet) are ignored, at most Config.Pets.MaxEquipped are
+--     used. All pets are drawn on this client only (workspace.ClientPets, one Folder per owner named after the
+--     UserId); the server pays nothing.
 --   * Each pet is a PetBuilder model. Right after it is built, every static part (body, head, eyes, eyelids...)
 --     is welded once to the anchored PrimaryPart (like NpcController / ShowcaseController do), so a pose is ONE
 --     CFrame write on the root: the engine carries the welded parts along. PetBuilder.Animate then re-poses only
@@ -43,6 +47,17 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Config = require(Shared:WaitForChild("Config"))
 local PetCatalog = require(Shared:WaitForChild("PetCatalog"))
 local PetBuilder = require(Shared:WaitForChild("PetBuilder"))
+-- Phase 2 pet keys (tiers + hybrids); without the module plain pet ids keep working through PetCatalog
+local PetKeys = nil
+do
+	local module = Shared:FindFirstChild("PetKeys") or Shared:WaitForChild("PetKeys", 5)
+	if module then
+		local ok, result = pcall(require, module)
+		if ok and type(result) == "table" then
+			PetKeys = result
+		end
+	end
+end
 
 local PetController = {}
 
@@ -62,6 +77,7 @@ local TAU = math.pi * 2
 -- Tuning (feel only)
 ----------------------------------------------------------------------
 local FOLDER_NAME = "ClientPets"
+local HYBRID_ATTR = "EquippedHybrids" -- written by PetService (not in Config.Attr): looks of the equipped hybrids
 local MAX_EQUIPPED = 3
 if type(Config.Pets) == "table" and type(Config.Pets.MaxEquipped) == "number" then
 	MAX_EQUIPPED = math.max(1, math.floor(Config.Pets.MaxEquipped))
@@ -221,11 +237,11 @@ end
 ----------------------------------------------------------------------
 -- Pet records and models
 ----------------------------------------------------------------------
-local function newPetRecord(def)
+local function newPetRecord(def, key)
 	local rnd = math.random
 	return {
 		def = def,
-		id = def.Id,
+		id = key or def.Id, -- the copy's key (tier copies and hybrids are different followers than Normal ones)
 		model = nil,
 		slot = 1,
 		side = 0,
@@ -359,6 +375,7 @@ local function newFollower(player)
 		pets = {},
 		n = 0,
 		csv = "",
+		hyb = "",
 		applied = false,
 		char = nil,
 		root = nil,
@@ -444,24 +461,75 @@ local function acquireRoot(f)
 	snapAllPets(f)
 end
 
--- Rebuilds the pet list from the player's attribute: keeps matching pets, destroys the rest, adds new ones.
+-- "uid=Body/Style/Tier/Rarity[/Seed];..." -> a stand-in profile { Hybrids = { [uid] = record } } for PetKeys.DefOf
+local function parseHybrids(text)
+	local hybrids = {}
+	if type(text) ~= "string" then
+		return { Hybrids = hybrids }
+	end
+	for entry in string.gmatch(text, "[^;]+") do
+		local uid, rest = string.match(entry, "^%s*([%w_%-]+)=(.+)$")
+		if uid then
+			local fields = {}
+			for field in string.gmatch(rest .. "/", "([^/]*)/") do
+				fields[#fields + 1] = field
+			end
+			if fields[1] and fields[1] ~= "" and fields[2] and fields[2] ~= "" then
+				local rec = { Body = fields[1], Style = fields[2], Tier = "Normal" }
+				if fields[3] == "Golden" or fields[3] == "Rainbow" then
+					rec.Tier = fields[3]
+				end
+				if fields[4] and fields[4] ~= "" then
+					rec.Rarity = fields[4]
+				end
+				local seed = tonumber(fields[5])
+				if seed then
+					rec.Seed = seed
+				end
+				hybrids[uid] = rec
+			end
+		end
+	end
+	return { Hybrids = hybrids }
+end
+
+-- The definition to build for one key (nil: skip it).
+local function defForKey(key, hybridProfile)
+	if PetKeys then
+		local ok, def = pcall(PetKeys.DefOf, key, hybridProfile)
+		if ok and type(def) == "table" then
+			return def
+		end
+		return nil
+	end
+	return PetCatalog.Get(key)
+end
+
+-- Rebuilds the pet list from the player's attributes: keeps matching pets, destroys the rest, adds new ones.
 local function applyEquipped(f)
 	local csv = f.player:GetAttribute(ATTR.EquippedPets)
 	if type(csv) ~= "string" then
 		csv = ""
 	end
-	if f.applied and csv == f.csv then
+	local hyb = f.player:GetAttribute(HYBRID_ATTR)
+	if type(hyb) ~= "string" then
+		hyb = ""
+	end
+	if f.applied and csv == f.csv and hyb == f.hyb then
 		return
 	end
 	f.applied = true
 	f.csv = csv
+	f.hyb = hyb
 
-	local wanted = {}
+	local hybridProfile = parseHybrids(hyb)
+	local wanted, wantedKeys = {}, {}
 	for token in string.gmatch(csv, "[^,]+") do
-		local id = string.match(token, "^%s*(.-)%s*$")
-		local def = PetCatalog.Get(id)
+		local key = string.match(token, "^%s*(.-)%s*$")
+		local def = key ~= "" and defForKey(key, hybridProfile) or nil
 		if def and #wanted < MAX_EQUIPPED then
 			wanted[#wanted + 1] = def
+			wantedKeys[#wanted] = key
 		end
 	end
 
@@ -470,16 +538,18 @@ local function applyEquipped(f)
 	local pets = {}
 	for i = 1, #wanted do
 		local def = wanted[i]
+		local key = wantedKeys[i]
 		local found = nil
 		for j = 1, #old do
-			if not used[j] and old[j].id == def.Id then
+			-- same key and the same definition (a hybrid whose record changed is rebuilt)
+			if not used[j] and old[j].id == key and old[j].def == def then
 				used[j] = true
 				found = old[j]
 				break
 			end
 		end
 		if not found then
-			found = newPetRecord(def)
+			found = newPetRecord(def, key)
 			-- a pet equipped while its owner is already flying around emerges from the owner
 			if f.established then
 				found.fresh = 2
@@ -552,6 +622,9 @@ local function trackPlayer(player)
 
 	local conns = f.conns
 	conns[#conns + 1] = player:GetAttributeChangedSignal(ATTR.EquippedPets):Connect(function()
+		applyEquipped(f)
+	end)
+	conns[#conns + 1] = player:GetAttributeChangedSignal(HYBRID_ATTR):Connect(function()
 		applyEquipped(f)
 	end)
 	conns[#conns + 1] = player:GetAttributeChangedSignal(ATTR.Downed):Connect(function()
