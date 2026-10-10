@@ -10,6 +10,8 @@
 --                                             (others get their first one; see "Second evolution"): High <= ~2000
 --                                             parts, Low <= ~520
 --   PetBuilder.MaxEvolution(petDef) -> 1 | 2  how far the pet can evolve (2 for Epic, Legendary, Mythic, Secret)
+--   PetBuilder.EvolutionColors(petDef, stage) -> Color3, Color3   the glow colours of an evolution into `stage`
+--                                             (gold + the evolved form's gem; the second evolution's two neon accents)
 --                                             High: <= ~350 parts (viewports, podiums, NPCs, your own pets)
 --                                             Low:  <= ~120 parts (other players' followers, far away)
 --   PetBuilder.Animate(model, t, opts)        opts: { Flap = 1 (speed multiplier), Excited = 0..1 }
@@ -5318,6 +5320,22 @@ function PetBuilder.Build(petDef, opts)
 		addSparkles(model, look, (detail == "Low") and 3 or 5, scale)
 	end
 	return model
+end
+
+-- the glow colours of an evolution into `stage` (1: gold + the evolved form's gem, 2: the second evolution's
+-- two neon accents), for the evolution animation (client/Controllers/EvolutionFx.lua)
+function PetBuilder.EvolutionColors(petDef, stage)
+	initConstants()
+	local look = readLook(petDef)
+	if stage == 2 then
+		local st = ASC.Look[look.Id]
+		if st and st.Glow and st.GlowB then
+			return evoRGB(st.Glow), evoRGB(st.GlowB)
+		end
+		return lighten(look.Secondary, 0.3), lighten(look.WingColor, 0.4)
+	end
+	local st = EVO.Look[look.Id]
+	return rgb(255, 214, 90), (st and st.Gem) and evoRGB(st.Gem) or lighten(look.Secondary, 0.2)
 end
 
 -- how far a pet can evolve (petDef or a rarity name): 2 (a second evolution) for Epic, Legendary, Mythic and

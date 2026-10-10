@@ -287,7 +287,18 @@ Close it with the red X, `Esc` or gamepad B. Every change answers with a "DEV: .
 | `/reset` | Same as Reset my data (no confirmation, so type it carefully). |
 | `/tutorial` | Same as Restart tutorial. |
 | `/skiptutorial` | Same as Skip tutorial. |
-| `/devhelp` | A toast listing the commands. |
+| `/pet <name> [stage]` | Builds that pet in front of you: stage `0` normal (the default), `1` evolved, `2` second evolution (Epic pets and up). The name or a unique part of it is enough, any case: `/pet cloudy 2`, `/pet Pebble Pup`. Each new pet stands beside the last one. |
+| `/pets [stage]` | Every pet lined up in rows in front of you: `/pets` (normal), `/pets 1` (all 30 evolved), `/pets 2` (the 13 second evolutions). |
+| `/evolve <name> [stage]` | Plays that pet's evolution animation in front of you: with no stage its whole line (normal -> evolved, then -> second evolution for Epic pets and up), `1` only normal -> evolved, `2` only evolved -> second evolution. |
+| `/evolve all [stage]` | Every pet's evolutions one after another (all 43 take about 4 minutes; `/evolve all 2` plays just the 13 second evolutions). |
+| `/clearpets` | Stops an evolution and removes the showcase pets. |
+| `/devhelp` | Two toasts listing the commands. |
+
+The pet showcase (`/pet`, `/pets`, `/evolve`, `/clearpets`) is built on your own screen only: other players do not
+see it, nothing is saved and your pets are not touched. The evolution animation is
+`src/client/Controllers/EvolutionFx.lua` (the pet charges up and spins in a pillar of light over a ring of runes,
+bursts into a flash and the evolved pet pops out; the second evolution gets a double ring and more sparks), ready for
+a real "evolve" button later.
 
 At most 4 commands every 2 seconds. Every command is written to the Output window as `[NimbusClimb][Dev] ...`.
 Changes are saved like normal progress (a reset lasts), so use them on a test account or in Studio when you want

@@ -636,6 +636,113 @@ local function serverScenarios()
 			"DEV StudioAutoGrant: ...and Config.Dev.GrantTokens tokens, once", tostring(DataS.GetTokens(auto)))
 	end
 
+	-- the pet showcase: /pet, /pets, /evolve, /clearpets only send DevPetShow(action, payload) to the developer's
+	-- own client (validated: catalog pets, stages each pet has); nothing is saved; a normal player gets nothing
+	local function petShowcase(Dev, owner, stranger)
+		local PC = K.M["shared/PetCatalog"]
+		local PB = K.M["shared/PetBuilder"]
+		if not T.check(K.remoteFolder():FindFirstChild("DevPetShow") ~= nil, "DEV showcase: the DevPetShow remote exists") then
+			return
+		end
+		local epic = 0
+		for _, def in ipairs(PC.Pets) do
+			if PB.MaxEvolution(def) == 2 then
+				epic = epic + 1
+			end
+		end
+		-- the DevPetShow events sent to p since mark
+		local function shows(p, mark)
+			local out = {}
+			for _, e in ipairs(K.remotesFor("DevPetShow", p.UserId, mark)) do
+				out[#out + 1] = { action = e.args[1], payload = e.args[2] }
+			end
+			return out
+		end
+		local function one(p, mark, label)
+			local list = shows(p, mark)
+			T.check(#list == 1, label .. ": exactly one DevPetShow event", #list .. " events")
+			return list[1] or { payload = {} }
+		end
+		local before = snapshotOf(owner)
+		local mark = chat(owner, "/pet Cloudy Dragon 2")
+		local e = one(owner, mark, "DEV showcase: /pet Cloudy Dragon 2")
+		T.check(e.action == "Spawn" and e.payload.PetId == "cloudy_dragon" and e.payload.Stage == 2, "DEV showcase: /pet Cloudy Dragon 2 -> Spawn {cloudy_dragon, 2}", tostring(e.action) .. " " .. tostring(e.payload.PetId) .. " " .. tostring(e.payload.Stage))
+		T.check(lastToast(owner, mark).text:find("Cloudy Dragon (Evolved II)", 1, true) ~= nil, "DEV showcase: ...with a toast naming the pet and its stage", lastToast(owner, mark).text)
+		mark = chat(owner, "/PET pebble")
+		e = one(owner, mark, "DEV showcase: /PET pebble")
+		T.check(e.payload.PetId == "pebble_pup" and e.payload.Stage == 0, "DEV showcase: a unique part of the name is enough, the stage defaults to 0 (normal)", tostring(e.payload.PetId) .. " " .. tostring(e.payload.Stage))
+		mark = send(owner, "pet", "storm_tabby evolved")
+		e = one(owner, mark, "DEV showcase: DevCommand(\"pet\", \"storm_tabby evolved\")")
+		T.check(e.payload.PetId == "storm_tabby" and e.payload.Stage == 1, "DEV showcase: ids and stage words work through the DevCommand remote too", tostring(e.payload.PetId) .. " " .. tostring(e.payload.Stage))
+		local refusals = {
+			{ "/pet mochi slime 2", "no second evolution" },
+			{ "/pet dragon", "could be" },
+			{ "/pet nosuchpet", "no pet called" },
+			{ "/pet", "which pet" },
+			{ "/pets cats", "only a stage" },
+			{ "/evolve pebble pup 2", "no second evolution" },
+			{ "/evolve", "which pet" },
+			{ "/evolve cloudy 0", "evolve to 1" },
+		}
+		for _, r in ipairs(refusals) do
+			mark = chat(owner, r[1])
+			local toast = lastToast(owner, mark)
+			T.check(#shows(owner, mark) == 0 and toast.kind == "bad" and toast.text:find(r[2], 1, true) ~= nil, "DEV showcase: '" .. r[1] .. "' is refused with a reason and sends nothing", toast.text)
+		end
+		for _, forged in ipairs({ { "pet", { PetId = "cloudy_dragon" } }, { "pet", 7 }, { "evolve", string.rep("x", 60) }, { "clearpets", "now" } }) do
+			mark = send(owner, forged[1], forged[2])
+			T.check(#shows(owner, mark) == 0 and lastToast(owner, mark).kind == "bad", "DEV showcase: a forged value for " .. forged[1] .. " (" .. type(forged[2]) .. ") is refused", lastToast(owner, mark).text)
+		end
+		mark = chat(owner, "/pets")
+		e = one(owner, mark, "DEV showcase: /pets")
+		T.check(e.action == "Lineup" and e.payload.Stage == 0 and type(e.payload.PetIds) == "table" and #e.payload.PetIds == #PC.Pets, "DEV showcase: /pets lines up every catalog pet (" .. #PC.Pets .. ")", tostring(e.payload.PetIds and #e.payload.PetIds))
+		mark = chat(owner, "/pets 2")
+		e = one(owner, mark, "DEV showcase: /pets 2")
+		local allEpic = type(e.payload.PetIds) == "table"
+		for _, id in ipairs(e.payload.PetIds or {}) do
+			allEpic = allEpic and PB.MaxEvolution(PC.Get(id)) == 2
+		end
+		T.check(e.action == "Lineup" and e.payload.Stage == 2 and allEpic and #e.payload.PetIds == epic, "DEV showcase: /pets 2 lines up only the " .. epic .. " pets that have a second evolution", tostring(e.payload.PetIds and #e.payload.PetIds))
+		mark = chat(owner, "/evolve cloudy")
+		e = one(owner, mark, "DEV showcase: /evolve cloudy")
+		local st = e.payload.Steps or {}
+		T.check(e.action == "Evolve" and #st == 2 and st[1].PetId == "cloudy_dragon" and st[1].From == 0 and st[1].To == 1 and st[2].From == 1 and st[2].To == 2, "DEV showcase: /evolve <Epic+ pet> plays its whole line (normal -> evolved -> evolved II)", #st .. " steps")
+		mark = chat(owner, "/evolve pebble pup")
+		st = one(owner, mark, "DEV showcase: /evolve pebble pup").payload.Steps or {}
+		T.check(#st == 1 and st[1].PetId == "pebble_pup" and st[1].From == 0 and st[1].To == 1, "DEV showcase: /evolve <pet below Epic> plays its one evolution", #st .. " steps")
+		mark = chat(owner, "/evolve eclipse 2")
+		st = one(owner, mark, "DEV showcase: /evolve eclipse 2").payload.Steps or {}
+		T.check(#st == 1 and st[1].PetId == "eclipse_dragon" and st[1].From == 1 and st[1].To == 2, "DEV showcase: /evolve <pet> 2 plays only evolved -> evolved II", #st .. " steps")
+		mark = chat(owner, "/evolve all")
+		st = one(owner, mark, "DEV showcase: /evolve all").payload.Steps or {}
+		T.check(#st == #PC.Pets + epic, "DEV showcase: /evolve all plays every evolution of every pet (" .. (#PC.Pets + epic) .. ")", #st .. " steps")
+		mark = chat(owner, "/evolve all 2")
+		st = one(owner, mark, "DEV showcase: /evolve all 2").payload.Steps or {}
+		T.check(#st == epic and st[1].From == 1 and st[1].To == 2, "DEV showcase: /evolve all 2 plays every second evolution (" .. epic .. ")", #st .. " steps")
+		mark = chat(owner, "/clearpets")
+		e = one(owner, mark, "DEV showcase: /clearpets")
+		T.check(e.action == "Clear", "DEV showcase: /clearpets -> Clear", tostring(e.action))
+		mark = chat(owner, "/devhelp")
+		local listed = false
+		for _, t in ipairs(devToasts(owner, mark)) do
+			if t.text:find("/evolve", 1, true) and t.text:find("/pets", 1, true) and t.text:find("/clearpets", 1, true) then
+				listed = true
+			end
+		end
+		T.check(listed, "DEV showcase: /devhelp lists the showcase commands too", lastToast(owner, mark).text)
+		local unchanged, diff = same(before, snapshotOf(owner))
+		T.check(unchanged, "DEV showcase: the showcase commands change no data", diff)
+		-- a normal player: nothing at all
+		local markS = K.logSize()
+		for _, line in ipairs({ "/pet cloudy dragon 2", "/pets", "/evolve all", "/clearpets" }) do
+			chat(stranger, line)
+		end
+		send(stranger, "pet", "cloudy_dragon 2")
+		send(stranger, "evolve", "all")
+		advance(2.1)
+		T.eq(#shows(stranger, markS), 0, "DEV showcase: a normal player's showcase commands send nothing (chat and remote)")
+	end
+
 	S.dev_tools = guarded("dev_tools", function()
 		if not K.needBoot() then
 			return
@@ -676,6 +783,7 @@ local function serverScenarios()
 			admins(Dev, Config, joined)
 			groupGame(Dev, Config, joined, stranger)
 			local owner = ownerCommands(Dev, Config, joined)
+			petShowcase(Dev, owner, stranger)
 			resetMidTutorial(Config, joined)
 			switchedOff(Config, owner)
 			studio(Dev, Config, joined, owner)
@@ -1159,6 +1267,155 @@ local function clientScenarios()
 		setHint(ATTR_TUTORIAL, nil)
 		KC.flushErrors("dev client")
 		KC.flushWarnings("dev client")
+	end)
+
+	-- the developer pet showcase on the client (DevPetShow + EvolutionFx): what DevService sends gets built here
+	S.client_dev_pets = guarded("client_dev_pets", function()
+		local CollectionService = game:GetService("CollectionService")
+		local PC = shared("PetCatalog")
+		local PB = shared("PetBuilder")
+		local okShow, Show = pcall(require, Mock.GetPath(ROOTS["client"] .. "/Controllers/DevPetShow"))
+		if not T.check(okShow and type(Show) == "table" and type(Show.Handle) == "function", "DEV pets: client/Controllers/DevPetShow.lua loads", tostring(Show)) then
+			return
+		end
+		local okFx, Fx = pcall(require, Mock.GetPath(ROOTS["client"] .. "/Controllers/EvolutionFx"))
+		if not T.check(okFx and type(Fx) == "table" and type(Fx.Play) == "function", "DEV pets: client/Controllers/EvolutionFx.lua loads", tostring(Fx)) then
+			return
+		end
+		local me = Mock.GetRoot(LocalPlayer)
+		if not T.check(me ~= nil, "DEV pets: the local player has a character") then
+			return
+		end
+		local function models()
+			local out = {}
+			local f = Show.Folder()
+			for _, c in ipairs(f and f:GetChildren() or {}) do
+				if c:IsA("Model") then
+					out[#out + 1] = c
+				end
+			end
+			return out
+		end
+		local function lowest(model)
+			local cf, size = model:GetBoundingBox()
+			return cf.Position.Y - size.Y / 2
+		end
+		local function sizeSum(model)
+			local n = 0
+			for _, d in ipairs(model:GetDescendants()) do
+				if d:IsA("BasePart") then
+					n = n + d.Size.X + d.Size.Y + d.Size.Z
+				end
+			end
+			return n
+		end
+
+		-- Spawn: the second evolution of the Cloudy Dragon, in front of the player, facing them
+		KC.toClient("DevPetShow", "Spawn", { PetId = "cloudy_dragon", Stage = 2 })
+		advance(0.5)
+		local list = models()
+		local dragon = list[1]
+		if not T.check(#list == 1 and dragon ~= nil, "DEV pets: Spawn builds the pet in the workspace folder DevPetShow", #list .. " models") then
+			return
+		end
+		T.check(dragon:GetAttribute("DevPetStage") == 2 and dragon:FindFirstChild("Wing2L", true) ~= nil, "DEV pets: ...at the stage asked for (the second evolution, with its second wing pair)")
+		local look = Vector3.new(me.CFrame.LookVector.X, 0, me.CFrame.LookVector.Z).Unit
+		local toPet = dragon.PrimaryPart.Position - me.Position
+		local flat = Vector3.new(toPet.X, 0, toPet.Z)
+		T.check(flat:Dot(look) > 3, "DEV pets: ...in front of the player", string.format("%.1f studs ahead", flat:Dot(look)))
+		local facing = Vector3.new(dragon.PrimaryPart.CFrame.LookVector.X, 0, dragon.PrimaryPart.CFrame.LookVector.Z).Unit
+		T.check(facing:Dot(-flat.Unit) > 0.8, "DEV pets: ...facing the player", string.format("%.2f", facing:Dot(-flat.Unit)))
+		T.check(math.abs(lowest(dragon) - (me.Position.Y - 3)) < 4, "DEV pets: ...hovering just over the ground the player stands on", string.format("lowest %.1f, player %.1f", lowest(dragon), me.Position.Y))
+		T.check(CollectionService:HasTag(dragon, "NC_Showcase") and dragon:GetAttribute("Ready") == true, "DEV pets: ...tagged NC_Showcase, so ShowcaseController brings it to life")
+		local tag = dragon:FindFirstChild("DevPetTag", true)
+		local nameLabel = tag and tag:FindFirstChild("Name", true)
+		local infoLabel = tag and tag:FindFirstChild("Info", true)
+		T.check(tag ~= nil and tag:IsA("BillboardGui") and tag.Size.X.Scale == 0 and tag.Size.Y.Scale == 0 and tag.LightInfluence == 0
+			and tag.MaxDistance >= 50 and tag.MaxDistance <= 150 and nameLabel ~= nil and nameLabel.Text == "Cloudy Dragon" and nameLabel.TextSize >= 22
+			and infoLabel ~= nil and infoLabel.TextSize >= 18 and infoLabel.Text:find("Evolved II", 1, true) ~= nil,
+			"DEV pets: ...with a name tag that keeps the World text rule (pixel-sized, 24 / 19 px, LightInfluence 0, MaxDistance 50-150)")
+		KC.toClient("DevPetShow", "Spawn", { PetId = "pebble_pup", Stage = 0 })
+		advance(0.5)
+		list = models()
+		local gap = math.huge
+		if #list == 2 then
+			gap = (Vector3.new(list[1].PrimaryPart.Position.X, 0, list[1].PrimaryPart.Position.Z) - Vector3.new(list[2].PrimaryPart.Position.X, 0, list[2].PrimaryPart.Position.Z)).Magnitude
+		end
+		T.check(#list == 2 and gap > 4, "DEV pets: a second Spawn stands beside the first one", #list .. " models, " .. string.format("%.1f", gap) .. " studs apart")
+		T.check(Show.Handle("Spawn", { PetId = "mochi_slime", Stage = 2 }) == false and Show.Handle("Spawn", { PetId = "nope", Stage = 0 }) == false
+			and Show.Handle("Spawn", { PetId = "cloudy_dragon", Stage = 1.5 }) == false and #models() == 2,
+			"DEV pets: a payload with a stage the pet does not have, an unknown pet or a bad stage builds nothing")
+
+		-- Evolve: the Cloudy Dragon's whole line, normal -> evolved -> evolved II
+		local d1, d2 = Fx.Duration(1), Fx.Duration(2)
+		T.check(d1 > 2 and d1 < 8 and d2 >= d1 and d2 < 9, "DEV pets: an evolution lasts a few seconds (" .. string.format("%.1f / %.1f s", d1, d2) .. ")")
+		KC.toClient("DevPetShow", "Evolve", { Steps = { { PetId = "cloudy_dragon", From = 0, To = 1 }, { PetId = "cloudy_dragon", From = 1, To = 2 } } })
+		advance(0.3)
+		T.check(Show.Busy() and #models() == 1 and models()[1]:GetAttribute("DevPetStage") == 0, "DEV pets: Evolve clears the showcase and shows the normal pet first", #models() .. " models")
+		advance(1.4)
+		local fxFolder = Show.Folder() and Show.Folder():FindFirstChild("EvolutionFx")
+		local effects, badFlags = 0, 0
+		for _, d in ipairs(fxFolder and fxFolder:GetDescendants() or {}) do
+			if d:IsA("BasePart") then
+				effects = effects + 1
+				if not (d.Anchored and not d.CanCollide and not d.CanTouch and not d.CanQuery and not d.CastShadow) then
+					badFlags = badFlags + 1
+				end
+			end
+		end
+		T.check(fxFolder ~= nil and fxFolder:FindFirstChildOfClass("Highlight") ~= nil and effects >= 30, "DEV pets: while it evolves: a glow (Highlight), runes, motes and a pillar of light", effects .. " effect parts")
+		T.eq(badFlags, 0, "DEV pets: every effect part is anchored, CanCollide / CanTouch / CanQuery / CastShadow off")
+		advance(d1 + d2 + 2.5)
+		list = models()
+		local final = list[1]
+		T.check(not Show.Busy() and #list == 1 and final:GetAttribute("DevPetStage") == 2, "DEV pets: the line ends with the second evolution, alone in the showcase", #list .. " models")
+		T.check(Show.Folder():FindFirstChild("EvolutionFx") == nil, "DEV pets: the evolution's effects are all gone at the end")
+		local fresh = PB.Build(PC.Get("cloudy_dragon"), { Evolved = 2 })
+		T.check(math.abs(sizeSum(final) - sizeSum(fresh)) < 0.01 * sizeSum(fresh), "DEV pets: the evolved pet ends at full size (the same part sizes as a fresh build)", string.format("%.2f vs %.2f", sizeSum(final), sizeSum(fresh)))
+		fresh:Destroy()
+		T.check(CollectionService:HasTag(final, "NC_Showcase") and final:FindFirstChild("DevPetTag", true) ~= nil, "DEV pets: ...and rests like a spawned pet (showcase tag and name tag)")
+
+		-- Lineup: eight pets in rows, none on top of another
+		local ids = {}
+		for i = 1, 8 do
+			ids[i] = PC.Pets[i].Id
+		end
+		KC.toClient("DevPetShow", "Lineup", { Stage = 1, PetIds = ids })
+		advance(3)
+		list = models()
+		local closest = math.huge
+		for i = 1, #list do
+			for j = i + 1, #list do
+				local a, b = list[i].PrimaryPart.Position, list[j].PrimaryPart.Position
+				closest = math.min(closest, (Vector3.new(a.X, 0, a.Z) - Vector3.new(b.X, 0, b.Z)).Magnitude)
+			end
+		end
+		T.check(not Show.Busy() and #list == 8 and closest > 3, "DEV pets: Lineup clears and stands every pet in rows, none on top of another", #list .. " models, closest " .. string.format("%.1f", closest) .. " studs")
+
+		-- Clear in the middle of an evolution stops it and removes everything
+		KC.toClient("DevPetShow", "Evolve", { Steps = { { PetId = "pebble_pup", From = 0, To = 1 } } })
+		advance(1.2)
+		KC.toClient("DevPetShow", "Clear", {})
+		advance(0.5)
+		T.check(Show.Count() == 0 and not Show.Busy() and #Show.Folder():GetChildren() == 0 and Fx.Count() == 0, "DEV pets: Clear stops a running evolution and removes every showcase pet and effect")
+
+		-- EvolutionFx on its own: Stop() ends at once with the evolved pet at rest where it stands
+		local def = PC.Get("aurora_fox")
+		local a, b = PB.Build(def, { Evolved = 1 }), PB.Build(def, { Evolved = 2 })
+		local pose = CFrame.new(400, 330, 400) * CFrame.Angles(0, 1, 0)
+		a:PivotTo(pose)
+		a.Parent = workspace
+		local c1, c2 = PB.EvolutionColors(def, 2)
+		local h = Fx.Play(a, b, pose, { Stage = 2, Colors = { c1, c2 } })
+		advance(0.8)
+		T.check(not h.Done and Fx.Count() == 1 and b.Parent == nil, "DEV pets: EvolutionFx.Play is running (the evolved pet not out yet)")
+		h.Stop()
+		local off = (b.PrimaryPart.Position - pose.Position).Magnitude
+		T.check(h.Done and a.Parent == nil and b.Parent ~= nil and off < 0.01 and Fx.Count() == 0, "DEV pets: Stop() ends it at once: the old pet gone, the evolved one at rest at the pose", string.format("%.3f studs off", off))
+		b:Destroy()
+		T.check(typeof(c1) == "Color3" and typeof(c2) == "Color3", "DEV pets: PetBuilder.EvolutionColors gives two colours")
+		KC.flushErrors("dev pets")
+		KC.flushWarnings("dev pets")
 	end)
 
 	S.client_dev_mobile = guarded("client_dev_mobile", function()

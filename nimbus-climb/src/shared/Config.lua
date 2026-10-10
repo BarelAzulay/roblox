@@ -80,6 +80,8 @@ Config.Remotes = {
 	"RouletteResult", -- (result:table)    see ARCHITECTURE_V2.md
 	"OpenPanel", -- (panelId:string, args:table|nil)  e.g. ("Shop", {Tab="Roulette", RouletteId="Cloud"})
 	"TutorialState", -- (state:table)  v3, see ARCHITECTURE_V3.md
+	"DevPetShow", -- (action:string, payload:table)  developer pet showcase for the developer's own client:
+	--   Spawn {PetId, Stage} / Lineup {Stage, PetIds} / Evolve {Steps = {{PetId, From, To}...}} / Clear {}
 	-- client -> server
 	"Dash", -- ()
 	"LeaveParty", -- ()
