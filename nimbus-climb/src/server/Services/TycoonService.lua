@@ -5,7 +5,9 @@
 --   claims that plot for the session: one plot per player, refused during a match and while the save is still
 --   loading. SpotService keeps the plot <-> player map (GetSpot answers the claimed plot). The SAVED progress is the
 --   player's Home build (profile Home), not a plot number: it is rebuilt on whichever plot they claim. Leaving
---   releases the plot (the build is cleared, the gate reads "Claim Home" again).
+--   releases the plot (the build is cleared, the gate reads "Claim Home" again). A claim also re-derives
+--   Home.Level from the stations (TycoonCatalog.HomeLevelOf) when an older save disagrees. The gate's prompt must be
+--   triggered from near the gate (its range + a little slack).
 -- * Buy pads: HomeBuilder.SetPads shows TycoonCatalog.AvailablePads(home) as pads `Pad_<StationId>` with a
 --   ProximityPrompt `BuyPrompt` (attributes StationId, OwnerUserId). A purchase (pad or the Home window's "Upgrade")
 --   is validated here: the player owns that plot, the station is in AvailablePads and not locked
@@ -20,8 +22,9 @@
 --   inside the Station_Collector model; added here when HomeBuilder made none), a part named CollectPad inside the
 --   Collector (step on it), or HomeAction "Collect".
 -- * Offline earnings: when the profile loads, the Vault pays TycoonCatalog.OfflineEarnings for the time since
---   Home.LastSeen with AddCash and a "While you were away" side toast; LastSeen is refreshed every 30 s while the
---   player is online, on leave and on shutdown (no double pay: LastSeen is written in the same step).
+--   Home.LastSeen with AddCash and a "While you were away" side toast. LastSeen is written in the same step as the
+--   payout (no double pay), then refreshed every 15 s while the player is online, with every purchase / prestige /
+--   garden change (income rises from there) and on shutdown.
 -- * House tiers (every 10 Home Levels: Villa 10, Manor 20, Sky Castle 30) and the station caps per tier come from
 --   TycoonCatalog (lock reasons on the pads). Prestige (Home Level 40 + Sky Castle): stations reset except the decor
 --   (KeepOnPrestige), Cash and the Collector reset, pets / food / garden choices are kept, +1 star (x1.25 income
@@ -65,7 +68,7 @@ TycoonService.Released = Util.Signal() -- Fire(player, spotInfo)  (extra)
 
 local TICK = 1 -- seconds between income ticks
 local MAX_TICK_DT = 5 -- a stalled server never pays more than this many seconds in one tick
-local LASTSEEN_EVERY = 30 -- seconds between Home.LastSeen refreshes while online
+local LASTSEEN_EVERY = 15 -- seconds between Home.LastSeen refreshes while online (offline pay starts after 120 s)
 local PROFILE_WAIT = 90 -- seconds a joining player's home is waited for (then ProfileRebased takes over)
 local CLAIM_COOLDOWN = 0.5
 local BUY_COOLDOWN = 0.2
@@ -84,6 +87,7 @@ local MAX_ACTION_LENGTH = 24
 local MAX_SLOT = 64
 local GATE_PROMPT_LIFT = 3.5 -- the fallback ClaimPrompt anchor above the gate's ground point
 local CLAIM_DISTANCE = 12
+local CLAIM_SLACK = 15 -- studs past the prompt's MaxActivationDistance a claimer may stand (latency, big avatars)
 
 local initialized = false
 local running = false
@@ -342,16 +346,16 @@ local function validKeyString(key)
 	return type(key) == "string" and key ~= "" and #key <= MAX_ID_LENGTH
 end
 
--- def, tier of an Economy pet key (nil for junk keys, unknown pets and Combat pets).
+-- def, tier of an Economy pet key; nil, nil, reason for junk keys, unknown pets and Combat pets.
 local function economyDef(key, profile)
 	if not validKeyString(key) then
-		return nil
+		return nil, nil, "Unknown pet"
 	end
 	local def, tier = nil, "Normal"
 	if petKeys and type(petKeys.Parse) == "function" then
 		local parsed = petKeys.Parse(key)
 		if not parsed then
-			return nil
+			return nil, nil, "Unknown pet"
 		end
 		tier = parsed.Tier or "Normal"
 		if type(petKeys.DefOf) == "function" then
@@ -363,10 +367,13 @@ local function economyDef(key, profile)
 	elseif petCatalog and type(petCatalog.Get) == "function" then
 		def = petCatalog.Get(key)
 	end
-	if type(def) ~= "table" or def.Role ~= "Economy" then
-		return nil
+	if type(def) ~= "table" then
+		return nil, nil, "Unknown pet"
 	end
-	return def, tier
+	if def.Role ~= "Economy" then
+		return nil, nil, "Only Economy pets can work in the Garden"
+	end
+	return def, tier, nil
 end
 
 local function ownedCount(profile, key)
@@ -439,11 +446,16 @@ local function incomeOf(player, home)
 	return income, parts, valid
 end
 
-local function capOf(home, income)
+-- The Collector cap. `valid` = the garden pets that really earn ({ [slot] = key }): only they may raise the cap
+-- (TycoonCatalog.CollectorCap also counts the raw home.Garden keys at level 1).
+local function capOf(home, income, valid)
 	if not catalog then
 		return 0
 	end
+	local garden = home.Garden
+	home.Garden = valid or {}
 	local ok, cap = pcall(catalog.CollectorCap, home, income)
+	home.Garden = garden
 	if ok and isFinite(cap) and cap >= 0 then
 		return cap
 	end
@@ -507,6 +519,11 @@ local function prepareCollector(index, info)
 	if typeof(folder) ~= "Instance" then
 		return
 	end
+	local hooks = collectHooks[index]
+	if not hooks then
+		hooks = setmetatable({}, { __mode = "k" }) -- also marks the plot as scanned (rescans follow station changes)
+		collectHooks[index] = hooks
+	end
 	local station = nil
 	for _, d in ipairs(folder:GetDescendants()) do
 		if d.Name == "Station_Collector" and (d:IsA("Model") or d:IsA("BasePart") or d:IsA("Folder")) then
@@ -516,11 +533,6 @@ local function prepareCollector(index, info)
 	end
 	if not station then
 		return
-	end
-	local hooks = collectHooks[index]
-	if not hooks then
-		hooks = setmetatable({}, { __mode = "k" })
-		collectHooks[index] = hooks
 	end
 	local hasPrompt = false
 	local firstPart = nil
@@ -631,7 +643,7 @@ local function syncPlot(player, home, income, valid)
 		local parts
 		income, parts, valid = incomeOf(player, home)
 	end
-	showCollector(index, home.CollectorCash, capOf(home, income), income)
+	showCollector(index, home.CollectorCash, capOf(home, income, valid), income)
 	local s = shown[index] or {}
 	shown[index] = s
 	local level, stars = homeLevelOf(home), starsOf(home)
@@ -773,7 +785,7 @@ function TycoonService.Claim(player, index)
 	end
 	local home = getHome(player)
 	if not home then
-		return false, "Your home is still loading - try again in a moment"
+		return false, "Your home is still loading..."
 	end
 	local ok, reason = spotService.Claim(player, index)
 	if not ok then
@@ -783,6 +795,14 @@ function TycoonService.Claim(player, index)
 	plots[player] = index
 	plotOwner[index] = player
 	lastTick[player] = os.clock()
+	-- Home.Level always mirrors the stations (an old or hand-edited save may disagree)
+	local level = homeLevelOf(home)
+	if home.Level ~= level then
+		mutateHome(player, function(live)
+			live.Level = homeLevelOf(live)
+			return true
+		end)
+	end
 
 	-- a clean plot, then the saved build on top of it
 	hb("ClearPlot", info)
@@ -794,11 +814,10 @@ function TycoonService.Claim(player, index)
 
 	TycoonService.Claimed:Fire(player, info)
 	TycoonService.HomeChanged:Fire(player)
-	local level = homeLevelOf(home)
 	if level > 0 then
-		notify(player, "Welcome home! Your home is rebuilt (Home Level " .. level .. ").", "good", 5)
+		notify(player, "Welcome home! Rebuilt at Home Level " .. level .. ".", "good", 5)
 	else
-		notify(player, "Welcome home! Step on the glowing pad to build your first Cloud Press.", "good", 6)
+		notify(player, "Welcome home! Use the glowing pads to build.", "good", 6)
 	end
 	return true, nil
 end
@@ -838,7 +857,44 @@ function TycoonService.Release(player)
 	end
 end
 
-local function onClaimPrompt(player, index)
+-- The prompt's world position (its part or attachment), or nil.
+local function promptPosition(prompt)
+	local parent = prompt.Parent
+	if typeof(parent) ~= "Instance" then
+		return nil
+	end
+	if parent:IsA("BasePart") then
+		return parent.Position
+	end
+	if parent:IsA("Attachment") then
+		return parent.WorldPosition
+	end
+	if parent:IsA("Model") then
+		local ok, pivot = pcall(function()
+			return parent:GetPivot()
+		end)
+		if ok and typeof(pivot) == "CFrame" then
+			return pivot.Position
+		end
+	end
+	return nil
+end
+
+-- A claim needs the player AT the gate (the engine checks prompt range too; this also covers a stray trigger).
+local function nearPrompt(player, prompt)
+	local at = promptPosition(prompt)
+	local root = Util.GetRoot(player)
+	if not at or not root then
+		return at == nil -- no position to compare: allow; no character: refuse
+	end
+	local reach = (tonumber(prompt.MaxActivationDistance) or CLAIM_DISTANCE) + CLAIM_SLACK
+	return (root.Position - at).Magnitude <= reach
+end
+
+local function onClaimPrompt(player, index, prompt)
+	if prompt and not nearPrompt(player, prompt) then
+		return
+	end
 	if not cooldown(player, "Claim", CLAIM_COOLDOWN) or not spend(player) then
 		return
 	end
@@ -856,20 +912,20 @@ local function milestoneToasts(player, before, after)
 	local levelBefore, levelAfter = homeLevelOf(before), homeLevelOf(after)
 	local houseBefore, houseAfter = stationLevel(before, "House"), stationLevel(after, "House")
 	if houseAfter > houseBefore and houseAfter >= 2 then
-		notify(player, "Your " .. houseTierName(houseAfter) .. " is ready! Your stations can level higher now.", "good", 5)
+		notify(player, houseTierName(houseAfter) .. " built! Stations can level higher.", "good", 5)
 	end
 	local tiers = catalog.HouseTiers or {}
 	for i, tier in ipairs(tiers) do
 		local need = tonumber(tier.HomeLevel) or 0
 		if i >= 2 and need > 0 and levelBefore < need and levelAfter >= need and houseAfter < i then
-			notify(player, "Home Level " .. need .. "! You can build the " .. tostring(tier.Name) .. " now.", "good", 5)
+			notify(player, "Home Level " .. need .. ": the " .. tostring(tier.Name) .. " can be built!", "good", 5)
 		end
 	end
 	if type(catalog.CanPrestige) == "function" then
 		local wasReady = catalog.CanPrestige(before)
 		local isReady = catalog.CanPrestige(after)
 		if isReady and not wasReady then
-			notify(player, "Prestige is ready! Use the star pad at your home.", "good", 6)
+			notify(player, "Prestige is ready at your home!", "good", 6)
 		end
 	end
 end
@@ -892,11 +948,11 @@ function TycoonService.Buy(player, stationId)
 		return false, "Unknown station"
 	end
 	if not plots[player] then
-		return false, "Claim a home first: press E at a free gate"
+		return false, "Claim a home first (E at a free gate)"
 	end
 	local home = getHome(player)
 	if not home then
-		return false, "Your home is still loading - try again in a moment"
+		return false, "Your home is still loading..."
 	end
 	local ok, price, reason = catalog.CheckPurchase(home, stationId)
 	if not ok then
@@ -908,7 +964,7 @@ function TycoonService.Buy(player, stationId)
 	end
 	price = math.ceil(price)
 	if price > getCash(player) then
-		return false, "Not enough Cash: " .. stationName(stationId) .. " costs " .. money(price)
+		return false, "Not enough Cash: need " .. money(price)
 	end
 	local level = stationLevel(home, stationId)
 
@@ -933,6 +989,9 @@ function TycoonService.Buy(player, stationId)
 		end
 		live.Stations[stationId] = level + 1
 		live.Level = homeLevelOf(live)
+		if offlineDone[player] then
+			live.LastSeen = os.time() -- income just rose: the next offline payout starts from here
+		end
 		return true
 	end)
 	if not wrote then
@@ -940,7 +999,7 @@ function TycoonService.Buy(player, stationId)
 			dataService.AddCash(player, price) -- the home write was refused: give the cash back
 		end
 		if price > getCash(player) then
-			return false, "Not enough Cash: " .. stationName(stationId) .. " costs " .. money(price)
+			return false, "Not enough Cash: need " .. money(price)
 		end
 		return false, "Could not build that right now"
 	end
@@ -971,7 +1030,7 @@ function TycoonService.Collect(player, quiet)
 	end
 	local index = plots[player]
 	if not index then
-		return false, "Claim a home first: press E at a free gate"
+		return false, "Claim a home first (E at a free gate)"
 	end
 	local take = 0
 	local ok = mutateHome(player, function(live)
@@ -1000,7 +1059,7 @@ function TycoonService.Collect(player, quiet)
 	end
 	-- stepping on the pad banks every second: its toast shows at most every few seconds
 	if not quiet or cooldown(player, "CollectToast", COLLECT_TOAST_GAP) then
-		notify(player, "+" .. money(take) .. " banked from the Collector", "good", 2.5)
+		notify(player, "+" .. money(take) .. " banked", "good", 2.5)
 	end
 	return true, take
 end
@@ -1017,11 +1076,11 @@ function TycoonService.Prestige(player)
 		return false, "Not in the game"
 	end
 	if not plots[player] then
-		return false, "Claim a home first: press E at a free gate"
+		return false, "Claim a home first (E at a free gate)"
 	end
 	local home = getHome(player)
 	if not home then
-		return false, "Your home is still loading - try again in a moment"
+		return false, "Your home is still loading..."
 	end
 	local can, reason = catalog.CanPrestige(home)
 	if not can then
@@ -1058,6 +1117,9 @@ function TycoonService.Prestige(player)
 		live.Prestige = stars
 		live.CollectorCash = 0
 		live.Level = homeLevelOf(live)
+		if offlineDone[player] then
+			live.LastSeen = os.time()
+		end
 		return true
 	end)
 	if not wrote then
@@ -1086,7 +1148,7 @@ function TycoonService.Prestige(player)
 	notify(player, text .. ".", "good", 6)
 	local fusionAt = catalog.Prestige and tonumber(catalog.Prestige.FusionUnlock) or 1
 	if stars == fusionAt then
-		notify(player, "The Fusion Machine pad is unlocked at your home!", "good", 6)
+		notify(player, "Fusion Machine unlocked at your home!", "good", 6)
 	end
 	TycoonService.Prestiged:Fire(player, stars)
 	TycoonService.HomeChanged:Fire(player)
@@ -1126,27 +1188,28 @@ function TycoonService.GardenSet(player, slot, key)
 	end
 	local home = getHome(player)
 	if not home then
-		return false, "Your home is still loading - try again in a moment"
+		return false, "Your home is still loading..."
 	end
 	if slot > gardenSlots(home) then
 		if gardenSlots(home) <= 0 then
 			return false, "Build the Pet Garden first"
 		end
-		return false, "That garden slot is locked: upgrade the Pet Garden"
+		return false, "Garden slot locked: upgrade the Garden"
 	end
 	local profile = getProfile(player)
 	local def = nil
 	if key ~= nil then
-		def = economyDef(key, profile)
+		local tier, why
+		def, tier, why = economyDef(key, profile)
 		if not def then
-			return false, "Only Economy pets can work in the Garden"
+			return false, why or "Only Economy pets can work in the Garden"
 		end
 	end
 
 	local why = nil
 	local wrote = mutateHome(player, function(live)
 		if slot > gardenSlots(live) then
-			why = "That garden slot is locked: upgrade the Pet Garden"
+			why = "Garden slot locked: upgrade the Garden"
 			return false
 		end
 		if type(live.Garden) ~= "table" then
@@ -1181,6 +1244,9 @@ function TycoonService.GardenSet(player, slot, key)
 			return false
 		end
 		live.Garden[slot] = key
+		if offlineDone[player] then
+			live.LastSeen = os.time()
+		end
 		return true
 	end)
 	if not wrote then
@@ -1233,7 +1299,8 @@ function TycoonService.CollectorCap(player)
 	if not home then
 		return 0
 	end
-	return capOf(home, (incomeOf(player, home)))
+	local income, _, valid = incomeOf(player, home)
+	return capOf(home, income, valid)
 end
 
 function TycoonService.GoHome(player)
@@ -1248,7 +1315,7 @@ function TycoonService.GoHome(player)
 	if moved and not plots[player] then
 		notify(player, "Press E at the gate to claim this home!", "info", 4)
 	elseif not moved and not plots[player] then
-		toastOnce(player, "Every home is taken right now - one frees up when a player leaves.", "bad")
+		toastOnce(player, "Every home is taken right now.", "bad")
 	end
 	return moved
 end
@@ -1294,18 +1361,19 @@ local function onHomeLoaded(player)
 			amount = math.floor(value)
 		end
 	end
-	local level = homeLevelOf(home)
-	lastSeenAt[player] = os.clock()
+	lastSeenAt[player] = os.clock() -- the periodic refresh takes over from here
+	if amount < 1 and isFinite(last) and last > 0 then
+		return -- nothing paid: the stored LastSeen may stay until the first refresh (no needless write)
+	end
+	-- (a home seen for the first time - a new or migrated save - gets its LastSeen right away)
+	-- the payout and the new LastSeen in the same step: a second load can never pay the same absence again
 	local wrote = mutateHome(player, function(live)
 		live.LastSeen = now
-		if live.Level ~= level then
-			live.Level = level
-		end
 		return true
 	end)
-	if wrote and amount >= 1 and dataService.AddCash(player, amount) then
+	if wrote and dataService.AddCash(player, amount) then
 		task.delay(OFFLINE_TOAST_DELAY, function()
-			notify(player, "While you were away (" .. durationText(away) .. ") your Vault earned " .. money(amount) .. "!", "good", 7)
+			notify(player, "While you were away: +" .. money(amount) .. " (" .. durationText(away) .. ")", "good", 7)
 		end)
 	end
 end
@@ -1340,10 +1408,9 @@ local function forget(player)
 	toastAt[player] = nil
 end
 
+-- (LastSeen is NOT written here: DataService's leave save may already be running, and a change now would only
+-- turn the entry into an orphan that needs another write. The periodic refresh keeps it within LASTSEEN_EVERY.)
 local function onPlayerRemoving(player)
-	if offlineDone[player] then
-		touchLastSeen(player)
-	end
 	departed[player] = true
 	TycoonService.Release(player)
 	forget(player)
@@ -1362,7 +1429,7 @@ local function tickPlayer(player, index, now)
 		return
 	end
 	local income, _, valid = incomeOf(player, home)
-	local cap = capOf(home, income)
+	local cap = capOf(home, income, valid)
 	local cash = tonumber(home.CollectorCash) or 0
 	if income > 0 and dt > 0 and cash < cap then
 		local gain = income * dt
@@ -1546,7 +1613,7 @@ local function onPromptTriggered(prompt, player)
 			index = plotIndexOf(prompt)
 		end
 		if validIndex(index) then
-			onClaimPrompt(player, index)
+			onClaimPrompt(player, index, prompt)
 		end
 	elseif name == "BuyPrompt" then
 		onBuyPrompt(player, prompt)

@@ -1011,11 +1011,11 @@ local function scheduleWelcome(player)
 		end
 		local last = lastSpotIndex(player)
 		if last and not owners[last] then
-			notify(player, "Welcome back! Press E at your gate (home #" .. tostring(last) .. ").", "info", 6)
+			notify(player, "Welcome back! Press E at your gate (#" .. tostring(last) .. ").", "info", 6)
 		elseif SpotService.FindFreeSpot(nil, nil) then
-			notify(player, "Pick a free home: press E at its gate to claim it!", "info", 6)
+			notify(player, "Pick a free home: press E at its gate!", "info", 6)
 		else
-			notify(player, "Every home is taken right now - one frees up when a player leaves.", "info", 6)
+			notify(player, "Every home is taken right now.", "info", 6)
 		end
 	end)
 end
@@ -1108,7 +1108,7 @@ local function onGoToSpot(player)
 		return
 	end
 	if not spotOf[player] and not SpotService.SuggestSpot(player) then
-		notify(player, "Every home is taken right now - one frees up when a player leaves.", "bad", 3)
+		notify(player, "Every home is taken right now.", "bad", 3)
 		return
 	end
 	local moved = SpotService.Teleport(player)

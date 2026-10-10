@@ -19,6 +19,8 @@
 --   storm-altar                     StormAltar.Build(lobbyInfo) after the lobby (server/Services/StormAltar.lua)
 --   skydragon                       the Sage Dragon SkyDragonController builds (client world)
 --   token[:golden]                  TokenService.MakeTokenPart (a normal or a golden coin)
+--   home:<StationId>[:<level>|all]  a Phase 2 home station (HomeBuilder.BuildStationModel), see BUILDERS.home
+--   homeplot[:<tier>[:pads]]        a fully built home plot on the lobby for house tier 1-4, see BUILDERS.homeplot
 --   module:<path>:<func>[:lobby]    generic: require src/<path> (e.g. shared/Foo, server/Services/Foo) and call
 --                                   <func>() (or <func>(lobbyInfo) with :lobby); the result may be an Instance, a
 --                                   table with Model / Folder / Root, or nothing (then the new Workspace children)
@@ -530,6 +532,122 @@ BUILDERS.module = function(path, func, extra)
 	end
 	return out
 end
+-- Phase 2 homes (server/Services/HomeBuilder.lua):
+--   home:<StationId>[:<level>|all]   one station model at the origin (front -Z); "all" = every level, one model each
+--   homerow:<StationId>[:<levels>]   levels side by side in one model (compare sizes at one scale), e.g. 1,4,7,10
+--   homeplot[:<tier>[:pads]]       spot 1 of the real lobby built up for house tier 1-4 (every station at the cap of
+--                                    that tier; tier 4 = everything maxed), owned by a stand-in player; ":pads" also
+--                                    places the buy pads TycoonCatalog.AvailablePads would show
+local function homeBuilder()
+	local HB = req("server/Services/HomeBuilder", true)
+	if not HB then
+		fail("server/Services/HomeBuilder.lua does not exist yet")
+	end
+	return HB
+end
+
+BUILDERS.home = function(id, level)
+	local HB = homeBuilder()
+	local TC = req("shared/TycoonCatalog")
+	local def = TC.Get(id or "")
+	if not def or def.Kind == "Prestige" then
+		local ids = {}
+		for _, d in ipairs(TC.Stations) do
+			ids[#ids + 1] = d.Id
+		end
+		fail("unknown station '" .. tostring(id) .. "'. Stations: " .. table.concat(ids, ", "))
+	end
+	local levels = {}
+	if level == "all" then
+		for l = 1, def.MaxLevel do
+			levels[#levels + 1] = l
+		end
+	else
+		levels[1] = tonumber(level) or def.MaxLevel
+	end
+	local out = {}
+	for _, l in ipairs(levels) do
+		local m = HB.BuildStationModel(id, l)
+		if not m then
+			fail("HomeBuilder.BuildStationModel(" .. id .. ", " .. l .. ") returned nothing")
+		end
+		m.Parent = Workspace
+		out[#out + 1] = { root = m, label = def.Name .. "  Lv " .. l, sub = id .. ":" .. l, facing = { 0, 0, -1 } }
+	end
+	return out
+end
+
+-- homerow:<StationId>[:<l1,l2,...>]  the given levels (default: every level) side by side, ONE model, one scale
+BUILDERS.homerow = function(id, list)
+	local HB = homeBuilder()
+	local TC = req("shared/TycoonCatalog")
+	local def = TC.Get(id or "")
+	if not def or def.Kind == "Prestige" then
+		fail("unknown station '" .. tostring(id) .. "'")
+	end
+	local levels = {}
+	for v in tostring(list or ""):gmatch("[^,]+") do
+		levels[#levels + 1] = tonumber(v)
+	end
+	if #levels == 0 then
+		for l = 1, def.MaxLevel do
+			levels[#levels + 1] = l
+		end
+	end
+	local folder = Instance.new("Model")
+	folder.Name = "Row_" .. id
+	local step = math.min(def.Slot.Footprint.X, 40) + 4
+	for i, l in ipairs(levels) do
+		local m = HB.BuildStationModel(id, l)
+		if m then
+			for _, d in ipairs(m:GetDescendants()) do
+				if d:IsA("BasePart") then
+					d.CFrame = CFrame.new((i - 1) * step, 0, 0) * d.CFrame
+				end
+			end
+			m.Parent = folder
+		end
+	end
+	folder.Parent = Workspace
+	return { { root = folder, label = def.Name .. " levels " .. table.concat(levels, ","), sub = id, facing = { 0, 0, -1 } } }
+end
+
+BUILDERS.homeplot = function(tier, extra)
+	local HB = homeBuilder()
+	local TC = req("shared/TycoonCatalog")
+	local info = ensureLobby()
+	tier = math.max(1, math.min(4, tonumber(tier) or 4))
+	HB.Init(info)
+	local spot = info.Spots[1]
+	local owner = nil
+	pcall(function()
+		owner = Mock.AddPlayer("HomeOwner", 777001)
+	end)
+	HB.SetOwner(spot, owner)
+	local tierId = TC.HouseTiers[tier].Id
+	local home = { Stations = {}, Prestige = (tier == 4) and 1 or 0 }
+	for _, def in ipairs(TC.Stations) do
+		local cap = def.TierCaps[tierId] or 0
+		if def.Id == "House" then
+			cap = tier
+		end
+		if def.ComingSoon and tier < 4 then
+			cap = 0
+		end
+		if cap > 0 then
+			home.Stations[def.Id] = math.min(cap, def.MaxLevel)
+		end
+	end
+	HB.BuildHome(spot, home)
+	if extra == "pads" then
+		HB.SetPads(spot, TC.AvailablePads(home))
+	end
+	HB.SetCollector(spot, 1234, 5000)
+	Mock.Advance(0.2)
+	local parts = HB.PartCount(spot)
+	return { { root = spot.Folder, label = "Home plot: " .. TC.HouseTiers[tier].Name, sub = "Home folder: " .. parts .. " parts", facing = { spot.PlotCFrame.LookVector.X, 0, spot.PlotCFrame.LookVector.Z } } }
+end
+
 BUILDERS["storm_altar"] = BUILDERS["storm-altar"]
 BUILDERS.stormaltar = BUILDERS["storm-altar"]
 BUILDERS.npc = BUILDERS.npcs

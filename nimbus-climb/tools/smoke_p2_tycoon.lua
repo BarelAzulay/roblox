@@ -217,8 +217,14 @@ local function givePet(p, key, n)
 	return ok
 end
 
+-- walks to the gate (just outside it, like a player) and presses E on its ClaimPrompt
 local function claim(p, index)
 	local prompt = claimPromptOf(index)
+	local SS = mod("SpotService")
+	local gate = SS.GateCFrame(spots()[index])
+	if gate and p.Character then
+		Mock.Teleport(p, gate * CFrame.new(0, 3, -5))
+	end
 	if prompt then
 		Mock.Trigger(prompt, p)
 	end
@@ -305,6 +311,7 @@ S.p2tycoon_claim = guarded("p2tycoon_claim", function()
 	T.eq(info.NameLabel.Text, a.DisplayName, "tycoon: the nameplate shows the owner")
 	T.eq(info.SubLabel.Text, "Home Level 0", "tycoon: ...and 'Home Level 0' for a new home")
 	T.check(K.notified(a, "Welcome home", "good", mark), "tycoon: a 'Welcome home' side toast")
+	T.eq(claimPromptOf(index).Enabled, false, "tycoon: the gate's ClaimPrompt turns off once the plot is claimed")
 
 	-- double claim, someone else's plot, claiming in a match, spam
 	local other = freeIndex(index)
@@ -321,11 +328,18 @@ S.p2tycoon_claim = guarded("p2tycoon_claim", function()
 	claim(b, other)
 	T.check(SS.GetSpot(b) == nil and SS.GetOwner(other) == nil, "tycoon: claiming is refused during a match")
 	b:SetAttribute(Config.Attr.InMatch, false)
+	Mock.Teleport(b, config().Lobby.Origin + Vector3.new(0, 4, 0))
+	Mock.Trigger(claimPromptOf(other), b)
+	advance(0.6)
+	T.check(SS.GetSpot(b) == nil and SS.GetOwner(other) == nil, "tycoon: a ClaimPrompt triggered from far away (the plaza) claims nothing")
+	local gateOther = SS.GateCFrame(spots()[other])
+	Mock.Teleport(b, gateOther * CFrame.new(0, 3, -5))
 	local prompt = claimPromptOf(other)
 	for _ = 1, 25 do
 		Mock.Trigger(prompt, b)
 	end
 	local third = freeIndex(other)
+	Mock.Teleport(b, SS.GateCFrame(spots()[third]) * CFrame.new(0, 3, -5))
 	Mock.Trigger(claimPromptOf(third), b)
 	advance(0.6)
 	T.check(SS.GetSpot(b) == spots()[other] and SS.GetOwner(third) == nil, "tycoon: 25 claim presses in one frame claim exactly one plot")
@@ -351,6 +365,7 @@ S.p2tycoon_claim = guarded("p2tycoon_claim", function()
 		stale = stale + 1
 	end
 	T.eq(stale, 0, "tycoon: ...and no station of the old build stays on it")
+	T.eq(claimPromptOf(other).Enabled, true, "tycoon: ...and back on when the plot is released")
 	local c = join("TyClaimC")
 	claim(c, other)
 	T.check(SS.GetSpot(c) == oi, "tycoon: a released plot can be claimed again")
@@ -389,6 +404,9 @@ S.p2tycoon_progress = guarded("p2tycoon_progress", function()
 	-- the free first press from its pad (E on the BuyPrompt)
 	local cash0 = cashOf(p)
 	local prompt, fake = buyPromptOf(index, "Press1", p.UserId)
+	if withBuilder then
+		T.check(not fake and prompt:GetAttribute("OwnerUserId") == p.UserId, "tycoon progress: the claim put HomeBuilder's Press 1 pad (BuyPrompt, OwnerUserId) on the plot")
+	end
 	Mock.Trigger(prompt, p)
 	advance(0.3)
 	local home = Ty.GetHome(p)
@@ -429,7 +447,7 @@ S.p2tycoon_progress = guarded("p2tycoon_progress", function()
 	advance(0.1)
 	home = Ty.GetHome(p)
 	T.eq(cashOf(p) - before, inCollector, "tycoon progress: HomeAction 'Collect' banks the whole Cash of the Collector")
-	T.check(home.CollectorCash < 1, "tycoon progress: ...the Collector is empty afterwards", tostring(home.CollectorCash))
+	T.check(home.CollectorCash < 1 + income * 1.5, "tycoon progress: ...the Collector is empty afterwards (at most one new tick)", tostring(home.CollectorCash))
 	T.check(K.notified(p, "banked", "good", mark), "tycoon progress: ...with a 'banked' side toast")
 
 	-- the cap (Collector + Vault)
@@ -442,6 +460,69 @@ S.p2tycoon_progress = guarded("p2tycoon_progress", function()
 	T.check(near(home.CollectorCash, cap, 1e-6), "tycoon progress: the Collector stops at its cap (" .. cap .. ")", tostring(home.CollectorCash))
 	homeAction(p, "Collect")
 	advance(0.6)
+
+	-- the Collector's own prompt / step-on pad (HomeBuilder's, or added here when the Collector model has none)
+	local station, cp, pad = nil, nil, nil
+	if withBuilder then
+		station = stationModels(index).Collector
+		for _, d in ipairs(station and station:GetDescendants() or {}) do
+			if d:IsA("ProximityPrompt") and d.Name ~= "BuyPrompt" then
+				cp = d
+			elseif d.Name == "CollectPad" and d:IsA("BasePart") then
+				pad = d
+			end
+		end
+		T.check(cp ~= nil and pad ~= nil, "tycoon progress: HomeBuilder's Collector has a Collect prompt and a CollectPad")
+	else
+		station = Instance.new("Model")
+		station.Name = "Station_Collector"
+		station:SetAttribute("StationId", "Collector")
+		local body = Instance.new("Part")
+		body.Name = "Body"
+		body.Anchored = true
+		body.Parent = station
+		station.PrimaryPart = body
+		pad = Instance.new("Part")
+		pad.Name = "CollectPad"
+		pad.Anchored = true
+		pad.Parent = station
+		station.Parent = info.Folder
+		DataS.AddCash(p, Cat.PriceFor("Press1", 2))
+		Ty.Buy(p, "Press1") -- a station change rescans the plot
+		cp = body:FindFirstChild("CollectPrompt")
+		T.check(cp ~= nil and cp:IsA("ProximityPrompt") and cp.ActionText == "Collect", "tycoon progress: a Collector without a prompt gets a 'Collect' prompt")
+	end
+	if station then
+		if cp then
+			DataS.MutateHome(p, function(h)
+				h.CollectorCash = 30
+			end)
+			local c0 = cashOf(p)
+			Mock.Trigger(cp, p)
+			T.eq(cashOf(p) - c0, 30, "tycoon progress: E at the Collector banks it")
+			advance(0.6)
+		end
+		local stranger = join("TyStranger")
+		DataS.MutateHome(p, function(h)
+			h.CollectorCash = 20
+		end)
+		local c1 = cashOf(p)
+		if cp then
+			Mock.Trigger(cp, stranger)
+		end
+		if pad then
+			Mock.Touch(pad, K.root(stranger))
+		end
+		T.check(cashOf(p) == c1 and cashOf(stranger) == 0 and Ty.GetHome(p).CollectorCash >= 20, "tycoon progress: nobody else can bank someone's Collector")
+		if pad then
+			Mock.Touch(pad, K.root(p))
+			T.check(cashOf(p) - c1 >= 20, "tycoon progress: stepping on the Collector pad banks it", tostring(cashOf(p) - c1))
+		end
+		leave(stranger)
+		if not withBuilder then
+			station:Destroy()
+		end
+	end
 
 	-- greedy buyer: AddCash stands in for hours of income; always buys the cheapest unlocked pad
 	local Eco, Combat = petsByRole()
@@ -687,9 +768,9 @@ S.p2tycoon_exploits = guarded("p2tycoon_exploits", function()
 		homeAction(a, "Collect")
 		Ty.Collect(a)
 	end
-	advance(0.05)
-	T.check(cashOf(a) - cash1 == 40 and Ty.GetHome(a).CollectorCash < 1, "tycoon exploits: 60 collects in one frame pay the Collector out once",
-		"paid " .. (cashOf(a) - cash1))
+	local left = Ty.GetHome(a).CollectorCash
+	T.check(cashOf(a) - cash1 == 40 and near(left, 0.5, 1e-6), "tycoon exploits: 60 collects in one frame pay the Collector out once (whole Cash only)",
+		"paid " .. (cashOf(a) - cash1) .. ", left " .. tostring(left))
 	advance(2.0)
 
 	-- not enough cash: refused, nothing taken; never negative
@@ -795,6 +876,9 @@ S.p2tycoon_offline = guarded("p2tycoon_offline", function()
 	local home = Ty.GetHome(p)
 	local income = Ty.IncomePerSecond(p)
 	T.check(income > 0 and Cat.StationLevel(home, "Vault") == 1, "tycoon offline: (precondition) a home with a Vault earns", tostring(income))
+	advance(16) -- the periodic LastSeen refresh (every 15 s while online)
+	local seen = Ty.GetHome(p).LastSeen or 0
+	T.check(seen > 0 and os.time() - seen <= 16, "tycoon offline: LastSeen is refreshed while the player is online", tostring(seen))
 	leave(p)
 	advance(1.0)
 	T.check(SS.GetOwner(first) == nil, "tycoon offline: leaving released the plot")
@@ -816,6 +900,8 @@ S.p2tycoon_offline = guarded("p2tycoon_offline", function()
 	local cash2 = cashOf(p)
 	advance(2)
 	T.eq(cashOf(p), cash2, "tycoon offline: paid once (LastSeen moved on)")
+	T.check(K.notified(p, "Welcome back! Press E at your gate", "info", mark), "tycoon offline: a returning player whose last plot is free gets 'Welcome back! Press E at your gate'")
+	T.check(SS.GetSpot(p) == nil and SS.SuggestSpot(p) == spots()[first], "tycoon offline: ...and GoToSpot / the guide lead to that gate (SuggestSpot), nothing is claimed yet")
 
 	-- the saved build comes back on whichever plot is claimed
 	local blocker = join("TyBlock")
