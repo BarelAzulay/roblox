@@ -424,7 +424,7 @@ Config.Gems = {
 }
 
 -- Developer tools (owner only). The game's owner (and the extra UserIds in Admins, and everyone while testing in
--- Roblox Studio) gets a small DEV button and chat commands: /allpets, /tokens <n>, /reset, /tutorial, /skiptutorial,
+-- Roblox Studio) gets a small DEV button and chat commands: /allpets, /tokens <n>, /cash <n>, /gems <n>, /reset, /tutorial, /skiptutorial,
 -- /devhelp. Nobody else can use them: the server checks every request.
 Config.Dev = {
 	Enabled = true, -- master switch for the developer tools
@@ -432,6 +432,8 @@ Config.Dev = {
 	Admins = {}, -- extra Roblox UserIds allowed in the live game (the game's owner is always allowed)
 	StudioAutoGrant = false, -- true: in Studio, start every test with every pet and GrantTokens tokens
 	GrantTokens = 1000000, -- tokens added by the "+ tokens" button and by StudioAutoGrant
+	GrantCash = 1000000, -- Phase 2: Cash added by the "+ Cash" button (/cash n)
+	GrantGems = 1000, -- Phase 2: Gems added by the "+ Gems" button (/gems n)
 	MaxTokensPerCommand = 100000000,
 }
 

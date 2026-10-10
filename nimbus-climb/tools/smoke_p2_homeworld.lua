@@ -29,7 +29,8 @@
 --                   server re-enables), the owner's prompts stay; a new station pops in and ends exactly where the
 --                   server built it; the presses stamp (head moves, Puff emits) and pooled cloud blocks ride the belt
 --                   into the Collector; the Collector screen shows CollectorCash / CollectorCap ("FULL") and the tank
---                   fills; the Fusion swirl turns; the Garden's pets (GardenPets) stand on their cushions; the owner's pads dim when Cash cannot pay; far homes freeze and
+--                   fills; the Fusion swirl turns; the Garden's pets (GardenPets) and the Gym's (GymPets) stand on
+--                   their cushions / targets; the owner's pads dim when Cash cannot pay; far homes freeze and
 --                   recycle their blocks; nothing is created per frame; ClearPlot / removing the home cleans up; no
 --                   errors or warnings from HomeFx
 -- Plain Lua 5.1 syntax only.

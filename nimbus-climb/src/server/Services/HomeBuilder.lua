@@ -49,7 +49,7 @@
 --                              owner-only ProximityPrompt `CollectPrompt` (ActionText "Collect"). The Fusion Machine
 --                              has Swirl (a Model HomeFx spins) and `FusionPrompt` ("Fuse", owner only); the Kitchen
 --                              a FeedBowl; Garden / Gym carry Attachments Spot<i> (attribute Slot) on the cushion /
---                              target of every open place, where pets stand (HomeFx shows the Garden's pets).
+--                              target of every open place, where pets stand (HomeFx shows the GardenPets / GymPets).
 --     Pads/Pad_<StationId>     buy pads, 4 parts each (attributes StationId, OwnerUserId, NextLevel, Level, Price,
 --                              Locked ("" when unlocked), Title, LevelText, Kind, BuiltAt): a stone Base (walkable; it
 --                              carries the BuyPrompt and the BillboardGui `PadSign`), the state's neon Glow plate and a
@@ -62,8 +62,8 @@
 -- greedy voxel merge and kept as a template that is :Clone()d onto every plot. A fully built plot stays under
 -- ~900 parts (pads included; tools/smoke_p2_homeworld.lua walks a whole greedy progression and checks it). No
 -- server-side animation (Replication rule): HomeFx (client) pops stations in, bounces the presses, moves the cloud
--- blocks along the conveyor, fills and lights the Collector, spins the fusion swirl, shows the garden pets and hides
--- other players' pads. The art is sculpted on a 0.5 stud voxel grid (cell edges round half away from the model's
+-- blocks along the conveyor, fills and lights the Collector, spins the fusion swirl, shows the garden / gym pets and
+-- hides other players' pads. The art is sculpted on a 0.5 stud voxel grid (cell edges round half away from the model's
 -- axis, so the models stay symmetric).
 -- Texts follow the World text rule (pixel-sized billboard tags, surface signs at 50 px per stud with >= 0.6 stud
 -- letters). The only fonts are Theme roles. Plain Lua 5.1-compatible syntax only.

@@ -248,6 +248,26 @@ local function tokensLabel()
 	return "+" .. (text or Util.Commas(amount)) .. " tokens"
 end
 
+-- Phase 2: test amounts of Cash and Gems (Config.Dev.GrantCash / GrantGems).
+local function grantAmount(key, fallback)
+	local amount = tonumber(devConfig()[key])
+	if not amount or amount ~= amount or amount < 1 then
+		amount = fallback
+	end
+	return math.floor(amount)
+end
+
+local function amountLabel(amount, word)
+	local text = nil
+	if type(Theme.ShortNumber) == "function" then
+		local ok, short = pcall(Theme.ShortNumber, amount)
+		if ok and type(short) == "string" then
+			text = short
+		end
+	end
+	return "+" .. (text or Util.Commas(amount)) .. " " .. word
+end
+
 local function disarmReset()
 	Reset.Until = 0
 	Reset.Serial = Reset.Serial + 1
@@ -449,6 +469,8 @@ local function buildPanel(gui)
 	local specs = {
 		{ Id = "allpets", Text = "Give all pets", Style = "Green" },
 		{ Id = "tokens", Text = tokensLabel(), Style = "Gold" },
+		{ Id = "cash", Text = amountLabel(grantAmount("GrantCash", 1000000), "Cash"), Style = "Green" },
+		{ Id = "gems", Text = amountLabel(grantAmount("GrantGems", 1000), "Gems"), Style = "Blue" },
 		{ Id = "tutorial", Text = "Restart tutorial", Style = "Blue" },
 		{ Id = "skiptutorial", Text = "Skip tutorial", Style = "Pink" },
 		{ Id = "reset", Text = "Reset my data", Style = "Red" },
@@ -513,6 +535,14 @@ local function buildPanel(gui)
 		elseif id == "tokens" then
 			callback = panelPress(function()
 				send("tokens", grantTokens())
+			end)
+		elseif id == "cash" then
+			callback = panelPress(function()
+				send("cash", grantAmount("GrantCash", 1000000))
+			end)
+		elseif id == "gems" then
+			callback = panelPress(function()
+				send("gems", grantAmount("GrantGems", 1000))
 			end)
 		else
 			callback = panelPress(function()
