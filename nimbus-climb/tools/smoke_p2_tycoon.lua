@@ -313,6 +313,52 @@ S.p2tycoon_claim = guarded("p2tycoon_claim", function()
 	T.check(K.notified(a, "Welcome home", "good", mark), "tycoon: a 'Welcome home' side toast")
 	T.eq(claimPromptOf(index).Enabled, false, "tycoon: the gate's ClaimPrompt turns off once the plot is claimed")
 
+	-- the podium: the owner's best pet copy (pet keys), built standing still and animated by the CLIENT (NC_Showcase)
+	local Eco0 = petsByRole()
+	if Eco0 then
+		givePet(a, Eco0.Id, 1)
+	end
+	SS.Refresh(a)
+	advance(0.2)
+	local show = info.Folder:FindFirstChild("ShowcasePet", true)
+	if T.check(show ~= nil, "tycoon podium: the owner's best pet stands on the podium (ShowcasePet)") then
+		local anchored, parts = true, 0
+		for _, d in ipairs(show:GetDescendants()) do
+			if d:IsA("BasePart") then
+				parts = parts + 1
+				anchored = anchored and d.Anchored and not d.CanCollide
+			end
+		end
+		local CS = game:GetService("CollectionService")
+		T.check(CS:HasTag(show, "NC_Showcase") and show:GetAttribute("Ready") == true and show:GetAttribute("PetParts") == parts
+			and type(show:GetAttribute("HoverAmp")) == "number",
+			"tycoon podium: tagged NC_Showcase with Ready / PetParts / HoverAmp (ShowcaseController animates it on the client)")
+		T.check(anchored and parts > 0, "tycoon podium: every part Anchored and non-colliding (the server never moves it)")
+		local p0 = show:GetPivot()
+		advance(1.5)
+		T.check((show:GetPivot().Position - p0.Position).Magnitude < 1e-6 and (show:GetPivot().LookVector - p0.LookVector).Magnitude < 1e-6,
+			"tycoon podium: the server does not animate the showcase (no CFrame writes)")
+		local key = show:GetAttribute("PetId")
+		local keys = PK()
+		local parsed = keys and type(key) == "string" and keys.Parse(key)
+		if parsed and parsed.PetId and parsed.Tier == "Normal" then
+			givePet(a, keys.Make(parsed.PetId, "Golden"), 1)
+			SS.Refresh(a)
+			advance(0.2)
+			local golden = info.Folder:FindFirstChild("ShowcasePet", true)
+			local tag = info.Folder:FindFirstChild("ShowcaseTag", true)
+			local nameLabel = tag and tag:FindFirstChild("PetName", true)
+			local def = keys.DefOf(parsed.PetId .. "@Golden", mod("DataService").GetProfile(a))
+			T.check(golden ~= nil and golden:GetAttribute("PetId") == parsed.PetId .. "@Golden",
+				"tycoon podium: a Golden copy of the same pet takes the podium (pet keys, better tier wins the tie)",
+				golden and tostring(golden:GetAttribute("PetId")) or "none")
+			T.check(nameLabel ~= nil and def ~= nil and nameLabel.Text == tostring(def.DisplayName or def.Name),
+				"tycoon podium: ...and its tag names the copy", nameLabel and nameLabel.Text or "no tag")
+		else
+			T.info("*podium tier check skipped: the podium shows " .. tostring(key))
+		end
+	end
+
 	-- double claim, someone else's plot, claiming in a match, spam
 	local other = freeIndex(index)
 	mark = K.logSize()
@@ -327,6 +373,13 @@ S.p2tycoon_claim = guarded("p2tycoon_claim", function()
 	b:SetAttribute(Config.Attr.InMatch, true)
 	claim(b, other)
 	T.check(SS.GetSpot(b) == nil and SS.GetOwner(other) == nil, "tycoon: claiming is refused during a match")
+	advance(1.0) -- past the refusal toast throttle (the claim above was refused with the same text)
+	mark = K.logSize()
+	local inMatchAt = K.root(b) and K.root(b).Position
+	homeAction(b, "GoHome")
+	advance(0.6)
+	T.check(K.notified(b, "Finish your match", "bad", mark) and inMatchAt ~= nil and (K.root(b).Position - inMatchAt).Magnitude < 1,
+		"tycoon: HomeAction 'GoHome' is refused during a match (side toast, nobody moves)")
 	b:SetAttribute(Config.Attr.InMatch, false)
 	Mock.Teleport(b, config().Lobby.Origin + Vector3.new(0, 4, 0))
 	Mock.Trigger(claimPromptOf(other), b)
@@ -616,6 +669,11 @@ S.p2tycoon_progress = guarded("p2tycoon_progress", function()
 	-- Prestige
 	DataS.AddCash(p, 12345)
 	local gemsBefore = DataS.GetGems(p)
+	if type(DataS.AddFood) == "function" then
+		DataS.AddFood(p, "Snack", 3)
+	end
+	local foodBefore = type(DataS.GetFood) == "function" and DataS.GetFood(p, "Snack") or nil
+	local petsBefore = Eco and PK().Count(DataS.GetProfile(p), Eco.Id) or nil
 	local decor = {}
 	for _, def in ipairs(Cat.Stations) do
 		if def.KeepOnPrestige then
@@ -644,6 +702,9 @@ S.p2tycoon_progress = guarded("p2tycoon_progress", function()
 	T.check(#wrong == 0, "tycoon prestige: stations reset, decor kept", table.concat(wrong, ","))
 	T.check(after.CollectorCash == 0 and after.Level == Cat.HomeLevelOf(after), "tycoon prestige: the Collector is emptied, Home Level = the decor")
 	T.check(Eco == nil or after.Garden[1] == Eco.Id, "tycoon prestige: garden choices are kept")
+	T.check((petsBefore == nil or PK().Count(DataS.GetProfile(p), Eco.Id) == petsBefore)
+		and (foodBefore == nil or DataS.GetFood(p, "Snack") == foodBefore),
+		"tycoon prestige: pets and food are kept", tostring(petsBefore) .. " pets, " .. tostring(foodBefore) .. " snacks before")
 	T.check(K.notified(p, "Prestige 1", "good", mark), "tycoon prestige: a side toast")
 	advance(1.2)
 	T.check(info.SubLabel.Text:find(STAR, 1, true) ~= nil, "tycoon prestige: the nameplate shows a prestige star", info.SubLabel.Text)
@@ -668,6 +729,12 @@ S.p2tycoon_progress = guarded("p2tycoon_progress", function()
 	advance(4.05)
 	local cc = Ty.GetHome(p).CollectorCash
 	T.check(cc >= 3 * 6.25 - 0.01 and cc <= 5 * 6.25 + 0.01, "tycoon prestige: the Collector fills at the multiplied rate", tostring(cc))
+	if Eco and Ty.GetHome(p).Garden[1] == Eco.Id and Cat.GardenSlots(Ty.GetHome(p)) < 1 then
+		local okClear, whyClear = Ty.GardenSet(p, 1, nil)
+		T.check(okClear and Ty.GetHome(p).Garden[1] == nil, "tycoon prestige: a garden pet kept in a slot the reset locked again can still be taken out", tostring(whyClear))
+		local okPut = Ty.GardenSet(p, 1, Eco.Id)
+		T.check(not okPut and Ty.GetHome(p).Garden[1] == nil, "tycoon prestige: ...but nothing can be placed there until the Garden is rebuilt")
+	end
 	leave(p)
 	K.flushErrors("p2tycoon_progress")
 	K.flushWarnings("p2tycoon_progress", { "HomeBuilder is missing" })

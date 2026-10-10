@@ -21,6 +21,8 @@
 --   token[:golden]                  TokenService.MakeTokenPart (a normal or a golden coin)
 --   home:<StationId>[:<level>|all]  a Phase 2 home station (HomeBuilder.BuildStationModel), see BUILDERS.home
 --   homeplot[:<tier>[:pads]]        a fully built home plot on the lobby for house tier 1-4, see BUILDERS.homeplot
+--   homefree                        spot 1 prepared by HomeBuilder but unclaimed (gate, claim signpost)
+--   homegarden[:<level>] / homegym[:<level>]  (client) the Pet Garden / Gym with pets, placed by the real HomeFx
 --   module:<path>:<func>[:lobby]    generic: require src/<path> (e.g. shared/Foo, server/Services/Foo) and call
 --                                   <func>() (or <func>(lobbyInfo) with :lobby); the result may be an Instance, a
 --                                   table with Model / Folder / Root, or nothing (then the new Workspace children)
@@ -646,6 +648,79 @@ BUILDERS.homeplot = function(tier, extra)
 	Mock.Advance(0.2)
 	local parts = HB.PartCount(spot)
 	return { { root = spot.Folder, label = "Home plot: " .. TC.HouseTiers[tier].Name, sub = "Home folder: " .. parts .. " parts", facing = { spot.PlotCFrame.LookVector.X, 0, spot.PlotCFrame.LookVector.Z } } }
+end
+
+-- homefree   spot 1 of the real lobby prepared by HomeBuilder.Init but not claimed: the gate's ClaimPrompt anchor and the
+--            "FREE HOME" signpost (crop with --box to look at the gate)
+BUILDERS.homefree = function()
+	local HB = homeBuilder()
+	local info = ensureLobby()
+	HB.Init(info)
+	local spot = info.Spots[1]
+	Mock.Advance(0.2)
+	return { { root = spot.Folder, label = "Free home plot", sub = "spot 1, unclaimed", facing = { spot.PlotCFrame.LookVector.X, 0, spot.PlotCFrame.LookVector.Z } } }
+end
+
+-- homegarden[:<level>] / homegym[:<level>]  (client world) a Pet Garden / Gym at <level> (default: its top level) on a
+--            test plot with a pet on every open place: HomeBuilder builds the plot, the plot's GardenPets / GymPets
+--            attribute names the pets and the real HomeFx puts them on the cushions / targets (PetBuilder Low)
+local function homePetsView(stationId, attr, level)
+	local HB = homeBuilder()
+	local TC = req("shared/TycoonCatalog")
+	local PC = req("shared/PetCatalog")
+	local Fx = req("client/Controllers/HomeFx")
+	local def = TC.Get(stationId)
+	level = math.max(1, math.min(def.MaxLevel, tonumber(level) or def.MaxLevel))
+	local folder = Instance.new("Folder")
+	folder.Name = "Spot_99"
+	folder.Parent = Workspace
+	local cf = CFrame.new(0, 0, 0)
+	local spot = { Index = 99, PlotCFrame = cf, PlotSize = TC.PlotSize, Center = cf.Position, Folder = folder }
+	Fx.Init()
+	HB.PreparePlot(spot)
+	HB.SetStation(spot, stationId, level)
+	local role = (stationId == "Gym") and "Combat" or "Economy"
+	local ids = {}
+	for _, d in ipairs(PC.Pets) do
+		if d.Role == role and #ids < 8 then
+			ids[#ids + 1] = d.Id
+		end
+	end
+	local list = {}
+	for i = 1, level do
+		list[#list + 1] = i .. "=" .. ids[((i - 1) % #ids) + 1] .. ((i % 3 == 0) and "@Golden" or "")
+	end
+	folder:SetAttribute(attr, table.concat(list, ";"))
+	local cam = Workspace.CurrentCamera
+	if cam then
+		cam.CFrame = CFrame.lookAt(Vector3.new(0, 30, -40), Vector3.new(0, 0, 0))
+	end
+	Mock.Advance(3)
+	local view = Instance.new("Model")
+	view.Name = stationId .. "View"
+	local station = folder.Home:FindFirstChild("Station_" .. stationId)
+	if station then
+		station:Clone().Parent = view
+	end
+	local pets = Workspace:FindFirstChild("ClientFx") and Workspace.ClientFx:FindFirstChild("HomePets")
+	local n = 0
+	if pets then
+		for _, p in ipairs(pets:GetChildren()) do
+			p:Clone().Parent = view
+			n = n + 1
+		end
+	end
+	view.Parent = Workspace
+	local look = (cf * def.Slot.CFrame).LookVector
+	return { { root = view, label = def.Name .. " Lv " .. level .. " with " .. n .. " pets", sub = "HomeFx " .. attr, facing = { look.X, 0, look.Z } } }
+end
+
+BUILDERS.homegarden = function(level)
+	return homePetsView("Garden", "GardenPets", level)
+end
+
+BUILDERS.homegym = function(level)
+	return homePetsView("Gym", "GymPets", level)
 end
 
 BUILDERS["storm_altar"] = BUILDERS["storm-altar"]

@@ -30,7 +30,7 @@
 --   (KeepOnPrestige), Cash and the Collector reset, pets / food / garden choices are kept, +1 star (x1.25 income
 --   each), a Gems reward (TycoonCatalog.PrestigeGems); at 1 star the Fusion Machine pad unlocks.
 -- * GardenSet: Economy pets only; the key must be owned (one copy per slot) and not training in the Gym; the slot
---   must be unlocked by the Garden level; nil / "" clears the slot.
+--   must be unlocked by the Garden level; nil / "" clears the slot (any slot, also one a prestige locked again).
 -- * Remote HomeAction(action, arg): "Upgrade" stationId, "GardenSet" {slot, key|nil} (also {Slot =, Key =}),
 --   "Collect", "Prestige", "GoHome". Types, ranges and NaN are checked; every action is rate limited (a per-action
 --   cooldown plus a per-player burst budget); refusals answer with a side toast (repeated texts are throttled).
@@ -1190,7 +1190,8 @@ function TycoonService.GardenSet(player, slot, key)
 	if not home then
 		return false, "Your home is still loading..."
 	end
-	if slot > gardenSlots(home) then
+	-- (clearing works on any slot: after a prestige the Garden is rebuilt from level 0 and its pets stay placed)
+	if key ~= nil and slot > gardenSlots(home) then
 		if gardenSlots(home) <= 0 then
 			return false, "Build the Pet Garden first"
 		end
@@ -1208,7 +1209,7 @@ function TycoonService.GardenSet(player, slot, key)
 
 	local why = nil
 	local wrote = mutateHome(player, function(live)
-		if slot > gardenSlots(live) then
+		if key ~= nil and slot > gardenSlots(live) then
 			why = "Garden slot locked: upgrade the Garden"
 			return false
 		end
@@ -1308,6 +1309,7 @@ function TycoonService.GoHome(player)
 		return false
 	end
 	if player:GetAttribute(Config.Attr.InMatch) == true then
+		toastOnce(player, "Finish your match first", "bad")
 		return false
 	end
 	local ok, moved = pcall(spotService.Teleport, player)

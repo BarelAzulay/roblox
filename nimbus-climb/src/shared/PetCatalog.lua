@@ -18,9 +18,24 @@
 --   v3:
 --   PetCatalog.IndexGroups()              -> { { Id, Rarity, Pets = {PetDef...}, Reward = {Tokens = n} }... }
 --                                            one group per rarity that has pets, in rarity order (Secret last)
---   PetCatalog.GetStats(petId, level)     -> { Income, Power, Health, Speed } | nil
+--   PetCatalog.GetStats(petId, level, tier) -> { Income, Power, Health, Speed } | nil   (Phase 2: tier added)
 --                                            base * Config.PetStats.RarityScale[rarity] * (1 + 0.1 * (level - 1))
+--                                            * tier multiplier (Normal 1, Golden 1.5, Rainbow 2.5). The same numbers
+--                                            as TycoonCatalog.PetIncome, so the Income shown is the Cash/s the Garden
+--                                            pays (prestige not applied). petId may also be a pet key ("cat@Golden":
+--                                            the tier comes from the key unless `tier` is given) or a def table
+--                                            (PetKeys.DefOf: tier copies and fused hybrids). level defaults to 1 and
+--                                            is clamped to 1..MaxPetLevel(); tier also takes a key or a multiplier.
 --   PetCatalog.TotalCount()               -> number of pets in the catalog (Secret pets included)
+--   Phase 2 pet levels (care agent; the XP curve itself is TycoonCatalog.XpToNext):
+--   PetCatalog.LevelCap(subject)          -> the highest level feeding / the Gym can raise a pet to, by rarity
+--                                            (subject = rarity id, pet id, pet key or def): Common 20, Uncommon 25,
+--                                            Rare 30, Epic 35, Legendary 40, Mythic 45, Secret 50. TycoonCatalog may
+--                                            override them (PetXp.RarityCaps / PetLevelCaps); never above
+--                                            MaxPetLevel(). nil for unknown pets.
+--   PetCatalog.MaxPetLevel()              -> top of the XP curve (TycoonCatalog.MaxPetLevel, else MaxLevel = 50)
+--   PetCatalog.LevelFactor(level)         -> 1 + 0.1 * (level - 1)   (level clamped like GetStats)
+--   PetCatalog.TierMultiplier(tier)       -> 1 | 1.5 | 2.5 (a tier name, a pet key, a def or a multiplier)
 --   v3 elements (ARCHITECTURE_V3.md section 11, chart in Config.Elements):
 --   PetCatalog.ElementsOf(def)            -> { element... }  a pet's Element, or a fused hybrid's Elements
 --                                            (deduplicated, only names from Config.Elements.Order; {} otherwise)
@@ -829,28 +844,198 @@ local function rarityScale(rarityId)
 	return 1
 end
 
--- GetStats("cloudy_dragon", 3) -> { Income, Power, Health, Speed } = base * RarityScale * (1 + 0.1 * (level - 1)).
--- level defaults to 1 (anything below 1 or not a number counts as 1; fractions are floored). nil for unknown pets.
-function PetCatalog.GetStats(petId, level)
-	local def = PetCatalog.Get(petId)
-	if not def or type(def.Stats) ~= "table" then
-		return nil
+----------------------------------------------------------------------
+-- Phase 2: pet levels (care agent). Feeding (Kitchen food) and the Gym raise a pet copy's level (profile
+-- PetLevels[key], XP curve TycoonCatalog.XpToNext); every level adds LevelBonus of the level-1 stats.
+----------------------------------------------------------------------
+
+PetCatalog.MaxLevel = 50 -- top of the XP curve when TycoonCatalog does not name one (its PetXp.MaxLevel wins)
+PetCatalog.LevelBonus = 0.1 -- +10% of the level-1 stats per level (TycoonCatalog.PetIncome uses the same)
+-- the highest level feeding / training can reach, by rarity (rarer pets grow further). TycoonCatalog may override
+-- these (PetXp.RarityCaps or PetLevelCaps); a rarity missing here is capped at MaxPetLevel().
+PetCatalog.LevelCaps = { Common = 20, Uncommon = 25, Rare = 30, Epic = 35, Legendary = 40, Mythic = 45, Secret = 50 }
+-- stat multiplier of a pet copy's tier (PetKeys.TierMultiplier / TycoonCatalog.TierMultiplier hold the same values)
+PetCatalog.TierMultipliers = { Normal = 1, Golden = 1.5, Rainbow = 2.5 }
+
+local function finite(n)
+	return type(n) == "number" and n == n and n ~= math.huge and n ~= -math.huge
+end
+
+-- TycoonCatalog (the economy agent's module) is read lazily: it requires PetCatalog lazily too, and builds without
+-- it (tests of older rounds) still get the local numbers.
+local tycoonCatalog, tycoonResolved = nil, false
+local function getTycoonCatalog()
+	if not tycoonResolved then
+		tycoonResolved = true
+		local parent = script and script.Parent
+		local module = parent and parent:FindFirstChild("TycoonCatalog")
+		if module then
+			local ok, result = pcall(require, module)
+			if ok and type(result) == "table" then
+				tycoonCatalog = result
+			end
+		end
 	end
+	return tycoonCatalog
+end
+
+-- Top of the XP curve: TycoonCatalog.MaxPetLevel (or PetXp.MaxLevel), else PetCatalog.MaxLevel.
+function PetCatalog.MaxPetLevel()
+	local tc = getTycoonCatalog()
+	if tc then
+		local px = type(tc.PetXp) == "table" and tc.PetXp or nil
+		for _, v in ipairs({ tc.MaxPetLevel or false, px and px.MaxLevel or false }) do
+			if finite(v) and v >= 1 then
+				return math.floor(v)
+			end
+		end
+	end
+	return PetCatalog.MaxLevel
+end
+
+-- level -> whole number in 1..MaxPetLevel() (junk, NaN and anything below 1 count as 1)
+local function clampLevel(level)
 	local lv = tonumber(level)
-	if not lv or lv ~= lv or lv < 1 or lv == math.huge then
-		lv = 1
+	if not finite(lv) or lv < 1 then
+		return 1
 	end
 	lv = math.floor(lv)
-	local factor = rarityScale(def.Rarity) * (1 + 0.1 * (lv - 1))
+	local top = PetCatalog.MaxPetLevel()
+	if lv > top then
+		return top
+	end
+	return lv
+end
+
+function PetCatalog.LevelFactor(level)
+	return 1 + PetCatalog.LevelBonus * (clampLevel(level) - 1)
+end
+
+-- "cat@Golden" -> "cat", "Golden"; "cat" -> "cat", nil; hybrid keys ("hyb:...") -> nil (they need the profile)
+local function splitKey(key)
+	if type(key) ~= "string" or key == "" or string.sub(key, 1, 4) == "hyb:" then
+		return nil, nil
+	end
+	local base, tier = string.match(key, "^([^@]+)@(%a+)$")
+	if base then
+		return base, tier
+	end
+	return key, nil
+end
+
+-- 1 | 1.5 | 2.5 from a tier name ("Golden"), a pet key ("cat@Rainbow"), a def (StatMultiplier / Tier /
+-- Look.Finish) or a positive multiplier; anything else is 1.
+function PetCatalog.TierMultiplier(tier)
+	if finite(tier) then
+		if tier > 0 then
+			return tier
+		end
+		return 1
+	end
+	if type(tier) == "table" then
+		if finite(tier.StatMultiplier) and tier.StatMultiplier > 0 then
+			return tier.StatMultiplier
+		end
+		local name = tier.Tier
+		if type(name) ~= "string" then
+			name = type(tier.Look) == "table" and tier.Look.Finish or nil
+		end
+		return (type(name) == "string" and PetCatalog.TierMultipliers[name]) or 1
+	end
+	if type(tier) ~= "string" then
+		return 1
+	end
+	local m = PetCatalog.TierMultipliers[tier]
+	if m then
+		return m
+	end
+	local _, suffix = string.match(tier, "^([^@]+)@(%a+)$")
+	return (suffix and PetCatalog.TierMultipliers[suffix]) or 1
+end
+
+-- the cap table: TycoonCatalog's when it has one, else PetCatalog.LevelCaps
+local function capTable()
+	local tc = getTycoonCatalog()
+	if tc then
+		local px = type(tc.PetXp) == "table" and tc.PetXp or nil
+		local caps = (px and (px.RarityCaps or px.LevelCaps)) or tc.PetLevelCaps or tc.RarityLevelCaps
+		if type(caps) == "table" then
+			return caps
+		end
+	end
+	return PetCatalog.LevelCaps
+end
+
+-- Level cap by rarity (see the API notes at the top). subject: a rarity id, a pet id, a pet key or a def table.
+function PetCatalog.LevelCap(subject)
+	local rarity = nil
+	if type(subject) == "table" then
+		rarity = subject.Rarity
+	elseif type(subject) == "string" then
+		if rarityById[subject] then
+			rarity = subject
+		else
+			local def = PetCatalog.Get(splitKey(subject))
+			if not def then
+				return nil
+			end
+			rarity = def.Rarity
+		end
+	end
+	if type(rarity) ~= "string" then
+		return nil
+	end
+	local top = PetCatalog.MaxPetLevel()
+	local cap = capTable()[rarity]
+	if not finite(cap) and capTable() ~= PetCatalog.LevelCaps then
+		cap = PetCatalog.LevelCaps[rarity]
+	end
+	if not finite(cap) or cap < 1 then
+		return top
+	end
+	return math.min(math.floor(cap), top)
+end
+
+-- Stats of a def table at a level and tier (the body of GetStats; defs from PetKeys.DefOf work: tier copies carry
+-- StatMultiplier, hybrids their averaged base Stats and the higher rarity). tier nil -> the def's own tier.
+function PetCatalog.StatsOf(def, level, tier)
+	if type(def) ~= "table" or type(def.Stats) ~= "table" then
+		return nil
+	end
+	local mult
+	if tier == nil then
+		mult = PetCatalog.TierMultiplier(def)
+	else
+		mult = PetCatalog.TierMultiplier(tier)
+	end
+	local factor = rarityScale(def.Rarity) * PetCatalog.LevelFactor(level) * mult
 	local out = {}
 	for _, key in ipairs(PetCatalog.StatOrder) do
 		local base = def.Stats[key]
-		if type(base) ~= "number" then
+		if not finite(base) then
 			base = 0
 		end
 		out[key] = base * factor
 	end
 	return out
+end
+
+-- GetStats("cloudy_dragon", 3) -> { Income, Power, Health, Speed } = base * RarityScale * (1 + 0.1 * (level - 1))
+-- * tier multiplier. level defaults to 1 (anything below 1 or not a number counts as 1; fractions are floored;
+-- clamped to MaxPetLevel()). nil for unknown pets. See the API notes at the top for keys, defs and tiers.
+function PetCatalog.GetStats(petId, level, tier)
+	if type(petId) == "table" then
+		return PetCatalog.StatsOf(petId, level, tier)
+	end
+	local base, keyTier = splitKey(petId)
+	local def = PetCatalog.Get(base)
+	if not def then
+		return nil
+	end
+	if tier == nil then
+		tier = keyTier
+	end
+	return PetCatalog.StatsOf(def, level, tier or "Normal")
 end
 
 ----------------------------------------------------------------------
