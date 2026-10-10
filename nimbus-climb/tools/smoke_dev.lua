@@ -1,27 +1,40 @@
 -- smoke_dev.lua: the owner-only developer tools (Config.Dev, server/Services/DevService.lua,
 -- client/Controllers/DevController.lua). Loaded by tools/smoke.py in BOTH worlds; ARGS.context picks the half:
 --   dev_tools          (server) who is a developer: a normal player in the live game is refused everything and
---                      nothing changes (also forged args and chat), NC_Dev stays unset; Config.Dev.Admins; a
---                      group-owned game (rank 255, cached, a failing web call is not cached); the owner (CreatorId)
---                      in the live game: allpets (every pet incl. Secret, all discovered, Index groups complete,
---                      ProfileSync), tokens (default, clamp, whole numbers only), the 4-per-2s rate limit, tutorial
---                      restart (or its refusal while TutorialService has no reload hook), skiptutorial (no finish
---                      reward), reset (refused in a match; back to a brand-new player), chat commands, logging;
---                      Studio (everyone allowed, AllowInStudio / Enabled switches, StudioAutoGrant)
---   client_dev         (client, 1920x1080 + other window sizes) the DEV button only exists with NC_Dev, sits on
---                      the right edge clear of the menu column / HUD / hotbar / tutorial panel and out of the
---                      middle; the "Developer tools" side panel (never centred, readable) and what each button sends;
---                      the "Are you sure?" reset; X / Esc / gamepad B; gamepad selection
---   client_dev_mobile  (phone world, 390x844 + 844x390, touch) the button never covers the RUN / DASH / jump
---                      buttons; the panel stays out of the middle and readable
+--                      nothing changes (also forged args and chat), no NC_Dev hint; Config.Dev.Admins; a
+--                      group-owned game (rank 255, cached, a failing web call is not cached); the hints sit on the
+--                      developer's PlayerGui, never on the Player (which every client can read); the owner
+--                      (CreatorId) in the live game: allpets (every pet incl. Secret, all discovered, Index groups
+--                      complete, ProfileSync), tokens (default, clamp, whole numbers only), the 4-per-2s rate limit,
+--                      tutorial restart (refused and hidden while TutorialService has no Reload hook; with a stand-in
+--                      hook: a replay that keeps the paid gift), skiptutorial (no finish reward), reset (refused in a
+--                      match; back to a brand-new player; a tutorial that already paid its gift is skipped instead
+--                      of waiting forever), chat commands, logging; Studio (everyone allowed, AllowInStudio /
+--                      Enabled switches, StudioAutoGrant); a build with the tools switched off still listens on
+--                      DevCommand (Roblox would queue the events otherwise) and refuses everything
+--   client_dev         (client, 1920x1080 + other window sizes) the DEV button only exists with NC_Dev on the
+--                      PlayerGui, sits on the right edge clear of the menu column / HUD / hotbar / tutorial panel,
+--                      the toasts' room and the middle; the "Developer tools" side panel (never centred, readable,
+--                      the newest toasts never cover it) and what each button sends; "Restart tutorial" only with
+--                      NC_DevTutorial; the "Are you sure?" reset (a double click never resets, nor does a triple
+--                      click on the DEV button); X / Esc / gamepad B; gamepad selection
+--   client_dev_mobile  (phone world, 390x844 + 844x390 + 1024x768, touch) the button never covers the RUN / DASH /
+--                      jump buttons; the panel stays out of the middle, readable and clear of the newest toasts
 -- Plain Lua 5.1 syntax only.
 
 local T = SmokeCommon.T
 local guarded = SmokeCommon.guarded
 local CONTEXT = (ARGS and ARGS.context) or "server"
 
-local ATTR = "NC_Dev"
+local ATTR = "NC_Dev" -- PlayerGui attributes DevService sets for developers
+local ATTR_TUTORIAL = "NC_DevTutorial"
 local TAG = "[NimbusClimb][Dev]"
+
+-- a DevService hint for `p` (it lives on the PlayerGui, which only that player's client receives)
+local function hint(p, name)
+	local pg = p:FindFirstChildOfClass("PlayerGui")
+	return pg and pg:GetAttribute(name or ATTR)
+end
 
 local function count(map)
 	local n = 0
@@ -123,7 +136,7 @@ local function serverScenarios()
 
 	local function nonOwner(Dev, joined)
 		local stranger = join(joined, "DevStranger", 92001)
-		T.eq(stranger:GetAttribute(ATTR), nil, "DEV live game: a normal player gets no NC_Dev attribute")
+		T.eq(hint(stranger), nil, "DEV live game: a normal player gets no NC_Dev hint")
 		T.eq(Dev.IsAllowed(stranger), false, "DEV live game: DevService.IsAllowed is false for a normal player")
 		local before = snapshotOf(stranger)
 		local mark0 = K.logSize()
@@ -145,14 +158,15 @@ local function serverScenarios()
 		local unchanged, diff = same(before, after)
 		T.check(unchanged, "DEV live game: every command of a normal player is refused and changes nothing (" .. #attempts .. " remote calls incl. forged args, chat)", diff)
 		T.eq(#devToasts(stranger, mark0), 0, "DEV live game: ...and they get no DEV toast")
-		T.eq(stranger:GetAttribute(ATTR), nil, "DEV live game: ...and NC_Dev stays unset")
+		T.eq(hint(stranger), nil, "DEV live game: ...and NC_Dev stays unset")
 		return stranger
 	end
 
 	local function admins(Dev, Config, joined)
 		Config.Dev.Admins = { 92002 }
 		local admin = join(joined, "DevAdmin", 92002)
-		T.eq(admin:GetAttribute(ATTR), true, "DEV live game: a UserId in Config.Dev.Admins gets NC_Dev")
+		T.eq(hint(admin), true, "DEV live game: a UserId in Config.Dev.Admins gets NC_Dev (on their PlayerGui)")
+		T.eq(admin:GetAttribute(ATTR), nil, "DEV live game: ...and nothing on the Player itself, which every client can read (nobody learns who the developers are)")
 		Config.Dev.Admins = { "92002" }
 		T.eq(Dev.IsAllowed(admin), true, "DEV live game: Admins may also list the UserId as text")
 		Config.Dev.Admins = {}
@@ -187,13 +201,13 @@ local function serverScenarios()
 		game.CreatorType = Enum.CreatorType.Group
 		game.CreatorId = GROUP_ID
 		local groupOwner = join(joined, "DevGroupOwner", 92010)
-		T.eq(groupOwner:GetAttribute(ATTR), true, "DEV group game: the group's owner (rank 255) gets NC_Dev")
+		T.eq(hint(groupOwner), true, "DEV group game: the group's owner (rank 255) gets NC_Dev")
 		local c0 = calls
 		T.eq(Dev.IsAllowed(groupOwner), true, "DEV group game: IsAllowed is true for the group's owner")
 		T.eq(calls, c0, "DEV group game: ...and the rank is cached (no second GetRankInGroup)")
 		T.eq(Dev.IsAllowed(stranger), false, "DEV group game: a member below rank 255 is refused")
 		local flaky = join(joined, "DevFlaky", 92011)
-		T.eq(flaky:GetAttribute(ATTR), nil, "DEV group game: a failing GetRankInGroup counts as 'not allowed' (no script error)")
+		T.eq(hint(flaky), nil, "DEV group game: a failing GetRankInGroup counts as 'not allowed' (no script error)")
 		methods.GetRankInGroup = function()
 			calls = calls + 1
 			return 255
@@ -209,7 +223,8 @@ local function serverScenarios()
 		local R = K.remoteFolder()
 		local outputMark = #Mock.Output
 		local owner = join(joined, "DevOwner", OWNER_ID)
-		T.eq(owner:GetAttribute(ATTR), true, "DEV live game: the game's owner (UserId == game.CreatorId) gets NC_Dev = true")
+		T.eq(hint(owner), true, "DEV live game: the game's owner (UserId == game.CreatorId) gets NC_Dev = true on their PlayerGui")
+		T.eq(owner:GetAttribute(ATTR), nil, "DEV live game: ...and the Player itself carries no NC_Dev")
 		T.eq(Dev.IsAllowed(owner), true, "DEV live game: IsAllowed is true for the owner")
 		local prof = DataS.GetProfile(owner)
 		local function tokens()
@@ -329,8 +344,8 @@ local function serverScenarios()
 		mark = send(owner, "reset", "now")
 		T.eq(lastToast(owner, mark).kind, "bad", "DEV: a command that takes no value refuses one ('reset', 'now')")
 
-		-- tutorial restart: needs TutorialService to re-read the progress (Reload / Refresh / Restart)
-		local reloader = TS and (TS.Reload or TS.Refresh or TS.Restart)
+		-- tutorial restart: needs the hook TutorialService.Reload(player, opts) to re-read the progress
+		local reloader = TS and TS.Reload
 		local function tutorialState()
 			return TS and type(TS.GetState) == "function" and TS.GetState(owner) or nil
 		end
@@ -341,17 +356,18 @@ local function serverScenarios()
 		local before = snapshotOf(owner)
 		mark = send(owner, "tutorial")
 		toast = lastToast(owner, mark)
-		if reloader or not TS then
+		if reloader then
 			local stored = DataS.GetTutorial(owner)
-			T.check(stored.Step == 1 and stored.Done == false and toast.kind == "good", "DEV tutorial: the tutorial restarts from step 1", toast.text)
-			if TS then
-				local state = tutorialState()
-				T.check(state and state.Step == 1 and state.Done == false, "DEV tutorial: ...and TutorialService follows (TutorialState step 1)")
-			end
+			T.check(stored.Step == 1 and stored.Done == false and stored.Gifted == before.Gifted and toast.kind == "good",
+				"DEV tutorial: the tutorial restarts from step 1 (a replay: the gift stays paid)", toast.text)
+			local state = tutorialState()
+			T.check(state and state.Step == 1 and state.Done == false, "DEV tutorial: ...and TutorialService follows (TutorialState step 1)")
+			T.eq(hint(owner, ATTR_TUTORIAL), true, "DEV tutorial: NC_DevTutorial tells the panel to show 'Restart tutorial'")
 		else
 			local unchanged, diff = same(before, snapshotOf(owner))
-			T.check(unchanged and toast.kind == "bad", "DEV tutorial: without a TutorialService Reload / Refresh / Restart(player) hook the restart is refused and nothing changes", diff .. " " .. toast.text)
-			T.info("*TutorialService has no Reload / Refresh / Restart(player) yet: 'Restart tutorial' stays refused until it does")
+			T.check(unchanged and toast.kind == "bad", "DEV tutorial: without the TutorialService.Reload hook the restart is refused and nothing changes", diff .. " " .. toast.text)
+			T.eq(hint(owner, ATTR_TUTORIAL), nil, "DEV tutorial: ...and NC_DevTutorial stays unset, so the panel hides 'Restart tutorial'")
+			T.info("*TutorialService has no Reload(player, opts) yet: 'Restart tutorial' stays hidden and refused until it does")
 		end
 
 		-- skip
@@ -433,11 +449,11 @@ local function serverScenarios()
 			T.eq(found, 0, "DEV reset: ...the Pet Index is empty again")
 		end
 		local tutorialAfter = DataS.GetTutorial(owner)
-		if reloader or not TS then
-			T.check(tutorialAfter.Step == 1 and tutorialAfter.Done == false and tutorialAfter.Gifted == false, "DEV reset: ...and the tutorial restarts")
+		if reloader then
+			T.check(tutorialAfter.Step == 1 and tutorialAfter.Done == false and tutorialAfter.Gifted == false, "DEV reset: ...and the tutorial restarts as a new player's")
 		else
-			T.check(tutorialAfter.Step == tutorialBefore.Step and tutorialAfter.Done == tutorialBefore.Done and toast.text:find("not in this build", 1, true) ~= nil,
-				"DEV reset: ...the tutorial stays as it was while TutorialService cannot reload it (and the toast says so)", toast.text)
+			T.check(tutorialAfter.Step == tutorialBefore.Step and tutorialAfter.Done == tutorialBefore.Done,
+				"DEV reset: ...a finished tutorial stays finished while TutorialService cannot reload it", toast.text)
 		end
 
 		-- chat (case-insensitive)
@@ -455,23 +471,38 @@ local function serverScenarios()
 		mark = chat(owner, "/devhelp")
 		toast = lastToast(owner, mark)
 		local help = toast.text:lower()
-		T.check(help:find("/allpets", 1, true) and help:find("/tokens", 1, true) and help:find("/reset", 1, true) and help:find("/skiptutorial", 1, true) and help:find("/tutorial", 1, true),
-			"DEV chat: '/devhelp' answers with a toast listing the commands", toast.text)
+		T.check(help:find("/allpets", 1, true) and help:find("/tokens", 1, true) and help:find("/reset", 1, true) and help:find("/skiptutorial", 1, true)
+			and (help:find("/tutorial", 1, true) ~= nil) == (reloader ~= nil),
+			"DEV chat: '/devhelp' answers with a toast listing the commands that work in this build", toast.text)
 		mark = chat(owner, "/e dance")
 		chat(owner, "hello /allpets")
 		T.eq(#devToasts(owner, mark), 0, "DEV chat: other messages and other '/' commands are left alone")
 
-		-- the restart path itself, with a stand-in TutorialService.Reload(player) hook (the real one is the lead's call)
+		-- the restart path itself, with a stand-in TutorialService.Reload(player, opts) hook (the real one is the
+		-- tutorial owner's to write)
 		if TS and not reloader then
 			local savedTutorial = DataS.GetTutorial(owner)
-			local reloadedFor = nil
-			TS.Reload = function(player)
-				reloadedFor = player
+			local calls = {}
+			TS.Reload = function(player, opts)
+				calls[#calls + 1] = { player = player, opts = opts }
 			end
+			prof.Tutorial.Gifted = true -- as if the "spin" gift had been paid
 			mark = send(owner, "tutorial")
 			local t = DataS.GetTutorial(owner)
-			T.check(t.Step == 1 and t.Done == false and t.Gifted == false and reloadedFor == owner and lastToast(owner, mark).kind == "good",
-				"DEV tutorial: with a TutorialService.Reload(player) hook the stored progress goes back to step 1 and the hook is called", lastToast(owner, mark).text)
+			local call = calls[1]
+			T.check(t.Step == 1 and t.Done == false and call and call.player == owner and lastToast(owner, mark).kind == "good",
+				"DEV tutorial: with a TutorialService.Reload hook the stored progress goes back to step 1 and the hook is called", lastToast(owner, mark).text)
+			T.check(t.Gifted == true and call and type(call.opts) == "table" and call.opts.Replay == true,
+				"DEV tutorial: ...as a replay: the paid gift stays paid and Reload gets { Replay = true } (no finish reward again)", "Gifted " .. tostring(t.Gifted))
+			mark = send(owner, "reset")
+			t = DataS.GetTutorial(owner)
+			call = calls[2]
+			T.check(t.Step == 1 and t.Done == false and t.Gifted == false and call and call.player == owner and type(call.opts) == "table" and call.opts.Replay ~= true,
+				"DEV reset: with the hook the tutorial starts as a new player's (gift and finish reward again: the reset took those tokens)", "Gifted " .. tostring(t.Gifted))
+			Config.Dev.Admins = { 92040 }
+			local late = join(joined, "DevLateJoiner", 92040)
+			T.eq(hint(late, ATTR_TUTORIAL), true, "DEV tutorial: a developer joining while the hook exists gets NC_DevTutorial ('Restart tutorial' shown)")
+			Config.Dev.Admins = {}
 			TS.Reload = nil
 			local live = prof.Tutorial
 			live.Step, live.Done, live.Gifted = savedTutorial.Step, savedTutorial.Done, savedTutorial.Gifted
@@ -492,12 +523,97 @@ local function serverScenarios()
 		return owner
 	end
 
+	-- a reset while TutorialService has no Reload hook: a tutorial that already paid its "spin" gift would wait
+	-- forever for the tokens and pets the reset takes, so it is skipped; one that has not reached the gift carries on
+	local function resetMidTutorial(Config, joined)
+		local DataS, TS = mod("DataService"), mod("TutorialService")
+		local Steps = K.M["shared/TutorialSteps"]
+		if not TS or TS.Reload or type(TS.GetState) ~= "function" or not (Steps and Steps.Steps) then
+			return -- with the hook a reset restarts the tutorial (checked with the owner)
+		end
+		local spinIndex = nil
+		for i, step in ipairs(Steps.Steps) do
+			if step.Id == "spin" then
+				spinIndex = i
+			end
+		end
+		if not T.check(spinIndex ~= nil, "DEV reset: (precondition) the tutorial has a 'spin' step") then
+			return
+		end
+		Config.Dev.Admins = { 92030, 92031 }
+		local gifted = join(joined, "DevTutorSpin", 92030)
+		local early = join(joined, "DevTutorEarly", 92031)
+		DataS.SetTutorial(gifted, { Step = spinIndex, Done = false, Gifted = true })
+		DataS.ProfileRebased:Fire(gifted, DataS.GetProfile(gifted))
+		advance(0.2)
+		local st = TS.GetState(gifted)
+		T.check(st and st.Id == "spin" and st.Done == false, "DEV reset: (precondition) a tutorial on the 'spin' step with its gift paid", st and tostring(st.Id) or "no state")
+		local mark = send(gifted, "reset")
+		local t = DataS.GetTutorial(gifted)
+		st = TS.GetState(gifted)
+		local toast = lastToast(gifted, mark)
+		T.check(t.Done == true and st and st.Skipped == true and toast.kind == "good" and toast.text:find("tutorial skipped", 1, true) ~= nil,
+			"DEV reset: a tutorial that already paid its gift is skipped instead of waiting forever for the wiped tokens / pets (the toast says so)", toast.text)
+		T.eq(DataS.GetTokens(gifted), 0, "DEV reset: ...without paying the finish reward")
+		local before = DataS.GetTutorial(early)
+		mark = send(early, "reset")
+		local after = DataS.GetTutorial(early)
+		st = TS.GetState(early)
+		toast = lastToast(early, mark)
+		T.check(after.Done == false and after.Step == before.Step and st and st.Done == false and toast.text:find("skipped", 1, true) == nil,
+			"DEV reset: a tutorial that has not reached its gift carries on (the gift is still to come)", toast.text)
+		Config.Dev.Admins = {}
+	end
+
+	-- Config.Dev.Enabled = false: DevService must still listen on DevCommand, or Roblox queues every event an
+	-- exploiter fires at it. A second copy of the module (fresh state) starts switched off on a stand-in remote.
+	local function switchedOff(Config, owner)
+		local DataS = mod("DataService")
+		local inst = K.moduleInstance("server/Services/DevService")
+		local R = K.remoteFolder()
+		local live = R:FindFirstChild("DevCommand")
+		local probe = Instance.new("RemoteEvent")
+		local clone = inst:Clone()
+		local function listeners()
+			return Mock.ConnectionReport()["RemoteEvent.OnServerEvent"] or 0
+		end
+		local before = listeners()
+		live.Name = "DevCommandLive"
+		probe.Name = "DevCommand"
+		probe.Parent = R
+		clone.Name = "DevServiceSwitchedOff"
+		clone.Parent = inst.Parent
+		Config.Dev.Enabled = false
+		local ok, err = pcall(function()
+			local OffDev = require(clone)
+			OffDev.Init({ DataService = DataS, TutorialService = mod("TutorialService"), IndexService = mod("IndexService") })
+			T.eq(listeners() - before, 1, "DEV switched off (Config.Dev.Enabled = false): DevService still listens on DevCommand, so no event waits in Roblox's queue")
+			local t0 = DataS.GetTokens(owner)
+			local mark = K.logSize()
+			for _ = 1, 6 do
+				Mock.FromClient(probe, owner, "tokens", 50)
+				Mock.FromClient(probe, owner, string.rep("x", 5000))
+			end
+			advance(0.2)
+			T.check(DataS.GetTokens(owner) == t0 and #devToasts(owner, mark) == 0, "DEV switched off: ...and it drops every DevCommand at once, the owner's too (no tokens, no toast)")
+			local okRun = OffDev.Run(owner, "tokens", 5, "smoke")
+			T.eq(okRun, false, "DEV switched off: ...DevService.Run refuses everything")
+		end)
+		Config.Dev.Enabled = true
+		probe:Destroy()
+		clone:Destroy()
+		live.Name = "DevCommand"
+		if not ok then
+			error(err, 0)
+		end
+	end
+
 	local function studio(Dev, Config, joined, owner)
 		local DataS = mod("DataService")
 		local PC = K.M["shared/PetCatalog"]
 		Mock.Options.Studio = true
 		local tester = join(joined, "DevStudioTester", 92020)
-		T.eq(tester:GetAttribute(ATTR), true, "DEV Studio: everyone testing in Studio gets the tools (Config.Dev.AllowInStudio)")
+		T.eq(hint(tester), true, "DEV Studio: everyone testing in Studio gets the tools (Config.Dev.AllowInStudio)")
 		T.eq(count(DataS.GetProfile(tester).Pets), 0, "DEV Studio: StudioAutoGrant is off by default: nothing is granted on join")
 		local t0 = DataS.GetTokens(tester)
 		send(tester, "tokens", 777)
@@ -560,6 +676,8 @@ local function serverScenarios()
 			admins(Dev, Config, joined)
 			groupGame(Dev, Config, joined, stranger)
 			local owner = ownerCommands(Dev, Config, joined)
+			resetMidTutorial(Config, joined)
+			switchedOff(Config, owner)
 			studio(Dev, Config, joined, owner)
 		end)
 		Mock.Options.Studio = saved.Studio
@@ -745,7 +863,78 @@ local function clientScenarios()
 		T.info(string.format("%s: DEV button at %d,%d - %d,%d (gui area %dx%d)", label, r.x0, r.y0, r.x1, r.y1, a.X, a.Y))
 	end
 
-	local function checkPanel(label, floorPx)
+	-- DevService's hints live on the PlayerGui (a PlayerGui replicates to its own player only)
+	local function setHint(name, value)
+		playerGui():SetAttribute(name, value)
+	end
+
+	-- NimbusNotify's toast column: its frame and the shown toast cards, newest first
+	local function toastStack()
+		local notify = playerGui():FindFirstChild("NimbusNotify")
+		return notify and named(notify, "ToastStack")
+	end
+	local function toastCards()
+		local stack = toastStack()
+		local slots = {}
+		for _, slot in ipairs(stack and stack:GetChildren() or {}) do
+			local card = slot:FindFirstChild("Toast")
+			if card and KC.isShown(card) and card.AbsoluteSize.Y > 0 then
+				slots[#slots + 1] = { order = slot.LayoutOrder, card = card }
+			end
+		end
+		table.sort(slots, function(a, b)
+			return a.order < b.order
+		end)
+		local out = {}
+		for i, s in ipairs(slots) do
+			out[i] = s.card
+		end
+		return out
+	end
+	-- what "Give all pets" makes the server send: three Pet Index toasts, then the DEV answer (the newest)
+	local ALLPETS_TOASTS = {
+		{ "Pet Index: every Common pet found! Claim 500 tokens in the Index.", "good" },
+		{ "Pet Index: every Rare pet found! Claim 1,500 tokens in the Index.", "good" },
+		{ "Pet Index: every Epic pet found! Claim 4,000 tokens in the Index.", "good" },
+		{ "DEV: you got 30 new pets: all 31 are yours!", "good" },
+	}
+	local function showAllpetsToasts()
+		for _, t in ipairs(ALLPETS_TOASTS) do
+			KC.toClient("Notify", t[1], t[2], 1.5)
+		end
+		advance(0.6) -- the cards slide in
+	end
+	local function clearToasts()
+		advance(2.5) -- every test toast lasts 1.5 s
+	end
+
+	-- The open panel and the side toasts: on screens with room for both, the two newest toasts (the DEV answer
+	-- on top) cover no part of the panel. On a very short screen (`toastsFit` false) that cannot be: reported only.
+	local function checkPanelToasts(label, toastsFit)
+		local panel = named(devGui(), "DevPanel")
+		if not shown(panel) then
+			return
+		end
+		showAllpetsToasts()
+		local cards = toastCards()
+		local pr = rect(panel)
+		local hits = {}
+		for i = 1, math.min(2, #cards) do
+			local r = rect(cards[i])
+			if overlap(pr, r) then
+				hits[#hits + 1] = string.format("toast %d at %d,%d - %d,%d", i, r.x0, r.y0, r.x1, r.y1)
+			end
+		end
+		if toastsFit then
+			T.check(#cards >= 2 and #hits == 0, label .. ": the two newest side toasts (the DEV answer on top) leave the open panel readable",
+				#cards .. " toasts; " .. table.concat(hits, ", ") .. string.format(" / panel %d,%d - %d,%d", pr.x0, pr.y0, pr.x1, pr.y1))
+		else
+			T.info(string.format("*%s: too short for the panel below the toasts: %d of the 2 newest toasts overlap it (panel %d,%d - %d,%d)", label, #hits, pr.x0, pr.y0, pr.x1, pr.y1))
+		end
+		clearToasts()
+	end
+
+	local function checkPanel(label, floorPx, onPc)
 		local panel = named(devGui(), "DevPanel")
 		if not T.check(shown(panel), label .. ": the DEV button opens the 'Developer tools' panel") then
 			return
@@ -756,10 +945,44 @@ local function clientScenarios()
 		T.check(r.x0 >= -0.5 and r.x1 <= a.X + 0.5 and r.y0 >= -0.5 and r.y1 <= a.Y + 0.5, label .. ": the panel is fully on screen", string.format("%d,%d - %d,%d of %dx%d", r.x0, r.y0, r.x1, r.y1, a.X, a.Y))
 		T.check(a.X - r.x1 <= 24, label .. ": the panel is docked to the right edge (a side panel)", string.format("right edge at %d of %d", r.x1, a.X))
 		T.check(not overlap(r, band()), label .. ": the panel is never in the middle of the screen", string.format("%d,%d - %d,%d", r.x0, r.y0, r.x1, r.y1))
+		local hits = {}
+		for _, n in ipairs(neighbours()) do
+			if overlap(r, n.r) then
+				hits[#hits + 1] = n.label
+			end
+		end
+		if onPc then
+			T.check(#hits == 0, label .. ": the open panel covers none of the menu column, HUD, hotbar, tutorial panel", table.concat(hits, ", "))
+		else
+			T.info(label .. ": while open the panel covers: " .. (#hits == 0 and "nothing" or table.concat(hits, ", ")))
+		end
 		local small, measured = smallDevTexts(floorPx)
 		T.check(#small == 0 and measured >= 6, label .. ": every text of the panel is readable (>= " .. floorPx .. " px)", #small .. " small: " .. table.concat(small, "; "))
 		local scale = named(panel, "ReadScale")
 		T.info(string.format("%s: panel at %d,%d - %d,%d, design height %d, scale %.2f", label, r.x0, r.y0, r.x1, r.y1, panel.Size.Y.Offset, scale and scale.Scale or 0))
+	end
+
+	-- The closed tile and the side toasts: clear of the two newest toasts whenever the screen has room for that.
+	local function checkTileToasts(label, toastsFit)
+		local tile = named(devGui(), "DevTile")
+		if not shown(named(devGui(), "DevButton")) then
+			return
+		end
+		showAllpetsToasts()
+		local cards = toastCards()
+		local tr = rect(tile)
+		local hits = 0
+		for i = 1, math.min(2, #cards) do
+			if overlap(tr, rect(cards[i])) then
+				hits = hits + 1
+			end
+		end
+		if toastsFit then
+			T.check(#cards >= 2 and hits == 0, label .. ": the two newest side toasts never cover the DEV button", #cards .. " toasts, " .. hits .. " overlap")
+		else
+			T.info(string.format("*%s: too short for the DEV button below the toasts: %d of the 2 newest toasts overlap it", label, hits))
+		end
+		clearToasts()
 	end
 
 	S.client_dev = guarded("client_dev", function()
@@ -770,13 +993,19 @@ local function clientScenarios()
 			return
 		end
 		Mock.SetViewport(1920, 1080)
-		LocalPlayer:SetAttribute(ATTR, nil)
+		setHint(ATTR, nil)
+		setHint(ATTR_TUTORIAL, nil)
 		advance(0.5)
 		T.check(not shown(named(playerGui(), "DevButton")), "DEV: no DEV button without the NC_Dev attribute")
+		-- the old place of the hint (the Player, which every client can read) means nothing any more
 		LocalPlayer:SetAttribute(ATTR, true)
+		advance(0.6)
+		T.check(not shown(named(playerGui(), "DevButton")), "DEV: NC_Dev on the Player itself (readable by every client) shows nothing: the hint lives on the PlayerGui")
+		LocalPlayer:SetAttribute(ATTR, nil)
+		setHint(ATTR, true)
 		advance(1)
 		local g = devGui()
-		if not T.check(g ~= nil and g:IsA("ScreenGui"), "DEV: NC_Dev = true builds the ScreenGui 'NimbusDev'") then
+		if not T.check(g ~= nil and g:IsA("ScreenGui"), "DEV: NC_Dev = true on the PlayerGui builds the ScreenGui 'NimbusDev'") then
 			return
 		end
 		T.eq(g.ResetOnSpawn, false, "DEV: NimbusDev.ResetOnSpawn = false")
@@ -785,12 +1014,40 @@ local function clientScenarios()
 		local tile = rect(named(g, "DevTile"))
 		local a = area()
 		T.check(a.Y - tile.y1 <= 40 and a.X - tile.x1 <= 40, "DEV 1920x1080: on a PC the DEV button takes the bottom-right corner", string.format("%d,%d - %d,%d", tile.x0, tile.y0, tile.x1, tile.y1))
+		checkTileToasts("DEV 1920x1080", true)
+
+		-- a double (or triple) click on the DEV tile: the panel opens where the tile was, so the next clicks land
+		-- on its buttons ('Reset my data' is right there on a PC); they are ignored for a moment
+		local mark = logSize()
+		Mock.Click(named(g, "DevButton"))
+		advance(0.12)
+		local reset = named(g, "Dev_reset")
+		local tileOverReset = reset ~= nil and shown(reset) and overlap(tile, rect(reset))
+		for _ = 1, 2 do
+			if reset then
+				Mock.Click(reset)
+			end
+			advance(0.12)
+		end
+		advance(0.3)
+		local _, sent = lastCall(mark)
+		T.check(reset ~= nil and sent == 0 and reset.Text == "Reset my data",
+			"DEV panel: a triple click on the DEV button (the last clicks landing on 'Reset my data') opens the panel and nothing else",
+			(reset and reset.Text or "no reset button") .. " / sent " .. sent)
+		T.info("DEV 1920x1080: 'Reset my data' " .. (tileOverReset and "lies under" or "is clear of") .. " the closed DEV button's spot")
 
 		-- the panel and what every button sends
-		Mock.Click(named(g, "DevButton"))
-		advance(0.5)
-		checkPanel("DEV 1920x1080", 15)
+		advance(0.2)
+		checkPanel("DEV 1920x1080", 15, true)
 		T.check(type(Dev.IsOpen) == "function" and Dev.IsOpen() == true, "DEV: DevController.IsOpen() is true while the panel is open")
+		-- 'Restart tutorial' only when the server says it works (NC_DevTutorial)
+		local restart = named(g, "Dev_tutorial")
+		T.check(restart ~= nil and not shown(restart), "DEV panel: no 'Restart tutorial' button while the server has no tutorial restart (NC_DevTutorial unset)")
+		local heightWithout = named(g, "DevPanel").Size.Y.Offset
+		setHint(ATTR_TUTORIAL, true)
+		advance(0.6)
+		T.check(shown(restart) and named(g, "DevPanel").Size.Y.Offset > heightWithout, "DEV panel: NC_DevTutorial = true shows 'Restart tutorial' (and the panel grows for it)",
+			heightWithout .. " -> " .. named(g, "DevPanel").Size.Y.Offset)
 		local grantLabel = "+" .. Theme.ShortNumber(Config.Dev.GrantTokens) .. " tokens"
 		local expected = {
 			{ "Dev_allpets", "Give all pets", "allpets" },
@@ -801,7 +1058,7 @@ local function clientScenarios()
 		for _, e in ipairs(expected) do
 			local button = named(g, e[1])
 			if T.check(shown(button) and button.Text == e[2], "DEV panel: a big '" .. e[2] .. "' button", button and button.Text) then
-				local mark = logSize()
+				mark = logSize()
 				Mock.Click(button)
 				advance(0.4)
 				local call, n = lastCall(mark)
@@ -810,19 +1067,23 @@ local function clientScenarios()
 			end
 		end
 		T.check(KC.findText("Only you can see this", g) ~= nil, "DEV panel: the note 'Only you can see this'")
-		-- reset needs a second tap
-		local reset = named(g, "Dev_reset")
+		-- reset needs a second, separate tap
 		if T.check(shown(reset) and reset.Text == "Reset my data", "DEV panel: a 'Reset my data' button", reset and reset.Text) then
-			local mark = logSize()
+			mark = logSize()
 			Mock.Click(reset)
-			advance(0.4)
+			advance(0.12)
 			local _, n = lastCall(mark)
 			T.check(n == 0 and reset.Text == "Are you sure?", "DEV panel: the first tap on 'Reset my data' only asks 'Are you sure?'", reset.Text .. " / sent " .. n)
+			Mock.Click(reset)
+			advance(0.12)
+			_, n = lastCall(mark)
+			T.check(n == 0 and reset.Text == "Are you sure?", "DEV panel: a double click on 'Reset my data' (taps 0.12 s apart) only arms it: nothing is sent", reset.Text .. " / sent " .. n)
+			advance(0.5)
 			Mock.Click(reset)
 			advance(0.4)
 			local call
 			call, n = lastCall(mark)
-			T.check(n == 1 and call.args[1] == "reset" and reset.Text == "Reset my data", "DEV panel: the second tap sends DevCommand('reset')", call and tostring(call.args[1]) or "nothing sent")
+			T.check(n == 1 and call.args[1] == "reset" and reset.Text == "Reset my data", "DEV panel: a separate second tap (0.7 s later) sends DevCommand('reset')", call and tostring(call.args[1]) or "nothing sent")
 			mark = logSize()
 			Mock.Click(reset)
 			advance(4.6)
@@ -830,12 +1091,13 @@ local function clientScenarios()
 			T.check(n == 0 and reset.Text == "Reset my data", "DEV panel: an unconfirmed reset disarms itself after a few seconds", reset.Text .. " / sent " .. n)
 		end
 		-- a quick double tap sends once
-		local mark = logSize()
+		mark = logSize()
 		Mock.Click(named(g, "Dev_allpets"))
 		Mock.Click(named(g, "Dev_allpets"))
 		advance(0.4)
 		local _, n = lastCall(mark)
 		T.eq(n, 1, "DEV panel: a double tap sends the command once")
+		checkPanelToasts("DEV 1920x1080", true)
 
 		-- closing: X, Esc, gamepad B
 		Mock.Click(named(named(g, "DevPanel"), "Close"))
@@ -869,16 +1131,18 @@ local function clientScenarios()
 		end
 		T.check(named(g, "DevButton").Selectable == true and named(g, "Dev_allpets").Selectable == true, "DEV: the button and the panel buttons are Selectable (gamepad)")
 
-		-- other window sizes (desktop): the tile stays clear, the panel stays at the side
-		for _, size in ipairs({ { 1280, 720 }, { 1024, 768 }, { 844, 390 }, { 390, 844 } }) do
+		-- other window sizes (desktop): the tile stays clear, the panel stays at the side, the toasts stay readable
+		for _, size in ipairs({ { 1280, 720, true }, { 1024, 768, true }, { 844, 390, false }, { 390, 844, false } }) do
 			Mock.SetViewport(size[1], size[2])
 			advance(1.2)
 			local label = "DEV " .. size[1] .. "x" .. size[2]
 			local floorPx = size[2] >= 1000 and 15 or 14
 			checkTile(label, floorPx)
+			checkTileToasts(label, true)
 			Mock.Click(named(g, "DevButton"))
 			advance(0.6)
-			checkPanel(label, floorPx)
+			checkPanel(label, floorPx, size[3])
+			checkPanelToasts(label, size[1] ~= 844)
 			Dev.Close()
 			advance(0.3)
 		end
@@ -888,10 +1152,11 @@ local function clientScenarios()
 		-- NC_Dev removed: everything goes away
 		Mock.Click(named(g, "DevButton"))
 		advance(0.3)
-		LocalPlayer:SetAttribute(ATTR, nil)
+		setHint(ATTR, nil)
 		advance(0.6)
 		T.check(not shown(named(g, "DevButton")) and not shown(named(g, "DevPanel")), "DEV: removing NC_Dev hides the button and the panel")
 		T.check(Mock.BoundActions["NimbusDevBack"] == nil, "DEV: ...and releases gamepad B")
+		setHint(ATTR_TUTORIAL, nil)
 		KC.flushErrors("dev client")
 		KC.flushWarnings("dev client")
 	end)
@@ -903,8 +1168,8 @@ local function clientScenarios()
 		end
 		local mobile = playerGui():FindFirstChild("MobileControls")
 		T.check(mobile ~= nil and mobile.Enabled, "DEV (phone): the touch RUN / DASH buttons are on screen (precondition)")
-		LocalPlayer:SetAttribute(ATTR, true)
-		for _, size in ipairs({ { 390, 844 }, { 844, 390 }, { 1024, 768 } }) do
+		setHint(ATTR, true)
+		for _, size in ipairs({ { 390, 844, true }, { 844, 390, false }, { 1024, 768, true } }) do
 			Mock.SetViewport(size[1], size[2])
 			advance(1.2)
 			local label = "DEV phone " .. size[1] .. "x" .. size[2]
@@ -912,14 +1177,16 @@ local function clientScenarios()
 				label = "DEV tablet 1024x768"
 			end
 			checkTile(label, 14)
+			checkTileToasts(label, size[3])
 			Mock.Click(named(devGui(), "DevButton"))
 			advance(0.6)
-			checkPanel(label, 14)
+			checkPanel(label, 14, false)
+			checkPanelToasts(label, size[3])
 			Dev.Close()
 			advance(0.3)
 		end
 		Mock.SetViewport(390, 844)
-		LocalPlayer:SetAttribute(ATTR, nil)
+		setHint(ATTR, nil)
 		advance(0.6)
 		T.check(not shown(named(devGui(), "DevButton")), "DEV (phone): removing NC_Dev hides the button")
 		KC.flushErrors("dev phone")

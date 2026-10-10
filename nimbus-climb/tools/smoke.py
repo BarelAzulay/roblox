@@ -18,6 +18,11 @@ Two Lua worlds are booted (each its own state, so server and client cannot cheat
                                     the match lifecycle on all five difficulties, pet perks inside matches
                  smoke_hazards.lua  HazardService on real generated courses (incl. pendulum, wind, cannon, golden tokens) and the
                                     TokenService no-animation rule (Config.Tokens.ClientAnimated)
+  both worlds    smoke_dev.lua      owner-only developer tools (DevService / DevController)
+                 smoke_storm.lua    the Stormfang round: pet elements and the damage chart, the Stormfang pet (catalog +
+                                    PetBuilder High / Low), the Storm Altar on the real lobby (budget, overlaps, bridge
+                                    walk, rate-limited toast), and on the client the element pills, the Index art banner
+                                    and ShowcaseController
   client world   smoke_client.lua   Main.client.lua boot, movement, HUD, toasts / results, damage fx, replay of the exact
                                     server traffic, final invariants, touch layout (390x844 phone)
                  smoke_client_v2.lua CloudUI kit, State, menu + windows + roulette reveal, hotbar, pet followers, TokenFx
@@ -351,6 +356,16 @@ def main():
     mobile_scenarios = ["client_mobile"]
     client_files = ["smoke_client.lua", "smoke_client_v2.lua"]
     server_files.append("smoke_dev.lua"); client_files.append("smoke_dev.lua"); server_scenarios.insert(server_scenarios.index("final_checks"), "dev_tools"); client_scenarios.insert(client_scenarios.index("client_final"), "client_dev"); mobile_scenarios.append("client_dev_mobile")  # owner-only developer tools (smoke_dev.lua: both worlds, ARGS.context picks the half)
+    # the Stormfang round (smoke_storm.lua: both worlds, ARGS.context picks the half): elements + the Stormfang pet are
+    # content scenarios (after petbuilder), the Storm Altar runs on the booted lobby (after lobby), client_storm checks
+    # the element pills, the Index art banner and ShowcaseController
+    server_files.append("smoke_storm.lua"); client_files.append("smoke_storm.lua")
+    pure_scenarios += ["storm_elements", "storm_pet"]
+    server_scenarios[server_scenarios.index("petbuilder") + 1:server_scenarios.index("petbuilder") + 1] = ["storm_elements", "storm_pet"]
+    server_scenarios.insert(server_scenarios.index("lobby") + 1, "storm_altar")
+    client_scenarios.insert(client_scenarios.index("client_final"), "client_storm")
+    server_files.append("smoke_polish_portals.lua"); client_files.append("smoke_polish_portals.lua"); server_scenarios.insert(server_scenarios.index("final_checks"), "polish_portals"); client_scenarios.insert(client_scenarios.index("client_final"), "client_polish_portals"); mobile_scenarios.append("client_polish_portals_mobile")  # portal lock-in + outside countdown (smoke_polish_portals.lua: both worlds)
+    client_files.append("smoke_polish_guitool.lua"); client_scenarios.insert(client_scenarios.index("client_final"), "client_gui_dump")  # offline GUI renderer: tools/dump_gui.lua walks PlayerGui + the widget gallery (smoke_polish_guitool.lua: client world)
     if args.list:
         print("server:", ", ".join(server_scenarios))
         print("client:", ", ".join(client_scenarios + mobile_scenarios))

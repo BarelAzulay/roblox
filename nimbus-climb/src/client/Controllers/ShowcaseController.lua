@@ -62,6 +62,7 @@ local pending = {} -- [model] = true while waiting for it to replicate
 local loopConn = nil
 local clock = 0
 local initialized = false
+local frameWarned = false
 
 ----------------------------------------------------------------------
 -- Helpers
@@ -109,7 +110,8 @@ end
 ----------------------------------------------------------------------
 -- Records
 ----------------------------------------------------------------------
-local function weldPart(rec, part)
+-- ref: the root's CFrame the part's current CFrame belongs to (default: the server pose).
+local function weldPart(rec, part, ref)
 	if part == rec.Root or rec.Animated[part] or part:FindFirstChild("ShowcaseWeld") then
 		return
 	end
@@ -117,7 +119,7 @@ local function weldPart(rec, part)
 	weld.Name = "ShowcaseWeld"
 	weld.Part0 = rec.Root
 	weld.Part1 = part
-	weld.C0 = rec.Base:Inverse() * part.CFrame
+	weld.C0 = (ref or rec.Base):Inverse() * part.CFrame
 	weld.C1 = CFrame.new()
 	weld.Parent = part
 	rec.Welds[#rec.Welds + 1] = weld
@@ -138,7 +140,15 @@ local function addNeon(rec, part)
 	rec.Neon[#rec.Neon + 1] = { Part = part, T0 = part.Transparency }
 end
 
--- Puts the model back the way the server built it (tag removed while the model stays).
+-- The server pose of a part (relative to the root's server CFrame) and its transparency, restored on untag.
+local function remember(rec, part)
+	if part ~= rec.Root and not rec.Rest[part] then
+		rec.Rest[part] = { Rel = rec.Base:ToObjectSpace(part.CFrame), T = part.Transparency }
+	end
+end
+
+-- Puts the model back the way the server built it (tag removed while the model stays): also the parts
+-- PetBuilder.Animate re-poses (cloud halves, tail, aura) or pulses, which are not welded to the root.
 local function restore(rec)
 	pcall(function()
 		for _, weld in ipairs(rec.Welds) do
@@ -156,6 +166,12 @@ local function restore(rec)
 		end
 		if rec.Root and rec.Root.Parent then
 			rec.Root.CFrame = rec.Base
+		end
+		for part, r in pairs(rec.Rest) do
+			if part.Parent and part:IsDescendantOf(rec.Model) then
+				part.CFrame = rec.Base * r.Rel
+				part.Transparency = r.T
+			end
 		end
 	end)
 	rec.Welds, rec.Unanchored = {}, {}
@@ -214,6 +230,7 @@ local function setup(model, complete)
 		Welds = {},
 		Unanchored = {},
 		Neon = {},
+		Rest = {}, -- [part] = { Rel, T }: the server pose (see remember / restore)
 		Conns = {},
 		Welded = false,
 	}
@@ -221,6 +238,7 @@ local function setup(model, complete)
 	for _, d in ipairs(model:GetDescendants()) do
 		if d:IsA("BasePart") then
 			parts[#parts + 1] = d
+			remember(rec, d)
 			if rec.Animate and isAnimatedPart(d) then
 				rec.Animated[d] = true
 			end
@@ -251,6 +269,7 @@ local function setup(model, complete)
 		if not d:IsA("BasePart") or byModel[model] ~= rec then
 			return
 		end
+		remember(rec, d)
 		if rec.Animate and isAnimatedPart(d) then
 			rec.Animated[d] = true
 		elseif rec.Welded then
@@ -307,7 +326,15 @@ local function pose(rec)
 	if rec.Animate then
 		local ok = pcall(PetBuilder.Animate, rec.Model, clock, rec.AnimOpts)
 		if not ok then
-			rec.Animate = false -- a broken rig: keep the hover and the pulse only
+			-- a broken rig: its moving parts join the body, the hover and the pulse go on
+			rec.Animate = false
+			if rec.Welded then
+				local ref = rec.Root.CFrame
+				for part in pairs(rec.Animated) do
+					rec.Animated[part] = nil
+					pcall(weldPart, rec, part, ref)
+				end
+			end
 		end
 	end
 	local neon = rec.Neon
@@ -349,7 +376,8 @@ ensureLoop = function()
 	end
 	loopConn = RunService.RenderStepped:Connect(function(dt)
 		local ok, err = pcall(step, math.min(dt, 0.1))
-		if not ok then
+		if not ok and not frameWarned then
+			frameWarned = true -- once: a broken frame must not flood the output
 			warn("[ShowcaseController] frame failed: " .. tostring(err))
 		end
 	end)

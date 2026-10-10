@@ -16,7 +16,11 @@
 --    or the game's owner: game.CreatorType == User and UserId == game.CreatorId,
 --       or for a group-owned game the group's owner (GetRankInGroup(CreatorId) == 255, pcall, cached per player)
 --    or player.UserId is listed in Config.Dev.Admins )
--- Allowed players get the attribute NC_Dev = true (only a hint for the client's DEV button) and chat commands.
+-- Allowed players get chat commands and two hints for their client, set on their PlayerGui (a PlayerGui only
+-- replicates to its own player; an attribute on the Player itself would tell every client who the developers are):
+--   NC_Dev = true            show the DEV button
+--   NC_DevTutorial = true    show "Restart tutorial" (only when TutorialService has the Reload hook, see "tutorial")
+-- They are only hints: the server checks the permission again on every command.
 --
 -- Commands (remote "DevCommand"(command, arg) or chat, case-insensitive):
 --   allpets         one copy of every catalog pet the player does not own yet (Secret pets too), every pet marked
@@ -24,15 +28,18 @@
 --   tokens [n]      DataService.AddTokens(n): n defaults to Config.Dev.GrantTokens, whole numbers only, clamped to
 --                   1 .. Config.Dev.MaxTokensPerCommand (chat also takes "50,000", "50k", "1m")
 --   reset           back to a brand-new player: tokens, pets, equipped pets, items, stats, Pet Index progress and
---                   rewards, Cash, Gems, home, pet levels (the lobby spot stays assigned for this session); the
---                   tutorial restarts too when TutorialService has the reload hook (see "tutorial"), otherwise it
---                   is left as it is (the toast says so). Then DataService.ProfileRebased fires so PetService
---                   republishes the equipped pets / perks and IndexService forgets the completed groups.
---                   Refused during a match.
---   tutorial        restart the tutorial from step 1: the stored progress goes back to a new player's, then
---                   TutorialService re-reads it through its Reload / Refresh / Restart(player) hook (the first that
---                   exists). Without such a hook the running tutorial cannot be rewound, so the command is refused
---                   and nothing changes.
+--                   rewards, Cash, Gems, home, pet levels (the lobby spot stays assigned for this session). The
+--                   tutorial starts again as a new player's (gift and finish reward included: the reset took those
+--                   tokens) when TutorialService has the Reload hook. Without it a tutorial that already paid its
+--                   gift is ended as skipped, because every step from "spin" on needs the tokens and pets the reset
+--                   just took (it would wait forever); an earlier tutorial carries on. Then
+--                   DataService.ProfileRebased fires so PetService republishes the equipped pets / perks and
+--                   IndexService forgets the completed groups. Refused during a match.
+--   tutorial        replay the tutorial from step 1. Needs the hook TutorialService.Reload(player, { Replay = true }):
+--                   it drops the running tutorial and reads it again from the profile; Replay = true means the
+--                   finish reward is not paid again. The stored progress goes back to step 1 with Gifted kept, so
+--                   the "spin" gift is not paid again either (rewards are never paid twice). Without the hook the
+--                   command is refused, nothing changes, and the panel hides the button (NC_DevTutorial).
 --   skiptutorial    mark the tutorial done without the finish reward (TutorialService.HandleEvent(player, "Skip"))
 --   devhelp         a toast listing the chat commands
 -- After every change: DataService.MarkDirty + Sync (the menu updates at once) and a side toast "DEV: ..." (kind
@@ -43,6 +50,9 @@
 -- "/tokens 50000", "/reset", "/tutorial", "/skiptutorial", "/devhelp". Other "/" messages are left alone.
 -- Studio auto grant: with Config.Dev.StudioAutoGrant in Studio, every allowed player gets allpets + tokens once per
 -- server, right after their profile loads.
+-- The DevCommand listener is connected even when Config.Dev.Enabled is false (or DataService is missing): Roblox
+-- queues every event fired at a RemoteEvent nobody listens to, so a switched-off build must still drop them at once
+-- (Run rate-limits them and IsAllowed refuses everybody).
 --
 -- Persistence note: DataService merges Discovered, IndexClaimed, Tutorial.Done / Gifted and best times so they only
 -- ever grow (a gift can never be paid twice). With DataStores ON, a reset or tutorial restart of those fields
@@ -64,7 +74,9 @@ local DevService = {}
 DevService.Commands = { "allpets", "tokens", "reset", "tutorial", "skiptutorial", "devhelp" }
 
 local TAG = "[NimbusClimb][Dev] "
-local ATTR = "NC_Dev" -- player attribute: true for developers (a hint for the client's DEV button)
+local ATTR = "NC_Dev" -- PlayerGui attribute: true for developers (a hint for the client's DEV button)
+local ATTR_TUTORIAL = "NC_DevTutorial" -- PlayerGui attribute: true when "Restart tutorial" works in this build
+local PLAYER_GUI_WAIT = 10 -- seconds to wait for a joining player's PlayerGui
 local RATE_COUNT = 4 -- commands ...
 local RATE_WINDOW = 2 -- ... per this many seconds, per player
 local MAX_COMMAND_LENGTH = 32
@@ -113,11 +125,13 @@ end
 ----------------------------------------------------------------------
 
 local rankCache = {} -- [player] = true / false: group owner (only successful GetRankInGroup answers are cached)
+local devs = {} -- [player] = true: allowed when they joined (only decides who hears "slow down"; never a permission)
 local recent = {} -- [player] = { os.clock() of the commands accepted in the current window }
 local rateWarned = {} -- [player] = os.clock() of the last "slow down" toast
 local chatConns = {} -- [player] = Chatted connection
 local autoGranted = {} -- [userId] = true once the Studio auto grant ran in this server
 local initialized = false
+local ready = false -- Init finished with the tools on (Config.Dev.Enabled and a DataService)
 
 ----------------------------------------------------------------------
 -- Small helpers
@@ -316,28 +330,52 @@ end
 -- Commands. Each one: (player, profile, arg) -> ok, message, changed. None of them yields.
 ----------------------------------------------------------------------
 
--- The TutorialService function that re-reads a player's progress from the profile (nil when it has none).
+-- TutorialService.Reload(player, opts): drops the running tutorial and reads it again from the profile
+-- (opts.Replay = true: do not pay the finish reward again). nil while TutorialService has no such hook.
 local function tutorialReloader()
-	for _, name in ipairs({ "Reload", "Refresh", "Restart" }) do
-		if hasFunction(TutorialService, name) then
-			return TutorialService[name]
-		end
+	if hasFunction(TutorialService, "Reload") then
+		return TutorialService.Reload
 	end
 	return nil
 end
 
--- Puts the stored tutorial progress back to a new player's and lets TutorialService pick it up.
-local function rewindTutorial(player, profile, reload)
+-- Puts the stored tutorial back to step 1 and lets TutorialService read it again.
+-- A reset is a brand-new player (the gift's tokens are gone, so the gift and the finish reward are paid again);
+-- a restart is a replay: Gifted stays as it is and Replay asks TutorialService not to pay the finish reward again.
+local function rewindTutorial(player, profile, reload, isReset)
 	local tutorial = tableField(profile, "Tutorial")
 	tutorial.Step = 1
 	tutorial.Done = false
-	tutorial.Gifted = false
+	if isReset then
+		tutorial.Gifted = false
+	end
 	if reload then
-		local ok, err = pcall(reload, player)
+		local ok, err = pcall(reload, player, { Replay = not isReset })
 		if not ok then
-			warn("[DevService] TutorialService reload failed: " .. tostring(err))
+			warn("[DevService] TutorialService.Reload failed: " .. tostring(err))
 		end
 	end
+end
+
+-- Reset without the Reload hook: a tutorial that already paid its gift is skipped (no finish reward), because
+-- every step from "spin" on needs the tokens and pets the reset just took. Returns the note for the toast.
+local function settleTutorialAfterReset(player, profile)
+	local tutorial = profile.Tutorial
+	if type(tutorial) ~= "table" or tutorial.Gifted ~= true or tutorial.Done == true then
+		return "" -- not started on the gift yet (it carries on and pays the gift) or already finished
+	end
+	if not hasFunction(TutorialService, "HandleEvent") then
+		return ""
+	end
+	local ok, skipped = pcall(TutorialService.HandleEvent, player, "Skip")
+	if not ok then
+		warn("[DevService] TutorialService.HandleEvent failed: " .. tostring(skipped))
+		return ""
+	end
+	if skipped == true then
+		return " (tutorial skipped)"
+	end
+	return ""
 end
 
 local function cmdAllPets(player, profile)
@@ -418,12 +456,13 @@ local function cmdReset(player, profile)
 			player:SetAttribute(attr, 0)
 		end
 	end
-	-- the tutorial only restarts when TutorialService can re-read it (otherwise it stays as it is: consistent)
+	-- the tutorial: a new player's again when TutorialService can re-read it (or the build has none); otherwise
+	-- it must not wait forever on a step that needs what was just wiped
 	local tutorialNote = ""
 	if reload or not TutorialService then
-		rewindTutorial(player, profile, reload)
+		rewindTutorial(player, profile, reload, true)
 	else
-		tutorialNote = " (tutorial restart not in this build yet)"
+		tutorialNote = settleTutorialAfterReset(player, profile)
 	end
 	-- the profile changed underneath every other service: PetService republishes the equipped pets and perks,
 	-- IndexService forgets the completed groups (execute() then marks it dirty and syncs it to the client)
@@ -435,10 +474,10 @@ end
 
 local function cmdTutorial(player, profile)
 	local reload = tutorialReloader()
-	if TutorialService and not reload then
+	if not reload then
 		return false, "Restart tutorial is not in this build yet"
 	end
-	rewindTutorial(player, profile, reload)
+	rewindTutorial(player, profile, reload, false)
 	return true, "the tutorial starts again from step 1", true
 end
 
@@ -464,7 +503,10 @@ local function cmdSkipTutorial(player, profile)
 end
 
 local function cmdHelp()
-	return true, "/allpets  /tokens 50000  /reset  /tutorial  /skiptutorial  /devhelp", false
+	if tutorialReloader() then
+		return true, "/allpets  /tokens 50000  /reset  /tutorial  /skiptutorial  /devhelp", false
+	end
+	return true, "/allpets  /tokens 50000  /reset  /skiptutorial  /devhelp", false
 end
 
 local HANDLERS = {
@@ -540,12 +582,15 @@ function DevService.Run(player, command, arg, source)
 	if not takeSlot(player) then
 		-- a developer gets one "slow down" toast per window; nobody else hears anything
 		local now = os.clock()
-		if player:GetAttribute(ATTR) == true and (rateWarned[player] == nil or now - rateWarned[player] >= RATE_WINDOW) then
+		if devs[player] and (rateWarned[player] == nil or now - rateWarned[player] >= RATE_WINDOW) then
 			rateWarned[player] = now
 			log(player, source, command, arg, "refused: rate limit")
 			notify(player, "DEV: slow down (" .. RATE_COUNT .. " commands every " .. RATE_WINDOW .. " seconds)", "bad", 3)
 		end
 		return false, "rate limited"
+	end
+	if not ready then
+		return false, "developer tools are off" -- switched off or no DataService: dropped without a word
 	end
 	local allowed = DevService.IsAllowed(player) -- may yield once for a group game; nothing is held meanwhile
 	if not isLivePlayer(player) then
@@ -637,16 +682,35 @@ local function autoGrant(player)
 	execute(player, "tokens", nil, "studio auto grant")
 end
 
+-- The hints for the developer's own client go on their PlayerGui, which replicates to that player only.
+local function publishHints(player)
+	local playerGui = player:FindFirstChildOfClass("PlayerGui") or player:WaitForChild("PlayerGui", PLAYER_GUI_WAIT)
+	if not isLivePlayer(player) then
+		return
+	end
+	if not playerGui then
+		warn("[DevService] no PlayerGui for " .. who(player) .. ": the DEV button stays hidden (chat commands work)")
+		return
+	end
+	playerGui:SetAttribute(ATTR, true)
+	if tutorialReloader() then
+		playerGui:SetAttribute(ATTR_TUTORIAL, true)
+	else
+		playerGui:SetAttribute(ATTR_TUTORIAL, nil)
+	end
+end
+
 local function onPlayerAdded(player)
 	task.spawn(function()
 		local allowed = DevService.IsAllowed(player)
 		if not allowed or not isLivePlayer(player) then
 			return
 		end
-		player:SetAttribute(ATTR, true)
+		devs[player] = true
 		connectChat(player)
 		print(TAG .. "developer tools on for " .. who(player) .. " (DEV button, /devhelp)")
 		autoGrant(player)
+		publishHints(player)
 	end)
 end
 
@@ -659,6 +723,7 @@ local function onPlayerRemoving(player)
 	end
 	chatConns[player] = nil
 	rankCache[player] = nil
+	devs[player] = nil
 	recent[player] = nil
 	rateWarned[player] = nil
 end
@@ -666,6 +731,22 @@ end
 ----------------------------------------------------------------------
 -- Init
 ----------------------------------------------------------------------
+
+-- The DevCommand listener. Connected even when the tools are off: Roblox queues the events of a RemoteEvent
+-- without a listener, so an exploiter could otherwise fill that queue in a switched-off build.
+local function connectRemote()
+	local okRemote, remote = pcall(Remotes.Get, "DevCommand")
+	if not (okRemote and remote) then
+		warn("[DevService] DevCommand remote is missing: " .. tostring(remote))
+		return
+	end
+	remote.OnServerEvent:Connect(function(player, command, arg)
+		local ok, err = pcall(DevService.Run, player, command, arg, "button")
+		if not ok then
+			warn("[DevService] DevCommand failed: " .. tostring(err))
+		end
+	end)
+end
 
 function DevService.Init(deps)
 	if initialized then
@@ -680,6 +761,8 @@ function DevService.Init(deps)
 	if not PetCatalog then
 		PetCatalog = loadModule(Shared, "PetCatalog")
 	end
+	connectRemote()
+	Players.PlayerRemoving:Connect(onPlayerRemoving)
 	if devConfig().Enabled ~= true then
 		print(TAG .. "developer tools are switched off (Config.Dev.Enabled)")
 		return
@@ -688,18 +771,7 @@ function DevService.Init(deps)
 		warn("[DevService] DataService is missing: developer tools are off")
 		return
 	end
-
-	local okRemote, remote = pcall(Remotes.Get, "DevCommand")
-	if okRemote and remote then
-		remote.OnServerEvent:Connect(function(player, command, arg)
-			local ok, err = pcall(DevService.Run, player, command, arg, "button")
-			if not ok then
-				warn("[DevService] DevCommand failed: " .. tostring(err))
-			end
-		end)
-	else
-		warn("[DevService] DevCommand remote is missing: " .. tostring(remote))
-	end
+	ready = true
 
 	if hasSignal(DataService, "ProfileLoaded") then
 		DataService.ProfileLoaded:Connect(function(player)
@@ -707,7 +779,6 @@ function DevService.Init(deps)
 		end)
 	end
 	Players.PlayerAdded:Connect(onPlayerAdded)
-	Players.PlayerRemoving:Connect(onPlayerRemoving)
 	for _, player in ipairs(Players:GetPlayers()) do
 		onPlayerAdded(player)
 	end

@@ -8,7 +8,9 @@
 --
 --   top-left      Match panel (difficulty, timer, checkpoint bar, team chips, Leave button) with the
 --                 pre-match countdown numerals shown INSIDE it; the lobby Party panel takes the same
---                 slot; the small title card slides in there at join and leaves after four seconds
+--                 slot (portal name + a big red Leave button, the only way out of a locked portal; the
+--                 countdown; the members; "Locked until launch" + the head count); the small title card
+--                 slides in there at join and leaves after four seconds
 --   bottom-left   Currency stack (Cloud Tokens now: cloud coin + big abbreviated number, "+n" while in a
 --                 match; Cash and Gems rows appear by themselves once those player attributes exist),
 --                 above the vitals: heart badge + health bar (damage trail, low-health pulse, DOWNED
@@ -39,6 +41,7 @@ local RunService = game:GetService("RunService")
 local StarterGui = game:GetService("StarterGui")
 local GuiService = game:GetService("GuiService")
 local UserInputService = game:GetService("UserInputService")
+local TextService = game:GetService("TextService")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Config = require(Shared:WaitForChild("Config"))
@@ -161,7 +164,10 @@ local Tk = { RunSeen = 0 } -- the "+n" match chip
 local Mt = { -- match panel bookkeeping
 	Base = 0, At = 0, Phase = nil, Last = nil, GoUntil = 0, Rows = 1, Chips = {}, Count = 0,
 }
-local Pt = { Base = nil, At = 0, Rows = 1, Chips = {}, Count = 0, LastText = nil }
+local Pt = { -- party panel bookkeeping (Fit*: what the text sizes were last fitted for)
+	Base = nil, At = 0, Rows = 1, Chips = {}, Count = 0, LastText = nil, LeaveLockUntil = 0,
+	HintLong = "Locked until launch", HintShort = "Locked in", FitW = nil, FitTitle = nil, FitStatus = nil, FitHint = nil,
+}
 local LM = { ArmedUntil = 0, LockedUntil = 0 } -- leave-match confirmation
 local TC = { Serial = 0, Shown = false } -- title card
 
@@ -785,19 +791,24 @@ local function panelMetrics(touch)
 		TokensText = 22, TokensInset = 0,
 		CpY = 76, CpH = 24, CpText = 18,
 		ChipH = 30, RowPitch = 34, NameText = 18, StateText = 18,
-		PartyTeamY = 40, StatusH = 30, StatusText = 21,
+		-- party panel (a locked portal: Leave is the only way out, so it is big and sits beside the title),
+		-- then the countdown row, the member chips and a "Locked until launch" line with the head count
+		PartyLeaveW = 116, PartyLeaveNarrowW = 100, PartyLeaveH = 46, PartyLeaveText = 24, -- narrow: squeezed panels
+		PartyStatusH = 30, PartyStatusText = 22, PartyHintH = 24, PartyHintText = 18, PartyCountW = 58,
 	}
 	if touch then
 		m.LeaveW, m.LeaveH = 92, 40
 		m.TokensInset = m.LeaveW + 6
+		m.PartyLeaveH, m.PartyLeaveText = 56, 26 -- a fat thumb target (>= 44 px on screen at the 0.8 phone scale)
 	end
 	m.TeamY = m.CpY + m.CpH + 8
+	m.PartyTeamY = m.PartyLeaveH + 6 + m.PartyStatusH + 6
 	-- panel = content inset top (cloud bumps) + bottom pad + the inner frame's 6 px top / bottom margins
 	local insetTop, _, insetBottom = CloudUI.ContentInset(false, true)
 	m.Frame = insetTop + insetBottom + 12
 	m.MatchBaseH = m.Frame + m.TeamY - (m.RowPitch - m.ChipH) -- + RowPitch per chip row
-	m.PartyBaseH = m.Frame + m.PartyTeamY - (m.RowPitch - m.ChipH) + 4 + m.StatusH
-	m.TopReserve = m.MatchBaseH + 2 * m.RowPitch -- the tallest top-left panel (4-player match)
+	m.PartyBaseH = m.Frame + m.PartyTeamY - (m.RowPitch - m.ChipH) + 6 + m.PartyHintH -- + RowPitch per chip row
+	m.TopReserve = math.max(m.MatchBaseH, m.PartyBaseH) + 2 * m.RowPitch -- the tallest top-left panel (4 players)
 	return m
 end
 
@@ -1092,7 +1103,8 @@ local function newChip(parent, index, withHealth)
 	local stroke = Theme.Stroke(frame, Colors.PanelLight, 2, 0.2)
 	local name = newText(frame, "Name", "", "Body", M.NameText, WHITE, {
 		Position = UDim2.new(0, 8, 0, withHealth and -2 or 0),
-		Size = UDim2.new(1, -34, 1, withHealth and -4 or 0),
+		-- party chips (no health) never show a state glyph: their names get that room too
+		Size = UDim2.new(1, withHealth and -34 or -16, 1, withHealth and -4 or 0),
 		TextTruncate = Enum.TextTruncate.AtEnd,
 		Stroke = 0.3,
 	})
@@ -1248,43 +1260,61 @@ local function buildParty(holder)
 	})
 	UI.PartyInner = inner
 
+	-- row A: the portal's name and the big red Leave button (the only way out of a locked portal)
 	UI.PartyTitle = newText(inner, "Title", "Party", "Title", M.TitleText, WHITE, {
-		Size = UDim2.new(1, -(M.LeaveW + 8), 0, M.TitleH),
+		AnchorPoint = Vector2.new(0, 0.5),
+		Position = UDim2.new(0, 0, 0, M.PartyLeaveH / 2),
+		Size = UDim2.new(1, -(M.PartyLeaveW + 8), 0, M.TitleH),
 		RichText = true,
 		TextTruncate = Enum.TextTruncate.AtEnd,
 		Stroke = 0.15,
 		Outline = 2,
 	})
-	CloudUI.Button({
+	UI.PartyLeave = CloudUI.Button({
 		Name = "LeaveParty",
 		Text = "Leave",
-		Style = "Pink",
-		TextSize = M.LeaveText,
-		Size = UDim2.fromOffset(M.LeaveW, M.LeaveH),
+		Style = "Red",
+		TextSize = M.PartyLeaveText,
+		Size = UDim2.fromOffset(M.PartyLeaveW, M.PartyLeaveH),
 		AnchorPoint = Vector2.new(0.5, 0.5),
-		Position = UDim2.new(1, -M.LeaveW / 2, 0, M.LeaveH / 2),
+		Position = UDim2.new(1, -M.PartyLeaveW / 2, 0, M.PartyLeaveH / 2),
 		Callback = function()
-			fireRemote("LeaveParty")
+			-- one request per press (the server rate-limits too)
+			local now = os.clock()
+			if now >= Pt.LeaveLockUntil then
+				Pt.LeaveLockUntil = now + 0.8
+				fireRemote("LeaveParty")
+			end
 		end,
 		Parent = inner,
 	})
-	UI.PartyTeam = newFrame(inner, "Players", {
-		Position = UDim2.fromOffset(0, math.max(M.PartyTeamY, M.LeaveH + 6)),
-		Size = UDim2.new(1, 0, 0, M.RowPitch),
-	})
-	UI.PartyStatus = newText(inner, "Status", "Waiting for players...", "Toast", M.StatusText, Colors.TokenGlow, {
-		AnchorPoint = Vector2.new(0, 1),
-		Position = UDim2.new(0, 0, 1, 0),
-		Size = UDim2.new(1, -60, 0, M.StatusH),
+	-- row B: the countdown, full width so "Full! Starting in 3s" fits on a phone too
+	UI.PartyStatus = newText(inner, "Status", "Waiting for players...", "Display", M.PartyStatusText, Colors.TokenGlow, {
+		Position = UDim2.fromOffset(0, M.PartyLeaveH + 6),
+		Size = UDim2.new(1, 0, 0, M.PartyStatusH),
 		TextTruncate = Enum.TextTruncate.AtEnd,
 		Stroke = 0.15,
 		Outline = 2,
 	})
 	UI.PartyStatusScale = newScale(UI.PartyStatus, 1)
-	UI.PartyCount = newText(inner, "Count", "0/4", "Heading", 20, MUTED, {
+	-- row C: the members
+	UI.PartyTeam = newFrame(inner, "Players", {
+		Position = UDim2.fromOffset(0, M.PartyTeamY),
+		Size = UDim2.new(1, 0, 0, M.RowPitch),
+	})
+	-- row D: why the pad holds you (the walls) + the head count
+	UI.PartyHint = newText(inner, "Hint", "Locked until launch", "Label", M.PartyHintText, MUTED, {
+		AnchorPoint = Vector2.new(0, 1),
+		Position = UDim2.new(0, 0, 1, 0),
+		Size = UDim2.new(1, -(M.PartyCountW + 6), 0, M.PartyHintH),
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		Stroke = 0.2,
+		Outline = 1.5,
+	})
+	UI.PartyCount = newText(inner, "Count", "0/4", "Heading", 21, WHITE, {
 		AnchorPoint = Vector2.new(1, 1),
 		Position = UDim2.new(1, 0, 1, 0),
-		Size = UDim2.fromOffset(58, M.StatusH),
+		Size = UDim2.fromOffset(M.PartyCountW, M.PartyHintH),
 		TextXAlignment = Enum.TextXAlignment.Right,
 		Stroke = 0.2,
 		Outline = 1.5,
@@ -2013,12 +2043,61 @@ local function partyStatusText(now)
 	local count = type(party.Players) == "table" and #party.Players or 0
 	local max = tonumber(party.Max) or Config.Match.MaxPlayers
 	if party.Countdown ~= nil and Pt.Base ~= nil then
-		local left = math.max(0, math.ceil(Pt.Base - (now - Pt.At) - 0.001))
+		local left = math.ceil(Pt.Base - (now - Pt.At) - 0.001)
+		if left < 1 then
+			return "Launching..." -- the server hands the party to the match any moment now
+		end
+		if count >= max then
+			return "Full! Starting in " .. tostring(left) .. "s"
+		end
 		return "Starting in " .. tostring(left) .. "s"
 	elseif count >= max then
 		return "Party full!"
 	end
 	return "Waiting for players..."
+end
+
+-- Does `text` fit `width` design px at `size` in `font`? (measured by the engine; +5 px for the glyph outline)
+local function textFits(text, font, size, width)
+	local ok, bounds = pcall(function()
+		return TextService:GetTextSize(text, size, font, Vector2.new(4000, 400))
+	end)
+	return not ok or typeof(bounds) ~= "Vector2" or bounds.X + 5 <= width
+end
+
+-- The largest of `sizes` (design px, largest first) at which `text` fits; the smallest one otherwise.
+local function fittingSize(text, font, sizes, width)
+	for _, size in ipairs(sizes) do
+		if textFits(text, font, size, width) then
+			return size
+		end
+	end
+	return sizes[#sizes]
+end
+
+-- A squeezed panel (short screens, beside the menu column) shrinks the title / countdown a little and shortens
+-- the hint instead of cutting "Medium" down to "Medi...". Runs only when a text or the panel width changed.
+local function fitPartyTexts()
+	local title, status = UI.PartyTitle.Text, UI.PartyStatus.Text
+	if Pt.FitW == S.panelW and Pt.FitTitle == title and Pt.FitStatus == status and Pt.FitHint == Pt.HintLong then
+		return
+	end
+	Pt.FitW, Pt.FitTitle, Pt.FitStatus, Pt.FitHint = S.panelW, title, status, Pt.HintLong
+	local inner = innerWidth()
+	-- a squeezed panel gives the title a little of the Leave button's width (the button stays a big target)
+	local leaveW = (inner < 260) and M.PartyLeaveNarrowW or M.PartyLeaveW
+	if UI.PartyLeave.Size.X.Offset ~= leaveW then
+		UI.PartyLeave.Size = UDim2.fromOffset(leaveW, M.PartyLeaveH)
+		UI.PartyLeave.Position = UDim2.new(1, -leaveW / 2, 0, M.PartyLeaveH / 2)
+		UI.PartyTitle.Size = UDim2.new(1, -(leaveW + 8), 0, M.TitleH)
+	end
+	UI.PartyTitle.TextSize = fittingSize(title, UI.PartyTitle.Font, { M.TitleText, 26, 24, 22 }, inner - leaveW - 8)
+	UI.PartyStatus.TextSize = fittingSize(status, UI.PartyStatus.Font, { M.PartyStatusText, 20, 19 }, inner)
+	if textFits(Pt.HintLong, UI.PartyHint.Font, M.PartyHintText, inner - M.PartyCountW - 6) then
+		UI.PartyHint.Text = Pt.HintLong
+	else
+		UI.PartyHint.Text = Pt.HintShort
+	end
 end
 
 local function updatePartyClock(now)
@@ -2029,10 +2108,11 @@ local function updatePartyClock(now)
 	if text ~= Pt.LastText then
 		Pt.LastText = text
 		UI.PartyStatus.Text = text
-		if string.sub(text, 1, 8) == "Starting" then
+		if string.find(text, "Starting in", 1, true) then
 			pop(UI.PartyStatusScale, 1.12, 0.25)
 		end
 	end
+	fitPartyTexts()
 end
 
 local function applyPartyState(state)
@@ -2056,8 +2136,16 @@ local function applyPartyState(state)
 	if typeof(color) ~= "Color3" then
 		color = Colors.Good
 	end
-	UI.PartyTitle.Text = tostring(state.DifficultyName or "?") .. " Party"
+	UI.PartyTitle.Text = tostring(state.DifficultyName or "?")
 	UI.PartyTitle.TextColor3 = Theme.Lighten(color, 0.25)
+	-- members are held on the pad by the portal walls until launch (PortalService); Leave is the way out
+	if state.Locked == false then
+		Pt.HintLong, Pt.HintShort = "In the portal party", "In a party"
+	else
+		Pt.HintLong, Pt.HintShort = "Locked until launch", "Locked in"
+	end
+	UI.PartyHint.Text = Pt.HintLong
+	Pt.FitHint = nil -- fitPartyTexts (via updatePartyClock below) picks the long or short hint
 
 	local list = type(state.Players) == "table" and state.Players or {}
 	local count = math.min(#list, 4)

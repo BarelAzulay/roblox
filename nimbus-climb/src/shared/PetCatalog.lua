@@ -475,7 +475,8 @@ local RAW = {
 			Species = "Stormfang", Primary = C(42, 44, 51), Secondary = C(47, 180, 255), Eye = C(47, 180, 255),
 			Glow = true, WingStyle = "StormCloud", WingColor = C(46, 58, 102),
 		},
-		Perks = { MaxHealth = 0.20, StaminaRegen = 0.30 },
+		-- the top of the Secret tier (0.50 in total), while the best 3 pets of any perk still fit its cap
+		Perks = { MaxHealth = 0.18, CheckpointHeal = 0.32 },
 		Element = "Storm",
 		Role = "Combat",
 		Stats = Stats(3, 13, 74, 15),
@@ -1139,6 +1140,28 @@ function PetCatalog.Validate()
 			if typeof(special.Color) ~= "Color3" then
 				bad(id .. ": Special.Color must be a Color3")
 			end
+		end
+	end
+
+	-- The best pets for a perk, equipped together, must stay within that perk's cap on their own.
+	local maxEquipped = tonumber(Config.Pets.MaxEquipped) or 3
+	for key, cap in pairs(Config.Pets.PerkCaps) do
+		local values = {}
+		for _, def in ipairs(PetCatalog.Pets) do
+			local v = type(def.Perks) == "table" and def.Perks[key]
+			if type(v) == "number" then
+				table.insert(values, v)
+			end
+		end
+		table.sort(values, function(a, b)
+			return a > b
+		end)
+		local top = 0
+		for i = 1, math.min(maxEquipped, #values) do
+			top = top + values[i]
+		end
+		if type(cap) == "number" and top > cap + 1e-9 then
+			bad("the best " .. maxEquipped .. " " .. key .. " pets add up to " .. top .. ", above the cap " .. cap)
 		end
 	end
 

@@ -34,3 +34,43 @@ python3 tools/render_model.py module:server/Services/LobbyBuilder:Build -o any.p
   `--echo` (show the game's print/warn output).
 * Balls and cylinders are drawn as polyhedra and textured materials (Grass, Cobblestone...) as flat colour, so the
   render shows shapes, colours and proportions, not Roblox's exact lighting.
+
+## GUI renderer: see the 2D UI without Studio
+
+`render_gui.py` boots the **real** client (`Main.client.lua` and every controller) in the same lupa + `robloxmock.lua`
+world `smoke.py` uses, at the screen size you ask for, drives it into a scenario with the fake server events the smoke
+tests send (`dump_gui.lua`), dumps every visible GuiObject of PlayerGui and draws the dump with Pillow. The mock lays
+out UDim2 / AnchorPoint / AutomaticSize / UIListLayout / UIGridLayout / UIPadding / UIScale / UIAspectRatio /
+UISizeConstraint; the renderer measures text with real fonts (the mock's layout engine is handed the same metrics, so
+auto-sized pills fit their text) and draws ScreenGuis by DisplayOrder, siblings by ZIndex, rounded corners,
+UIStrokes (box and text), UIGradients, legacy borders, TextScaled + UITextSizeConstraint, wrapping, truncation,
+rich-text colours, the typewriter limit, colour emoji, Rotation, CanvasGroups, clipping and scroll bars. A dump takes
+well under a second, a 1080p render one to three seconds.
+
+```sh
+python3 tools/render_gui.py lobby -o lobby.png                       # idle lobby HUD at 1920x1080
+python3 tools/render_gui.py match --size 1280x720 -o match.png       # match panel, damaged HP bar, drained stamina
+python3 tools/render_gui.py menu:Index:Mythic -o index.png           # a window (Inventory, Pets, Index, Shop, Stats)
+python3 tools/render_gui.py tutorial:3 --grid -o tutorial.png        # 1920x1080, 1280x720, 390x844, 844x390 in one sheet
+python3 tools/render_gui.py match --crop 0,920,420,160 --scale 3 -o hp.png   # zoom into the HP / stamina bars
+python3 tools/render_gui.py npc --mark-small --boxes -o npc.png      # red frames on small text, every box outlined
+python3 tools/render_gui.py gallery -o gallery.png                   # renderer check: one cell per feature, known values
+```
+
+* Scenarios: `lobby`, `title` (title card up), `match` / `match:hit` (a quarter second after a hit), `countdown`,
+  `party` (portal party panel), `results`, `menu:<Window>[:<Tab or Index group>]`, `tutorial[:<step>]`, `npc[:<n>]`,
+  `dev` (owner panel), `toasts`, `gallery`, or a `.json` dump written earlier with `--json`. `--list` prints them.
+* Screen: `--size WxH` (default 1920x1080). The smaller side <= 500 px boots a touch device (RUN / DASH buttons,
+  raised HUD); `--touch` / `--no-touch` override (use `--touch` for tablets). Roblox's top bar (the 58 px inset) and,
+  on touch devices, its thumbstick and jump button are sketched as faint ghosts (`--no-chrome` hides them).
+* Output: the PNG plus a report on stdout: object and text counts, the game's script errors, every text under the
+  readability floor (15 px on screens >= 1000 px tall, 14 px below) and the **smallest on-screen text** with its path.
+  `--json FILE` keeps the dump (absolute boxes, ZIndex, colours, corner radius, strokes, gradients, text properties).
+  Other flags: `--bg lobby|grey|sky|dark`, `--ss` (supersampling), `--no-labels`, `--echo`, `-v` (font mapping, warns).
+* Fonts are substitutes found with `fc-list`: a bold rounded sans when installed (Fredoka, Nunito, Varela Round...),
+  otherwise Inter, then DejaVu Sans; symbols fall back to DejaVu, emoji to Noto Color Emoji. Glyph shapes and widths
+  differ a little from Roblox's FredokaOne / Gotham / Builder Sans, so a text that only just fits (or only just gets
+  truncated) deserves a look in Studio. ImageLabels and ViewportFrames are labelled placeholders (a viewport shows a
+  blob tinted by ImageColor3, so Index silhouettes come out black); animations are frozen at the moment of the dump.
+* `tools/smoke_polish_guitool.lua` (smoke scenario `client_gui_dump`) checks the dumper against the live client UI
+  and the gallery.

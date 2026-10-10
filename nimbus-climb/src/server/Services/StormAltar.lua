@@ -9,28 +9,35 @@
 --   StormAltar.Used                         Util.Signal; Fire(player) when a player uses the altar's prompt
 --
 -- What it builds (all static; the client animates the showcase, ShowcaseController):
---   Island     a dark navy voxel storm cloud (shared/Voxel.lua, 2-stud voxels): a flat walking top with lighter
---              storm tops, puffy rim billows (lighter tops, a few white puffs) open towards the bridge, a tiered
---              belly with hanging puffs, darker underneath. Its walking surface sits DECK studs above the lobby.
---   Dais       a ring of charcoal stone blocks (radius ~12) with bevelled lighter tops, stacked mount blocks and
---              scattered rubble; a segmented inner rim around a dark navy portal disc with dim glowing runes.
---   Crystals   six cyan crystal shards (Glass shell around a Neon core) on the ring, the front one (towards the
---              plaza) biggest with two small side shards, plus a diamond gem set into the back stone.
+--   Island     a dark navy storm cloud sculpted with shared/Voxel.lua: a storm-blue walking top (DECK studs above
+--              the lobby), puffy 2-stud-voxel rim billows with lighter tops and a few white puffs (open towards
+--              the bridge), a lumpy 3-stud-voxel belly, darker underneath.
+--   Dais       a ring of charcoal stone blocks (radius ~12) with bevelled lighter tops, stepped clusters and
+--              stacked mounts by the crystals, scattered rubble; a segmented inner rim around a dark navy portal
+--              disc with a softer heart and dim glowing runes.
+--   Crystals   as in the art seen from its front (the plaza): the head crystal, the biggest (a stepped diamond with
+--              two small side shards), rises at the far side behind the showcase, a medium pair flanks it, a
+--              smaller pair stands at the near sides and a low diamond gem is set into the near stone. Every shard
+--              is a pale Glass shell around an electric-cyan Neon core.
 --   Showcase   StormfangShowcase: PetBuilder.Build(stormfang, { Detail = "High", Scale = 3 }), anchored, hovering
 --              over the portal on its storm cloud, leaning forward (prowling) towards the plaza; tagged
---              "NC_Showcase" with the attributes PetId, PetParts and Ready. An invisible collider keeps players out
---              of the big pet.
+--              "NC_Showcase" with the attributes PetId, PetParts, HoverAmp and Ready. An invisible collider keeps
+--              players out of the big (non-colliding) pet.
 --   Bridge     a stone bridge from the island to LobbyInfo.AltarDock (street junction). The junction keeps its
 --              inner rope rail (LobbyBuilder exposes no way to open it), so the deck stays at the island height
 --              over the rail and stone steps lead down onto the street. Low parapets with crystal lanterns, two
 --              storm puffs underneath.
---   Sign       Model StormAltarSign: a framed poster at the bridge landing (SurfaceGui: "STORM ALTAR", the
---              player's art Config.Art.StormfangImage, "Secret pets") and a world-sized title tag above the altar.
+--   Sign       Model StormAltarSign: an entrance gate over the bridge's street end whose panel faces the street
+--              (SurfaceGui in the cloud UI style: the player's art Config.Art.StormfangImage, "STORM ALTAR",
+--              "Secret pets", "Awakens soon") and a pixel-sized "STORM ALTAR" / "Secret pets" title tag above the
+--              altar, readable from the plaza.
 --   Prompt     ProximityPrompt "Storm Altar" (ActionText "Look"): phase 1 sends the side toast
 --              "The Storm Altar awakens soon: summon Secret pets with Gems!" (Notify, rate-limited per player).
---   Lights     a few soft electric-blue PointLights with small ranges.
--- Collision only on walkable parts (island top, dais stones, rim, disc, bridge, steps) plus the invisible
--- showcase collider. Part budget <= ~450 without the showcase pet. Plain Lua 5.1-compatible syntax only.
+--   Lights     a few soft electric-blue PointLights with small ranges (portal, head crystal, gate).
+-- No AltarSite: a free spot between the plaza and the plot ring road is searched (away from lobby parts, NPC spots
+-- and the spawn), and the dock is found by raycasting for the street. Collision only on walkable parts (island
+-- top and billows, dais stones, rim, disc, bridge, steps, gate) plus the invisible showcase collider. Part budget
+-- <= ~450 without the showcase pet. Plain Lua 5.1-compatible syntax only.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -74,11 +81,10 @@ local TOAST = "The Storm Altar awakens soon: summon Secret pets with Gems!"
 local TOAST_COOLDOWN = 3 -- seconds between two toasts for the same player
 
 local DECK = 3 -- the island's walking surface above the lobby walking height
-local V = 2 -- island cloud voxel size
 local R_TOP = 23 -- walkable top radius
 local RING_C, RING_D = 12.2, 3.2 -- stone ring: centre radius and radial depth (11 = 10.6 .. 13.8)
 local RING_N = 22 -- stones around (one centred on the front, one on the back)
-local RIM_R, RIM_D, RIM_H, RIM_N = 6.9, 1.5, 0.8, 16 -- inner portal rim
+local RIM_R, RIM_D, RIM_H, RIM_N = 6.9, 1.6, 1.2, 16 -- inner portal rim
 local DISC_S = 10.3 -- side of the four turned squares of the portal disc (union radius 6.2 .. 7.3)
 local HOVER = 3.2 -- gap between the walking surface and the showcase's lowest point
 local PROWL = math.rad(-8) -- forward lean of the showcase (nose down)
@@ -269,12 +275,7 @@ end
 ----------------------------------------------------------------------
 -- Site: LobbyInfo.AltarSite / AltarDock, or a free spot at the lobby edge
 ----------------------------------------------------------------------
-local function lobbyTop()
-	local lobby = Config.Lobby or {}
-	return (lobby.Origin or Vector3.new(0, 300, 0)).Y
-end
-
--- Every collidable-sized part of the lobby as an oriented box (for the free-spot search).
+-- Every visible part of the lobby near the walking height as an oriented box (for the free-spot search).
 local function obstacleBoxes(folder, top)
 	local list = {}
 	if typeof(folder) ~= "Instance" then
@@ -398,15 +399,11 @@ end
 -- Island: a dark navy voxel storm cloud
 ----------------------------------------------------------------------
 local ISLAND_PALETTE = {
-	Walk = C.Walk,
-	WalkLight = C.StormTop,
-	Floor = C.Floor,
 	Body = C.Storm,
 	Body_Light = C.StormMid,
 	Body_Dark = C.StormDeep,
 	Billow = C.StormMid,
 	Billow_Light = C.StormTop,
-	Billow_Dark = C.Storm,
 	Puff = C.Puff,
 	Puff_Light = C.PuffLight,
 	Puff_Dark = C.PuffDark,
@@ -531,7 +528,7 @@ local function buildIsland(parent, A, gapDeg)
 		Palette = ISLAND_PALETTE,
 		Name = "RimClouds",
 		CFrame = A,
-		MaxParts = 95,
+		MaxParts = 115,
 		Keep = { "Puff", "Puff_Light", "Puff_Dark" },
 	})
 	collideTops(rim, A)
@@ -612,7 +609,7 @@ local function buildRing(parent, A)
 		if spec then
 			h = spec.Mount - 0.9
 		elseif key == 0 then
-			h = 2.4 -- the near stone carries the gem
+			h = 2.8 -- the near stone carries the gem
 		end
 		local color = STONE_COLORS[(i % #STONE_COLORS) + 1]
 		local cf = polarCF(A, deg, RING_C, h / 2)
@@ -646,9 +643,9 @@ local function buildRing(parent, A)
 	-- scattered rubble around the outer foot of the ring
 	for i = 1, 6 do
 		local deg = i * 60 + 25 + hash(i, 7, 21) * 14
-		local s = 0.8 + hash(i, 8, 21) * 0.6
+		local s = 0.7 + hash(i, 8, 21) * 0.5
 		local cf = polarCF(A, deg, RING_C + RING_D / 2 + 0.9 + hash(i, 9, 21) * 0.8, s / 2) * CFrame.Angles(0, hash(i, 10, 21) * 1.2, 0)
-		block(m, "Rubble", cf, Vector3.new(s, s, s), (i % 2 == 0) and C.StoneC or C.StoneB, { Collide = true, Shadow = false })
+		block(m, "Rubble", cf, Vector3.new(s, s, s), (i % 2 == 0) and C.StoneC or C.StoneB, { Shadow = false })
 	end
 	return m, tops
 end
@@ -676,10 +673,11 @@ local function buildCrystals(parent, A, tops)
 			end
 		end
 	end
-	-- the low diamond gem set into the outer face of the near stone (Glass rim around a Neon core)
-	local near = polarCF(A, 0, RING_C + RING_D / 2 + 0.05, 1.3) * CFrame.Angles(0, 0, math.rad(45))
-	block(m, "GemRim", near, Vector3.new(1.7, 1.7, 0.5), C.CrystalGlass, { Material = MAT.Glass, Transparency = 0.3, Shadow = false })
-	block(m, "GemCore", near * CFrame.new(0, 0, -0.08), Vector3.new(1.05, 1.05, 0.5), C.CrystalCore, { Material = MAT.Neon, Shadow = false })
+	-- the low diamond gem set into the outer face of the near stone: a dark setting, a Glass rim, a Neon core
+	local near = polarCF(A, 0, RING_C + RING_D / 2 + 0.05, 1.6) * CFrame.Angles(0, 0, math.rad(45))
+	block(m, "GemSetting", near * CFrame.new(0, 0, 0.06), Vector3.new(2.3, 2.3, 0.4), C.StoneDeep, { Shadow = false })
+	block(m, "GemRim", near * CFrame.new(0, 0, -0.12), Vector3.new(1.8, 1.8, 0.4), C.CrystalGlass, { Material = MAT.Glass, Transparency = 0.25, Shadow = false })
+	block(m, "GemCore", near * CFrame.new(0, 0, -0.2), Vector3.new(1.1, 1.1, 0.4), C.CrystalCore, { Material = MAT.Neon, Shadow = false })
 	return m, headTip
 end
 
@@ -720,10 +718,9 @@ local function stormPuff()
 	end
 	local ok, model = pcall(function()
 		local g = Voxel.NewGrid(8)
-		Voxel.Shape(g, { Kind = "Ellipsoid", Center = { 0, 0, 0 }, Radius = { 3.2, 1.6, 2.4 }, Key = "Body" })
-		Voxel.Shape(g, { Kind = "Ellipsoid", Center = { 2.2, -0.6, 0.8 }, Radius = { 2, 1.4, 1.8 }, Key = "Body", KeepExisting = true })
-		Voxel.Shape(g, { Kind = "Ellipsoid", Center = { -2.4, -0.4, -0.6 }, Radius = { 2, 1.3, 1.7 }, Key = "Body", KeepExisting = true })
-		Voxel.Shade(g, { Smooth = 2, Seed = 4 })
+		Voxel.Shape(g, { Kind = "Ellipsoid", Center = { 0, 0, 0 }, Radius = { 3.2, 1.5, 2.3 }, Key = "Body" })
+		Voxel.Shape(g, { Kind = "Ellipsoid", Center = { 2.3, -0.5, 0.6 }, Radius = { 1.9, 1.3, 1.7 }, Key = "Body", KeepExisting = true })
+		Voxel.Shade(g, { Smooth = 2, Seed = 4, Dark = false })
 		return Voxel.Build(g, { VoxelSize = 1.4, Palette = ISLAND_PALETTE, Name = "StormPuff", MaxParts = 7 })
 	end)
 	if ok and model then
@@ -748,14 +745,12 @@ local function placePuff(parent, cf)
 	m.Parent = parent
 end
 
-local function lantern(parent, cf, withLight)
+-- a stone post with a small crystal on top
+local function lantern(parent, cf)
 	block(parent, "LanternPost", cf * CFrame.new(0, 1.1, 0), Vector3.new(1.1, 2.2, 1.1), C.StoneB, { Collide = true, Shadow = false })
 	local top = cf * CFrame.new(0, 2.2 + 0.45, 0) * CFrame.Angles(0, math.rad(45), 0)
 	block(parent, "LanternGlass", top, Vector3.new(0.75, 0.9, 0.75), C.CrystalGlass, { Material = MAT.Glass, Transparency = 0.3, Shadow = false })
-	local core = block(parent, "LanternCore", top, Vector3.new(0.42, 0.86, 0.42), C.CrystalCore, { Material = MAT.Neon, Shadow = false })
-	if withLight then
-		pointLight(core, 0.8, 8)
-	end
+	block(parent, "LanternCore", top, Vector3.new(0.42, 0.86, 0.42), C.CrystalCore, { Material = MAT.Neon, Shadow = false })
 end
 
 -- landing: island edge point, dock: street point (both world, any height). Returns the bridge model.
@@ -797,8 +792,8 @@ local function buildBridge(parent, A, landing, dock)
 					block(m, "ParapetCap", c * CFrame.new(0, 0.62, 0), Vector3.new(0.9, 0.14, sb - sa), C.StoneLight, { Collide = true, Shadow = false })
 				end
 			end
-			lantern(m, bcf * CFrame.new(x, 0, -s0), false)
-			lantern(m, bcf * CFrame.new(x, 0, -mid), true)
+			lantern(m, bcf * CFrame.new(x, 0, -s0))
+			lantern(m, bcf * CFrame.new(x, 0, -mid))
 		end
 	end
 
@@ -824,7 +819,7 @@ local function buildBridge(parent, A, landing, dock)
 end
 
 ----------------------------------------------------------------------
--- Sign: the framed poster (SurfaceGui) at the bridge landing + a title tag above the altar
+-- Sign: the entrance gate with its art panel (SurfaceGui) + a title tag above the altar
 ----------------------------------------------------------------------
 local function corner(parent, scaleOrPx, isScale)
 	local c = Instance.new("UICorner")
@@ -872,13 +867,7 @@ local function label(parent, text, role, props, outline)
 	l.Position = props.Position or UDim2.fromScale(0.5, 0.5)
 	l.Size = props.Box or UDim2.fromScale(1, 1)
 	l.TextWrapped = false
-	l.ZIndex = props.ZIndex or 3
-	if props.Max then
-		local c = Instance.new("UITextSizeConstraint")
-		c.MaxTextSize = props.Max
-		c.MinTextSize = 8
-		c.Parent = l
-	end
+	l.ZIndex = 3
 	l.Parent = parent
 	return l
 end
@@ -902,7 +891,6 @@ local function panelGui(board)
 	gui.PixelsPerStud = 50
 	gui.LightInfluence = 0
 	gui.AlwaysOnTop = false
-	gui.MaxDistance = 160
 	gui.Adornee = board
 
 	local card = frame(gui, "Card", UDim2.fromOffset(5, 5), UDim2.new(1, -10, 1, -10), C.White)
@@ -949,14 +937,16 @@ local function panelGui(board)
 	return gui
 end
 
--- World-sized title tag above the altar (readable from the plaza and the street).
+-- Title tag above the altar (readable from the plaza and the street). World text rule: a PIXEL-sized billboard,
+-- so "STORM ALTAR" (36 px) and "Secret pets" (22 px) keep their on-screen size at any distance.
+local TAG_W, TAG_H, TAG_TITLE, TAG_SUB = 300, 100, 36, 22
 local function titleTag(anchor)
 	local gui = Instance.new("BillboardGui")
 	gui.Name = "TitleTag"
-	gui.Size = UDim2.new(15, 0, 4.8, 0)
+	gui.Size = UDim2.fromOffset(TAG_W, TAG_H)
 	gui.AlwaysOnTop = false
 	gui.LightInfluence = 0
-	gui.MaxDistance = 320
+	gui.MaxDistance = 220
 	gui.Adornee = anchor
 
 	local card = frame(gui, "Card", UDim2.fromScale(0, 0), UDim2.fromScale(1, 1), C.White)
@@ -968,8 +958,8 @@ local function titleTag(anchor)
 	shine.BackgroundTransparency = 0.86
 	shine.ZIndex = 2
 	corner(shine, 0.5, true)
-	label(card, "STORM ALTAR", "Title", { Name = "Title", Scaled = true, Position = UDim2.fromScale(0.5, 0.36), Box = UDim2.fromScale(0.9, 0.56) }, 3)
-	label(card, "Secret pets", "Heading", { Name = "Subtitle", Scaled = true, Color = C.Cyan, Position = UDim2.fromScale(0.5, 0.78), Box = UDim2.fromScale(0.7, 0.3) }, 2)
+	label(card, "STORM ALTAR", "Title", { Name = "Title", Size = TAG_TITLE, Position = UDim2.fromScale(0.5, 0.36), Box = UDim2.fromScale(0.9, 0.56) }, 3)
+	label(card, "Secret pets", "Heading", { Name = "Subtitle", Size = TAG_SUB, Color = C.Cyan, Position = UDim2.fromScale(0.5, 0.78), Box = UDim2.fromScale(0.7, 0.3) }, 2)
 	gui.Parent = anchor
 	return gui
 end
@@ -1182,14 +1172,13 @@ function StormAltar.Build(lobbyInfo)
 	end
 	altarModel, altarCFrame = nil, nil
 
-	local top = lobbyTop()
 	local info = type(lobbyInfo) == "table" and lobbyInfo or {}
 	local site = typeof(info.AltarSite) == "CFrame" and info.AltarSite or nil
 	if not site then
 		site = fallbackSite(info)
 	end
 	site = flatLook(site.Position, site.Position + site.LookVector) -- yaw only
-	top = site.Position.Y
+	local top = site.Position.Y -- the lobby's walking height
 	local A = site * CFrame.new(0, DECK, 0)
 
 	local model = Instance.new("Model")
@@ -1203,14 +1192,13 @@ function StormAltar.Build(lobbyInfo)
 		dock = findDock(site, top, { model })
 	end
 	-- bridge direction (altar-local angle) and the landing on the island's edge
-	local gapDeg, landing, outward = 180, nil, nil
+	local gapDeg, landing = 180, nil
 	if dock then
 		local dl = A:PointToObjectSpace(dock)
 		gapDeg = math.deg(atan2(dl.X, -dl.Z)) % 360
 		local flat = Vector3.new(dock.X - A.Position.X, 0, dock.Z - A.Position.Z)
 		if flat.Magnitude > R_TOP + 2 then
-			outward = flat.Unit
-			landing = A.Position + outward * (R_TOP - 4)
+			landing = A.Position + flat.Unit * (R_TOP - 4)
 		end
 	end
 
@@ -1225,8 +1213,10 @@ function StormAltar.Build(lobbyInfo)
 	section("portal", function()
 		buildPortal(model, A)
 	end)
+	local headTip = 0
 	section("crystals", function()
-		buildCrystals(model, A, tops)
+		local _, tip = buildCrystals(model, A, tops)
+		headTip = tip or 0
 	end)
 	local gateCF = nil
 	if landing and dock then
@@ -1241,7 +1231,8 @@ function StormAltar.Build(lobbyInfo)
 		showTop = h or showTop
 	end)
 	section("sign", function()
-		buildSign(model, A, gateCF, showTop + 4.2)
+		-- the title tag floats clear of the showcase and the head crystal
+		buildSign(model, A, gateCF, math.max(showTop, headTip) + 4.6)
 	end)
 	section("prompt", function()
 		buildPrompt(model, A)

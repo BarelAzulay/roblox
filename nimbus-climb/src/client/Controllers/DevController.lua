@@ -4,9 +4,11 @@
 --   DevController.Init()
 --   Extras (tests): DevController.Open(), DevController.Close(), DevController.IsOpen(), DevController.Relayout()
 --
--- Everything here only exists while the LocalPlayer has the attribute NC_Dev = true (DevService sets it for the
--- game's owner, the Config.Dev.Admins and everyone testing in Studio). The attribute is watched; it is only a hint:
--- the server checks every command again.
+-- Everything here only exists while the LocalPlayer's PlayerGui has the attribute NC_Dev = true (DevService sets it
+-- for the game's owner, the Config.Dev.Admins and everyone testing in Studio; a PlayerGui only replicates to its own
+-- player, so nobody else learns who the developers are). The attribute is watched; it is only a hint: the server
+-- checks every command again. NC_DevTutorial = true (same place) shows "Restart tutorial": the server only sets it
+-- when its TutorialService can restart a tutorial.
 --
 -- ScreenGui "NimbusDev" (display order 15, IgnoreGuiInset = false), built the first time NC_Dev turns true:
 --   * DevTile: a chunky cloud tile in the menu tiles' style (glossy face, thick navy outline, big "DEV") with the
@@ -14,12 +16,19 @@
 --     on the right edge that touches none of the menu column, the HUD blocks (NimbusHud panels + its published
 --     TopRight geometry), the hotbar, the tutorial panel, the touch RUN / DASH buttons and Roblox's jump button,
 --     and stays out of the middle of the screen. On a PC that is the bottom-right corner; on phones and tablets it
---     sits just above the thumb buttons. Re-checked twice a second and on every screen size change.
+--     sits just above the thumb buttons. The top of the side-toast column (NimbusNotify's ToastStack, measured;
+--     room for its two newest toasts) is kept free too whenever the screen has room for that. Re-checked twice a
+--     second and on every screen size change.
 --   * DevPanel: a compact CloudUI panel docked to the right edge, never centred, titled "Developer tools":
 --     "Give all pets", "+1M tokens" (Config.Dev.GrantTokens through Theme.ShortNumber), "Restart tutorial",
---     "Skip tutorial", "Reset my data" (the first tap turns it into "Are you sure?", a second tap within 4 s
---     sends it) and the note "Only you can see this". It takes the biggest free stretch of the right edge; when
---     that is short (a phone) the buttons scroll instead of shrinking the text. The tile hides while it is open.
+--     "Skip tutorial", "Reset my data" (the first tap turns it into "Are you sure?"; only a second, separate tap
+--     0.6 to 4 s later sends it, so a double click never resets) and the note "Only you can see this". For the
+--     first 0.4 s after it opens its buttons ignore taps (the rest of a double click on the tile lands there).
+--     It takes a free stretch of the right edge below the toasts' room, so the toasts that answer its buttons
+--     never cover it, preferring a stretch where it fits whole (see placePanel): while open it may lie over the
+--     thumb buttons or HUD pieces (one tap closes it), never in the middle. Only a very short screen (a landscape
+--     phone) has no such stretch: there the newest toasts may cover its top. When the stretch is short the
+--     buttons scroll instead of shrinking the text. The tile hides while it is open.
 --     Built on the first open, so a developer who never opens it only carries the small tile.
 -- Input: mouse, touch and gamepad. Both are Selectable TextButtons (Activated covers click, tap and gamepad A);
 -- opening the panel with a gamepad selects its first button; B (ContextActionService, only while open), Esc, the
@@ -48,7 +57,8 @@ local DevController = {}
 -- Tunables (design pixels of a 1080p screen unless noted)
 ----------------------------------------------------------------------
 local K = {
-	ATTR = "NC_Dev",
+	ATTR = "NC_Dev", -- PlayerGui attributes set by DevService
+	ATTR_TUTORIAL = "NC_DevTutorial",
 	GUI_NAME = "NimbusDev",
 	ORDER = 15, -- above the HUD (10), hotbar (11) and tutorial (12); below the menu windows (20) and toasts (30)
 	EDGE = 12, -- KEEP IN SYNC with HudController.lua: EDGE and TOUCH_EDGE (screen px)
@@ -67,11 +77,16 @@ local K = {
 	LIST_PAD = 10,
 	LIST_GAP = 8,
 	BUMPS = 30, -- room the panel's cloud bumps (and their outline) need above its top edge
-	MIN_PANEL_H = 230, -- a free stretch shorter than this is not used (the panel may then cover thumb buttons)
+	MIN_PANEL_H = 230, -- the shortest (scrolling) panel worth showing
 	MIN_SCALE = 0.5, -- only for absurdly small windows
 	POLL = 0.5, -- seconds between two layout checks
-	CONFIRM_SECONDS = 4,
+	CONFIRM_SECONDS = 4, -- an armed "Are you sure?" disarms itself after this many seconds
+	CONFIRM_DELAY = 0.6, -- seconds the confirming tap must come after the first one (a double click never resets)
+	OPEN_GUARD = 0.4, -- seconds after opening during which the panel's buttons ignore taps
 	SEND_GAP = 0.35, -- seconds between two commands sent from this panel
+	-- design px kept free at the top of the side-toast column: its two newest toasts (the answer to a DEV button
+	-- of up to 3 lines and one more of up to 4; NotifyController.lua: 18 px text, 8 px padding, 8 px gap)
+	TOAST_ROOM = 200,
 	BACK_ACTION = "NimbusDevBack",
 }
 
@@ -88,10 +103,12 @@ local enabled = false
 local panelOpen = false
 local pollSerial = 0
 local lastSend = -math.huge
+local openedAt = -math.huge -- os.clock() of the last Open()
 local warned = {}
 
 local UI = {} -- Gui, Tile, TileScale, TileButton, TileFx, Panel, PanelRoot, PanelScale, List, Buttons = {}, ResetButton
-local Reset = { Until = 0, Serial = 0 }
+local Hint = { Gui = nil } -- the LocalPlayer's PlayerGui: DevService's NC_Dev / NC_DevTutorial live there
+local Reset = { Until = 0, Serial = 0, ChangedAt = -math.huge } -- ChangedAt: when it was last armed or sent
 local Back = { Bound = false }
 local applied = {} -- last values written by relayout (only changes are written)
 
@@ -157,6 +174,8 @@ local function usingGamepad()
 	end)
 	return ok and kind ~= nil and string.find(tostring(kind), "Gamepad", 1, true) ~= nil
 end
+
+local refreshTutorialButton -- defined with the panel (Building)
 
 local function corner(parent, radius)
 	return Util.Create("UICorner", { CornerRadius = UDim.new(0, radius), Parent = parent })
@@ -236,16 +255,23 @@ local function disarmReset()
 	end
 end
 
--- First tap arms the button ("Are you sure?"), a second tap within CONFIRM_SECONDS sends the reset.
+-- First tap arms the button ("Are you sure?"); a second tap sends the reset when it comes CONFIRM_DELAY to
+-- CONFIRM_SECONDS later. A tap sooner than CONFIRM_DELAY after arming (or after sending) is ignored and the button
+-- stays as it is: a double click, however fast, can never wipe the data.
 local function onResetPressed()
 	local now = os.clock()
+	if now - Reset.ChangedAt < K.CONFIRM_DELAY then
+		return
+	end
 	if Reset.Until > now then
 		if send("reset") then
 			disarmReset()
+			Reset.ChangedAt = now
 		end
 		return
 	end
 	Reset.Until = now + K.CONFIRM_SECONDS
+	Reset.ChangedAt = now
 	Reset.Serial = Reset.Serial + 1
 	local serial = Reset.Serial
 	UI.ResetButton.Text = "Are you sure?"
@@ -254,6 +280,17 @@ local function onResetPressed()
 			disarmReset()
 		end
 	end)
+end
+
+-- A panel button's press, ignored for OPEN_GUARD seconds after the panel opened: the panel opens where the DEV
+-- tile was, so the second click of a double click on the tile would otherwise land on one of its buttons.
+local function panelPress(action)
+	return function()
+		if os.clock() - openedAt < K.OPEN_GUARD then
+			return
+		end
+		action()
+	end
 end
 
 ----------------------------------------------------------------------
@@ -385,6 +422,28 @@ local function fullPanelHeight(count)
 	return top + list + bottom
 end
 
+-- True when the server says "Restart tutorial" works in this build (NC_DevTutorial on our PlayerGui).
+local function tutorialAvailable()
+	return Hint.Gui ~= nil and Hint.Gui:GetAttribute(K.ATTR_TUTORIAL) == true
+end
+
+-- Shows "Restart tutorial" only when it works, and sizes the panel for the buttons that are shown.
+function refreshTutorialButton()
+	local button = UI.Buttons and UI.Buttons.tutorial
+	if not button then
+		return -- the panel is not built yet: it asks again when it is
+	end
+	button.Visible = tutorialAvailable()
+	local shown = 0
+	for _, b in ipairs(UI.Buttons) do
+		if b.Visible then
+			shown = shown + 1
+		end
+	end
+	UI.FullHeight = fullPanelHeight(shown)
+	DevController.Relayout()
+end
+
 local function buildPanel(gui)
 	local specs = {
 		{ Id = "allpets", Text = "Give all pets", Style = "Green" },
@@ -447,17 +506,17 @@ local function buildPanel(gui)
 		local id = spec.Id
 		local callback
 		if id == "reset" then
-			callback = function()
+			callback = panelPress(function()
 				guard("reset", onResetPressed)
-			end
+			end)
 		elseif id == "tokens" then
-			callback = function()
+			callback = panelPress(function()
 				send("tokens", grantTokens())
-			end
+			end)
 		else
-			callback = function()
+			callback = panelPress(function()
 				send(id)
-			end
+			end)
 		end
 		local button = CloudUI.Button({
 			Name = "Dev_" .. id,
@@ -491,6 +550,7 @@ local function buildPanel(gui)
 		},
 	})
 	note.Parent = list
+	refreshTutorialButton()
 end
 
 local function build()
@@ -553,15 +613,32 @@ local function enabledGui(pg, name)
 	return nil
 end
 
--- Everything the DEV tile must never touch. Also returns the bottom of the HUD's top-right block (0 if none)
--- and its left edge.
-local function neighbours(area)
+-- The side toasts (NimbusNotify, drawn above us): the measured left / right edges and top of the toast column,
+-- reserved TOAST_ROOM design px down, so its newest toasts (the answers to the panel's buttons) stay readable.
+-- nil when there is no toast column.
+local function toastRoom(pg, factor)
+	local notify = enabledGui(pg, "NimbusNotify")
+	local stack = notify and notify:FindFirstChild("ToastStack", true)
+	if not (stack and stack:IsA("GuiObject")) or stack.AbsoluteSize.X <= 0 then
+		return nil
+	end
+	local p, s = stack.AbsolutePosition, stack.AbsoluteSize
+	local top = p.Y + insetShift(notify)
+	return { x0 = p.X, y0 = top, x1 = p.X + s.X, y1 = top + K.TOAST_ROOM * factor }
+end
+
+-- What the DEV tile and panel keep clear of (gui-area rectangles):
+--   Others          the menu column, HUD blocks, hotbar, tutorial panel, touch buttons (the tile never touches them)
+--   Toasts          the toast column's room, or nil
+--   TopRightBottom  the bottom of the HUD's top-right block (0 if none), TopRightLeft its left edge
+local function neighbours(area, factor)
 	local out = {}
-	local topRightBottom, topRightLeft = 0, area.X
+	local layout = { Others = out, Toasts = nil, TopRightBottom = 0, TopRightLeft = area.X }
 	local pg = playerGui()
 	if not pg then
-		return out, topRightBottom, topRightLeft
+		return layout
 	end
+	layout.Toasts = toastRoom(pg, factor)
 	local menu = enabledGui(pg, "NimbusMenu")
 	if menu then
 		addRect(out, menu:FindFirstChild("MenuColumn"), menu, insetShift(menu))
@@ -578,9 +655,9 @@ local function neighbours(area)
 		end
 		local trb = tonumber(hud:GetAttribute("TopRightBottom")) or 0
 		if trb > 0 then
-			topRightBottom = trb
-			topRightLeft = tonumber(hud:GetAttribute("TopRightLeft")) or 0
-			out[#out + 1] = { x0 = topRightLeft, y0 = 0, x1 = area.X, y1 = trb }
+			layout.TopRightBottom = trb
+			layout.TopRightLeft = tonumber(hud:GetAttribute("TopRightLeft")) or 0
+			out[#out + 1] = { x0 = layout.TopRightLeft, y0 = 0, x1 = area.X, y1 = trb }
 		end
 	end
 	local hotbar = enabledGui(pg, "NimbusHotbar")
@@ -626,7 +703,22 @@ local function neighbours(area)
 			y1 = vp.Y - bottom + dy,
 		}
 	end
-	return out, topRightBottom, topRightLeft
+	return layout
+end
+
+-- A new list with the rectangles of `a` and `b` (either may be a list, one rectangle or nil).
+local function joined(a, b)
+	local out = {}
+	for _, part in ipairs({ a or {}, b or {} }) do
+		if part.x0 then
+			out[#out + 1] = part
+		else
+			for _, r in ipairs(part) do
+				out[#out + 1] = r
+			end
+		end
+	end
+	return out
 end
 
 -- The middle of the screen the game never writes into (same band as the HUD), in gui-area pixels.
@@ -646,15 +738,15 @@ local function touches(a, b, gap)
 	return a.x0 < b.x1 + gap and a.x1 > b.x0 - gap and a.y0 < b.y1 + gap and a.y1 > b.y0 - gap
 end
 
--- Bottom-right corner (gui px) of the tile: the lowest free spot on the right edge.
-local function placeTile(area, side, size, list, band)
-	local right = area.X - side
+-- Bottom edge (gui px) of the lowest spot for a size x size tile at the right edge `right` that touches no
+-- blocker and stays out of the band; nil when there is none.
+local function lowestFreeSpot(area, side, right, size, blockers, band)
 	local y1 = area.Y - side
 	while y1 - size >= side do
 		local rect = { x0 = right - size, y0 = y1 - size, x1 = right, y1 = y1 }
 		local free = not touches(rect, band, 0)
 		if free then
-			for _, r in ipairs(list) do
+			for _, r in ipairs(blockers) do
 				if touches(rect, r, K.GAP) then
 					free = false
 					break
@@ -662,20 +754,34 @@ local function placeTile(area, side, size, list, band)
 			end
 		end
 		if free then
-			return right, y1
+			return y1
 		end
 		y1 = y1 - K.SCAN_STEP
+	end
+	return nil
+end
+
+-- Bottom-right corner (gui px) of the tile: the lowest free spot on the right edge, clear of the toasts' room
+-- too when the screen has space for that (a short phone screen has not: then only toasts may touch it).
+local function placeTile(area, side, size, layout, band)
+	local right = area.X - side
+	for _, blockers in ipairs({ joined(layout.Others, layout.Toasts), layout.Others }) do
+		local y1 = lowestFreeSpot(area, side, right, size, blockers, band)
+		if y1 then
+			return right, y1
+		end
 	end
 	-- no free spot at all (a tiny window): the top-right corner
 	return right, math.min(area.Y - side, side + size)
 end
 
--- Free vertical stretches [y0, y1] of the column [x0, x1] between top and bottom.
-local function freeStretches(x0, x1, top, bottom, blockers)
+-- Free vertical stretches [y0, y1] of the column [x0, x1] between top and bottom. `headroom` is kept free below
+-- every blocker as well (the panel's cloud bumps stick out above its top edge).
+local function freeStretches(x0, x1, top, bottom, blockers, headroom)
 	local spans = {}
 	for _, r in ipairs(blockers) do
 		if r.x0 < x1 + K.GAP and r.x1 > x0 - K.GAP and r.y1 + K.GAP > top and r.y0 - K.GAP < bottom then
-			spans[#spans + 1] = { r.y0 - K.GAP, r.y1 + K.GAP }
+			spans[#spans + 1] = { r.y0 - K.GAP, r.y1 + K.GAP + headroom }
 		end
 	end
 	table.sort(spans, function(a, b)
@@ -707,33 +813,46 @@ local function bestStretch(stretches, minH)
 	return best
 end
 
--- Bottom-right corner, design height and scale of the open panel.
-local function placePanel(area, side, factor, list, band, topRightBottom, topRightLeft)
+-- Bottom-right corner, design height and scale of the open panel. While it is open the panel is what the
+-- developer uses, so it should be whole and uncovered: it may then lie over the thumb buttons or HUD pieces (one
+-- tap closes it), but never over the toasts' room or in the middle of the screen. Tried in this order:
+--   1. clear of everything, full height        2. clear of the toasts' room and the middle, full height
+--   3. clear of everything, scrolling           4. clear of the toasts' room and the middle, scrolling
+--   5. out of the middle only (a very short screen: the newest toasts may cover its top)
+local function placePanel(area, side, factor, layout, band)
 	local scale = math.max(K.MIN_SCALE, math.min(factor, (area.X - 2 * side) / K.PANEL_W))
 	local right = area.X - side
 	local left = right - K.PANEL_W * scale
+	local bumps = K.BUMPS * scale
 	local top = side
-	if topRightBottom > 0 and topRightLeft < right then
-		top = math.max(top, topRightBottom + K.GAP) -- the HUD's top-right block always stays visible
+	if layout.TopRightBottom > 0 and layout.TopRightLeft < right then
+		top = math.max(top, layout.TopRightBottom + K.GAP) -- the HUD's top-right block always stays visible
 	end
-	top = top + K.BUMPS * scale
+	top = top + bumps
 	local bottom = area.Y - side
+	local fullH = (UI.FullHeight or 400) * scale
 	local minH = math.min(K.MIN_PANEL_H * scale, bottom - top)
-	local bandBlock = {}
+	local bandBlock = nil
 	if left < band.x1 and right > band.x0 then
-		bandBlock[1] = { x0 = left, x1 = right, y0 = band.y0 + K.GAP, y1 = band.y1 - K.GAP }
+		bandBlock = { x0 = left, x1 = right, y0 = band.y0 + K.GAP, y1 = band.y1 - K.GAP }
 	end
-	local everything = {}
-	for _, r in ipairs(list) do
-		everything[#everything + 1] = r
+	local everything = joined(joined(layout.Others, layout.Toasts), bandBlock)
+	local toastsAndMiddle = joined(layout.Toasts, bandBlock)
+	local tries = {
+		{ everything, fullH },
+		{ toastsAndMiddle, fullH },
+		{ everything, minH },
+		{ toastsAndMiddle, minH },
+		{ joined(bandBlock, nil), minH },
+	}
+	local stretch = nil
+	for _, try in ipairs(tries) do
+		stretch = bestStretch(freeStretches(left, right, top, bottom, try[1], bumps), try[2])
+		if stretch then
+			break
+		end
 	end
-	if bandBlock[1] then
-		everything[#everything + 1] = bandBlock[1]
-	end
-	-- 1. clear of everything; 2. out of the screen middle only (may cover thumb buttons while open); 3. anywhere
-	local stretch = bestStretch(freeStretches(left, right, top, bottom, everything), minH)
-		or bestStretch(freeStretches(left, right, top, bottom, bandBlock), minH)
-		or { top, bottom }
+	stretch = stretch or { top, bottom }
 	local height = math.min(UI.FullHeight or 400, (stretch[2] - stretch[1]) / scale)
 	return right, stretch[2], height, scale
 end
@@ -752,13 +871,13 @@ function DevController.Relayout()
 	local area = guiAreaSize()
 	local factor = Theme.ScreenFactor(viewportSize().Y)
 	local side = isTouchDevice() and K.TOUCH_EDGE or K.EDGE
-	local list, topRightBottom, topRightLeft = neighbours(area)
+	local layout = neighbours(area, factor)
 	local band = centreBand(area)
-	local tx, ty = placeTile(area, side, K.TILE * factor, list, band)
+	local tx, ty = placeTile(area, side, K.TILE * factor, layout, band)
 	setIfChanged("tileScale", UI.TileScale, "Scale", factor)
 	setIfChanged("tilePos", UI.Tile, "Position", UDim2.fromOffset(math.floor(tx + 0.5), math.floor(ty + 0.5)))
 	if panelOpen then
-		local px, py, height, scale = placePanel(area, side, factor, list, band, topRightBottom, topRightLeft)
+		local px, py, height, scale = placePanel(area, side, factor, layout, band)
 		setIfChanged("panelScale", UI.PanelScale, "Scale", scale)
 		setIfChanged("panelSize", UI.PanelRoot, "Size", UDim2.fromOffset(K.PANEL_W, math.floor(height)))
 		setIfChanged("panelPos", UI.PanelRoot, "Position", UDim2.fromOffset(math.floor(px + 0.5), math.floor(py + 0.5)))
@@ -815,6 +934,7 @@ function DevController.Open()
 		end
 	end
 	panelOpen = true
+	openedAt = os.clock()
 	disarmReset()
 	UI.PanelRoot.Visible = true
 	UI.Tile.Visible = false
@@ -888,7 +1008,23 @@ local function setEnabled(on)
 end
 
 local function refreshFlag()
-	setEnabled(LocalPlayer ~= nil and LocalPlayer:GetAttribute(K.ATTR) == true)
+	setEnabled(Hint.Gui ~= nil and Hint.Gui:GetAttribute(K.ATTR) == true)
+end
+
+-- Follows DevService's hints on our PlayerGui (never on the Player: that one every client can read).
+local function watchHints()
+	local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui") or LocalPlayer:WaitForChild("PlayerGui", 60)
+	if not pg then
+		return
+	end
+	Hint.Gui = pg
+	pg:GetAttributeChangedSignal(K.ATTR):Connect(function()
+		guard("NC_Dev", refreshFlag)
+	end)
+	pg:GetAttributeChangedSignal(K.ATTR_TUTORIAL):Connect(function()
+		guard("NC_DevTutorial", refreshTutorialButton)
+	end)
+	guard("NC_Dev", refreshFlag)
 end
 
 function DevController.Init()
@@ -900,9 +1036,6 @@ function DevController.Init()
 	if not LocalPlayer then
 		return
 	end
-	LocalPlayer:GetAttributeChangedSignal(K.ATTR):Connect(function()
-		guard("NC_Dev", refreshFlag)
-	end)
 	UserInputService.InputBegan:Connect(function(input)
 		if panelOpen and input.KeyCode == Enum.KeyCode.Escape then
 			DevController.Close()
@@ -914,7 +1047,7 @@ function DevController.Init()
 			guard("relayout", DevController.Relayout)
 		end)
 	end
-	guard("NC_Dev", refreshFlag)
+	task.spawn(watchHints)
 end
 
 return DevController

@@ -555,7 +555,7 @@ local EYE_MASKS = {
 	Fierce = {
 		"L L L . .",
 		"R S I L L",
-		"R I I I I",
+		"R I G I I",
 		". R I I I",
 		". . R R .",
 	},
@@ -1399,6 +1399,7 @@ local STORM_MASKS = {
 	},
 	Shoulder = {
 		"C",
+		"G",
 	},
 }
 -- mask character -> { palette key, voxels it stands out of the surface }
@@ -1428,9 +1429,9 @@ local function stormMask(ctx, rows, cx, yTop, only)
 	end
 end
 
--- An axis-aligned stepped shape from a to b (design units): `steps` boxes along the way (default one per design
--- voxel), their full size interpolated from sa to sb ({x, y, z}; a box should be at least as long as one step along
--- the way). Stepped blades, ears and tufts stay crisp and merge into few parts, like the chunky steps of the art.
+-- An axis-aligned stepped shape from a to b (design units) in `steps` steps (one box at each end of every step;
+-- default one step per design voxel), the full box size interpolated from sa to sb ({x, y, z}; a box should be at
+-- least as long as one step along the way). Stepped blades, ears and tufts stay crisp and merge into few parts, like the chunky steps of the art.
 -- Every box is at least ~one sculpted voxel thick, so thin blades never vanish at Low detail.
 local function stair(g, key, a, b, sa, sb, steps, extra)
 	local dx, dy, dz = b[1] - a[1], b[2] - a[2], b[3] - a[3]
@@ -1483,6 +1484,7 @@ SPECIES.Stormfang = function(ctx)
 		stair(g, "Mask", { s * 7, 5.6, -3 }, { s * 11.4, 7, -0.6 }, { 2.8, 3, 4.4 }, { 1.6, 1.2, 1.4 }, 2)
 		if H then
 			stair(g, "Mask", { s * 7.4, 2.6, -2.8 }, { s * 11.8, 1.6, 0 }, { 2.8, 3, 4.4 }, { 1.6, 1.2, 1.4 }, 2)
+			stair(g, "Mask", { s * 6.2, 0.6, -3 }, { s * 9.4, -1.6, -1.2 }, { 2.4, 2, 3 }, { 1.4, 1.2, 1.4 }, 2)
 		else
 			stair(g, "Mask", { s * 7.4, 2.4, -2.8 }, { s * 11.4, 0.4, -0.4 }, { 2.8, 3.4, 4.4 }, { 2.4, 2.4, 2.4 }, 1)
 		end
@@ -1496,7 +1498,7 @@ SPECIES.Stormfang = function(ctx)
 		end)
 	end
 
-	-------------------------------------------------- tall stepped lynx ears: dark inside, neon violet + blue stripes
+	-------------------------------------------------- tall stepped lynx ears with neon violet + electric-blue stripes
 	pair(function(s)
 		stair(g, "Fur", { s * 4.6, 10.2, 0.2 }, { s * 8.4, 18.4, 1.6 }, { 8, 2.6, 4.6 }, { 1.6, 2.6, 1.4 }, 4)
 		-- the front face: dark, a violet stripe up the outer side and a blue one up the inner side (Low detail
@@ -1525,11 +1527,15 @@ SPECIES.Stormfang = function(ctx)
 		-- front legs: a dark under-suit with two armour rings
 		box(g, "Base", { s * 4, -6, -4.2 }, { 3.4, 6, 3.4 })
 		if H then
+			rbox(g, "Fur", { s * 4, -4.2, -3.6 }, { 4.2, 3.2, 4.2 }, 1)
 			rbox(g, "Plate", { s * 4, -7.6, -4.6 }, { 4, 2.4, 4 }, 1)
 		end
-		-- big armoured paws with a glowing claw at the tip of each toe
+		-- big armoured paws: toe plates split by dark grooves, a glowing claw curling from the tip of each toe
 		rbox(g, "Plate", { s * 4, -9.9, -6.4 }, { 7, 2.8, 5.6 }, 1)
 		if H then
+			for _, o in ipairs({ -2, 0, 2 }) do
+				box(g, "Base", { s * (4 + o), -9.4, -8.4 }, { 1, 2, 1.6 }, { Op = "Paint", OnlyKeys = "Plate" })
+			end
 			for _, o in ipairs({ -3, -1, 1, 3 }) do
 				box(g, "Claw", { s * (4 + o), -10.2, -9.8 }, { 1, 1.6, 1 })
 				box(g, "Claw", { s * (4 + o), -11, -10.8 }, { 1, 1, 1 })
@@ -1586,11 +1592,8 @@ SPECIES.Stormfang = function(ctx)
 	pal.Fur = mix(P, rgb(96, 99, 110), 0.6) -- ~#4b4d57 armour
 	pal.Plate = mix(P, rgb(148, 152, 164), 0.65) -- ~#70737e raised plates and spikes
 	pal.Bevel = mix(P, rgb(190, 193, 200), 0.82) -- ~#a3a6ae light bevelled edges
-	pal.Mask = rgb(242, 244, 248)
-	pal.Mask_Light = rgb(252, 252, 255)
-	pal.Mask_Dark = rgb(210, 214, 226)
+	pal.Mask = rgb(242, 244, 248) -- white fluffy mask and ruff
 	pal.Nose = rgb(28, 29, 36)
-	pal.Mouth = rgb(40, 41, 50)
 	pal.Lid = pal.Fur
 	pal.LidLine = P
 	pal.Lash = P
@@ -1602,16 +1605,13 @@ SPECIES.Stormfang = function(ctx)
 	pal.GemCore = { Color = rgb(186, 242, 255), Material = NEON }
 	pal.GemRim = { Color = rgb(128, 214, 255), Material = Enum.Material.Glass, Transparency = 0.2 }
 	pal.EyeIris = { Color = look.Eye, Material = NEON }
-	pal.EyeGlint = { Color = lighten(look.Eye, 0.6), Material = NEON }
 	pal.EyeRing = { Color = rgb(122, 60, 255), Material = NEON }
 	pal.EyeShine = rgb(252, 252, 255)
 	ctx.Pulse = { NeonViolet = true, NeonBlue = true, Claw = true, Gem = true, GemCore = true }
-	-- every colour is painted as a layer (no automatic shading: crisp plates and tufts, few parts)
+	-- every colour is painted as its own layer: no automatic shading (crisp plates and tufts, few parts) and the
+	-- LOD never recolours one layer into another
 	for _, k in ipairs({ "Base", "Fur", "Plate", "Bevel", "Mask", "NeonViolet", "NeonBlue", "Claw", "Gem", "GemCore", "GemRim" }) do
 		ctx.NoShade[k] = true
-	end
-	-- the LOD may fold the fur's shading but never recolours a plate layer
-	for _, k in ipairs({ "Base", "Fur", "Plate", "Bevel", "Mask", "NeonViolet", "NeonBlue", "Claw", "Gem", "GemCore", "GemRim" }) do
 		ctx.Keep[k] = true
 	end
 	-- anchors for accessories (other looks may combine them)
@@ -1767,7 +1767,7 @@ end
 WINGS.StormCloud = function(ctx, w)
 	local H = ctx.Fine
 	local floorY, midZ = -11.2, 1
-	local x0, y0, z0, x1, y1, z1 = Voxel.Bounds(ctx.Body)
+	local _, y0, z0, _, _, z1 = Voxel.Bounds(ctx.Body)
 	if y0 and SK > 0 then
 		floorY = y0 / SK
 		midZ = (z0 + z1) / 2 / SK
@@ -1791,8 +1791,6 @@ WINGS.StormCloud = function(ctx, w)
 	if H then
 		paint(w, "CloudTop", { Kind = "Box", Center = { -6.2, 4.2, 6.2 }, Size = { 4, 2, 3 } }, "CloudMid")
 		paint(w, "CloudTop", { Kind = "Box", Center = { -11.6, 3.2, 1.6 }, Size = { 3, 2, 4 } }, "CloudMid")
-	end
-	if H then
 		box(w, "CloudLight", { -3.6, 4.6, 6.6 }, { 2.2, 1.2, 2 })
 		box(w, "CloudLight", { -10.2, 3.4, -1.4 }, { 2, 1.2, 2 })
 	else
@@ -2385,9 +2383,10 @@ local function groupMotion(gr, st)
 		local sweep = 0.12 * sin(st.Flap - 1.2)
 		return CFrame.Angles(0, sweep * gr.Side, a * gr.Side)
 	elseif kind == "cloud" then
-		-- a storm cloud half: a slow, gentle sway and drift (it rides the flap clock, so Flap / Excited speed it up)
-		local a = 0.2 * sin(st.Flap * 0.45)
-		return CFrame.new(0, st.Stud * 1.2 * sin(st.Flap * 0.3 + 1), 0) * CFrame.Angles(0.05 * sin(st.Flap * 0.25), 0, a * gr.Side)
+		-- a storm cloud half: a slow, gentle roll (~0.4 Hz, +-7 degrees) and a small drift that keeps the rider
+		-- sitting in it (it rides the flap clock, so Flap / Excited speed it up)
+		local a = 0.12 * sin(st.Flap * 0.2)
+		return CFrame.new(0, st.Stud * 0.8 * sin(st.Flap * 0.15 + 1), 0) * CFrame.Angles(0.04 * sin(st.Flap * 0.12), 0, a * gr.Side)
 	elseif kind == "tail" then
 		local a = gr.Amp * (1 + 0.5 * st.Excite) * sin(st.Wag)
 		return CFrame.Angles(0.06 * sin(st.Wag * 0.5), a, 0)
