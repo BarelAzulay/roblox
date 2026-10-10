@@ -416,6 +416,95 @@ toasts for purchases, level-ups and offline earnings. **Tutorial:** after the Ph
 gate), buy your first Cloud Press, collect your cash, build the Kitchen and feed a pet. **NPC tips** for the Kitchen
 (Granny Owl), Gym (Coach Corgi), Fusion and Prestige.
 
+## Phase 2 build contract (the engineers code strictly to these names)
+**Ownership**
+| Agent | Files |
+|---|---|
+| economy | `shared/TycoonCatalog.lua` (new), `tools/sim_tycoon.py` (new) |
+| data | `server/Services/DataService.lua`, `shared/PetKeys.lua` (new), `server/Services/PetService.lua`, `client/Controllers/PetController.lua`, `client/State.lua` |
+| homeworld | `server/Services/HomeBuilder.lua` (new, a module TycoonService requires), `client/Controllers/HomeFx.lua` (new) |
+| tycoon | `server/Services/TycoonService.lua` (new), `server/Services/SpotService.lua` |
+| care | `server/Services/PetCareService.lua` (new), `shared/PetCatalog.lua` (levels/stats only) |
+| fusion | `server/Services/FusionService.lua` (new), `client/Controllers/FusionController.lua` (new), `shared/PetBuilder.lua` (tier finishes + hybrid looks only) |
+| gems | `server/Services/GemService.lua` (new) + the Secret/gem roulette path in PetService once the data agent is done |
+| ui | `client/Controllers/MenuController.lua`, `client/Controllers/IndexController.lua` (Fusions tab), `shared/TutorialSteps.lua`, `server/Services/TutorialService.lua`, `shared/NpcDialog.lua` |
+Lead-owned: Config.lua, Main.server.lua, Main.client.lua, the docs.
+
+**Pet keys (`shared/PetKeys.lua`).** Phase 2 gives pets per-copy variants, so a pet copy is identified by a key string:
+`"<petId>"` (Normal), `"<petId>@Golden"`, `"<petId>@Rainbow"`, `"hyb:<uid>"` (a fused hybrid, may also carry `@Golden` /
+`@Rainbow`). Profile: `Pets[petId] = count` stays for Normal copies; `Tiers[petId] = {Golden = n, Rainbow = n}`;
+`Hybrids[uid] = {Body = petId, Style = petId, Elements = {...}, Name, Rarity, Tier}`; `Equipped` is a list of keys.
+API: `Parse(key) -> {PetId, Tier, HybridId}`, `Make(petId, tier)`, `Count(profile, key)`, `Add(profile, key, n)`,
+`Remove(profile, key, n) -> ok` (never below 0), `List(profile) -> {key...}`, `DefOf(key, profile) -> def` (catalog def,
+or a merged def for hybrids whose Look combines both parents; `Look.Finish = "Golden"|"Rainbow"` for tiers),
+`StatMultiplier(tier) -> 1 | 1.5 | 2.5`. Everything that shows or equips pets (PetService, PetController, menus,
+Index, podium, NPC-free) works with keys; old profiles (plain petIds) are valid keys.
+
+**Data (`DataService`).** Adds `Home = {Level, Prestige, Stations = {[stationId] = level}, Garden = {[slot] = key},
+Gym = {[slot] = key}, CollectorCash, LastSeen}` (migrated from the reserved `Home.Rooms`), `Food = {[foodId] = count}`,
+`PetLevels[key] = {Level, Xp}`, `Tiers`, `Hybrids`, `GemReceipts` (bounded set of processed purchase ids) and reserves
+`Teams` for Phase 3. Cash/Gems/Food/CollectorCash save as deltas; Stations/Garden/Gym/Tiers/Hybrids/PetLevels per key;
+a higher `Home.Prestige` wins the whole `Home` on merge (prestige resets stations). New API: `GetHome(player)` (copy),
+`MutateHome(player, fn) -> ok` (fn edits a live table, no yields), `AddCash/SpendCash/GetCash`,
+`AddGems/SpendGems/GetGems`, `AddFood/SpendFood/GetFood`, `GetPetLevel(player, key)`, `AddPetXp(player, key, xp)
+-> levelsGained`. The player attributes `Config.Attr.Cash` / `Config.Attr.Gems` mirror the balances (the HUD shows them).
+
+**`shared/TycoonCatalog.lua` (economy).** Data + pure functions, balanced by `tools/sim_tycoon.py` (a progression
+simulation that proves the targets in the Phase 2 section). Stations (ids): `Press1..Press4` (Cloud Presses),
+`Collector`, `Garden`, `Kitchen`, `Gym`, `Vault`, `House`, `FusionMachine`, `ArenaGate`, decor `DecorLamps`,
+`DecorFence`, `DecorFlowers`, `DecorFountain`, `DecorBanners`, `DecorPodium`. Each: `{Id, Name, Kind, MaxLevel, Requires
+= {Station = level, HomeLevel = n, House = tier, Prestige = n}, Price = {[level] = cash}, Effects = {[level] = {...}},
+Slot = plot-local CFrame + Footprint}` (positions inside the `Config.Lobby.PlotSize` yard: house at the back, presses +
+conveyor + collector on one side, garden opposite, kitchen/gym/vault/fusion/arena gate around, decor along the fence).
+`HouseTiers` = Cottage (start), Villa (Home Level 10), Manor (20), Sky Castle (30), each raising other stations' caps.
+`Prestige = {HomeLevel = 40, House = "SkyCastle", IncomeMultiplier = 1.25 per star, GemReward}`. `Foods` (Snack,
+Meal, Feast: Price, Xp, CookSeconds, KitchenLevel). `Fusion` costs by rarity. Pet XP curve. API: `Get(id)`,
+`PriceFor(id, level)`, `AvailablePads(home) -> {{StationId, NextLevel, Price, Locked = reason|nil}}`,
+`HomeLevelOf(home)`, `IncomePerSecond(home, gardenDefs, prestige)`, `CollectorCap(home)`, `OfflineEarnings(home,
+seconds, incomePerSecond)`, `XpToNext(level)`, `Validate()`.
+
+**HomeBuilder (homeworld, server module) + HomeFx (client).** `HomeBuilder.Init(lobbyInfo)`, `PreparePlot(spotInfo)`
+(gate "Claim Home" ProximityPrompt named `ClaimPrompt`, attribute `SpotIndex`), `SetOwner(spotInfo, player|nil)`,
+`SetStation(spotInfo, stationId, level)` (builds or replaces the station's detailed-voxel model `Station_<Id>` with
+attributes `StationId`, `Level`, `BuiltAt` under the plot's `Home` folder; level 0 removes it), `SetPads(spotInfo, pads)`
+(pad models `Pad_<StationId>` with a readable sign: icon, name, "Lv a -> b", price or lock reason; ProximityPrompt `BuyPrompt`
+ActionText "Buy", HoldDuration 0.25, attributes `StationId`, `OwnerUserId`), `SetCollector(spotInfo, cash, cap)` (attribute
+updates only), `ClearPlot(spotInfo)`. Whole fully-built plot <= ~900 parts. HomeFx (client): voxel pop-in when a
+`Station_*` appears, press puffs + conveyor blocks + collector glow (client-only visuals), disables `BuyPrompt`s whose
+`OwnerUserId` is not the local player, and shows the collector amount.
+
+**TycoonService (tycoon).** `Init(lobbyInfo, {DataService, PetService, SpotService})`; claiming via `ClaimPrompt`
+(server Triggered; one plot per player; refused in a match); SpotService no longer auto-assigns: `GetSpot(player)`
+returns the claimed plot, `Teleport` goes home or to the nearest free gate; on leave the plot is released and cleared.
+Purchases via `BuyPrompt` (owner, `AvailablePads`, `SpendCash`, `MutateHome`, `HomeBuilder.SetStation/SetPads`, toast).
+Income: a 1 s server tick adds presses + garden income into `Home.CollectorCash` (capped by the Vault); the Collector
+(prompt or touch) banks it with `AddCash`; offline earnings on load ("While you were away" toast). Prestige pad.
+Remote `HomeAction(action, arg)`: "Upgrade" stationId (from the Home window), "GardenSet" {slot, key|nil}, "Collect",
+"Prestige", "GoHome". Signals `HomeChanged(player)`, `Claimed(player, spotInfo)`, `Prestiged(player, stars)`.
+API `GetPlot`, `GetHome`, `Buy`, `Collect`, `Prestige`, `IncomePerSecond`.
+
+**PetCareService (care).** Remote `PetCare(action, a, b)`: "Cook" (foodId, qty: Cash, a cooking queue on the Kitchen
+with CookSeconds, finished food goes to `Food`), "Feed" (key, foodId: XP, level-ups toast), "GymSet" (slot, key|nil:
+Combat pets only; passive XP per minute by Gym level). `PetCatalog.GetStats(petId, level, tier)` scales by rarity,
+level and tier and is used everywhere stats show. Economy pets go to the Garden, Combat pets to the Gym.
+
+**FusionService + FusionController (fusion).** Remote `Fusion(action, a, b)`: "Upgrade" (key: 3 copies of the same key
+-> the next tier), "Mix" (keyA, keyB: two different pets -> a hybrid). Requires Prestige >= 1 and the FusionMachine
+station; atomic; never consumes equipped/garden/gym copies without unequipping them first. PetBuilder: `Look.Finish`
+Golden (gold-tinted palette + sparkle accents) and Rainbow (client-side hue shift), hybrid looks merged from both
+parents; names blended ("Pengnix"). The window opens with E at the machine. The Index gets a "Fusions" tab (ui agent).
+
+**GemService (gems).** `Config.Gems.Products` (placeholders, product id 0 = not created yet: the owner creates them on
+the Creator Hub and pastes the ids), idempotent `MarketplaceService.ProcessReceipt` (GemReceipts), `PolicyService`
+paid-random-items check (hide gem-priced roulettes where restricted), roulettes with `GemPrice`, and the gems-only
+**Secret roulette** at the Storm Altar (its prompt opens the shop on that roulette; `AllowSecret = true`). Odds always shown.
+
+**UI (ui).** Menu tile "My Spot" becomes "Home": the Home window (stations with levels and Upgrade buttons, income per
+second, Collector cash, house tier, prestige progress, "Go home"); the Pets panel gets "Feed", "Place in Garden",
+"Train in Gym" and shows tiers/hybrids/levels; the Shop gets a Gems tab; the Index gets the Fusions tab. Tutorial steps
+appended (claim home, buy the first press, collect cash, build the kitchen and feed a pet); NPC tips for Kitchen, Gym,
+Fusion, Prestige and Gems.
+
 ## Phase 3: Pet battles (detailed by the player during Phase 1; build after Phase 2)
 The player's words: "create an Arena in the map for players to fight in it; at the arena there will be a special
 events system (like in the chicken fight game) like a boss to defeat (everyone gets in this fight for the reward);

@@ -211,6 +211,11 @@ local IndexService = loadOptionalService("IndexService")
 local NpcService = loadOptionalService("NpcService")
 local TutorialService = loadOptionalService("TutorialService")
 local DevService = loadOptionalService("DevService") -- owner-only developer tools (Config.Dev)
+-- Phase 2 services (ARCHITECTURE_V3.md "Phase 2 build contract")
+local TycoonService = loadOptionalService("TycoonService")
+local PetCareService = loadOptionalService("PetCareService")
+local FusionService = loadOptionalService("FusionService")
+local GemService = loadOptionalService("GemService")
 local StormAltar = loadOptionalService("StormAltar") -- the player's Stormfang landmark (ARCHITECTURE_V3.md section 10)
 
 ----------------------------------------------------------------------
@@ -325,6 +330,25 @@ if TutorialService then call("TutorialService.Init", TutorialService, "Init", lo
 	MatchService = MatchService,
 	SpotService = SpotService,
 	IndexService = IndexService,
+}) end
+if TycoonService then call("TycoonService.Init", TycoonService, "Init", lobbyInfo, {
+	DataService = DataService,
+	PetService = PetService,
+	SpotService = SpotService,
+}) end
+if PetCareService then call("PetCareService.Init", PetCareService, "Init", {
+	DataService = DataService,
+	PetService = PetService,
+	TycoonService = TycoonService,
+}) end
+if FusionService then call("FusionService.Init", FusionService, "Init", {
+	DataService = DataService,
+	PetService = PetService,
+	TycoonService = TycoonService,
+}) end
+if GemService then call("GemService.Init", GemService, "Init", {
+	DataService = DataService,
+	PetService = PetService,
 }) end
 if DevService then call("DevService.Init", DevService, "Init", {
 	DataService = DataService,
