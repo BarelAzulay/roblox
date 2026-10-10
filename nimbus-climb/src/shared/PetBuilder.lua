@@ -35,6 +35,20 @@
 --   * Unknown Species / WingStyle / Accessory values fall back to Cat / Feather / none.
 --   * Rarity flair: Legendary and Mythic pets get a low-rate sparkle emitter; Secret pets get a ring of floating
 --     glowing voxels orbiting them plus sparkles.
+--   * Phase 2 finishes (Look.Finish, PetKeys tier copies): "Golden" = a gold-tinted palette (light and dark areas
+--     become a bronze-to-champagne ramp so the patterns still read), metallic gold accents (claws, horns, beaks,
+--     hooves, wing edges: Metal material) and small glowing sparkle stars attached to the head, a cheek, the chest and
+--     the wing tips (they twinkle), plus a gold sparkle emitter. "Rainbow" = a pearly body with rainbow wings and
+--     accents (a fixed rainbow sweep, so it reads in any viewport or on the server); Animate cycles the hue of the
+--     few biggest accent parts on the client (at most HUE_PARTS parts, ~12 colour updates a second per model), plus a
+--     rainbow sparkle emitter. Eyes, mouths, noses and blush never change colour. Models carry PB_Finish.
+--   * Phase 2 fused hybrids (Look.Hybrid = true from PetKeys.DefOf: the Body parent's species, body colour and eyes,
+--     the Style parent's Secondary, wings and accessory): the Style's SPECIES adds its signature feature in the Style
+--     pet's own colour (a fox's bushy tail and cheek ruffs, a cat's tabby bands and ringed tail, an axolotl's gills,
+--     a unicorn's horn and mane, a phoenix's glowing crest and tail plumes, a panda's eye patches, a dragon's crest,
+--     horns and spade tail, an owl's ear tufts, bunny ears, frog spots, a penguin's tuxedo...); Look.Seed (the hybrid
+--     record's Seed) jitters the colours and the pattern placement, so every hybrid is a little different. The Style
+--     parent comes from def.StyleDef (PetKeys) or Look.StyleId (PetCatalog). Models carry PB_Hybrid.
 
 local PetBuilder = {}
 
@@ -70,6 +84,12 @@ local WAG_HZ = 0.9 -- tail wags per second
 local SWAY_HZ = 0.55 -- slow idle motions (halo bob, aura orbit)
 local BLINK_TIME = 0.16
 local FLAP_AMP = math.rad(35)
+
+-- Phase 2 finishes (Look.Finish): Golden and Rainbow tier copies
+local HUE_PARTS = { High = 10, Low = 4 } -- Rainbow: parts whose hue cycles on the client (the rest keep a fixed rainbow)
+local HUE_RATE = 0.2 -- Rainbow: hue turns per second
+local HUE_STEP = 1 / 12 -- Rainbow: seconds between two colour updates of one model
+local FINISH_SPARKLE_RATE = { High = 4, Low = 2 }
 
 -- part budgets per group; Total is what the body may fill up to, Cap the hard limit for the whole pet
 local BUDGET = {
@@ -344,6 +364,55 @@ end
 local SPECIES = {}
 local WINGS = {}
 local ACCESSORIES = {}
+local HYBRID = {} -- Phase 2: the Style pet's signature feature on a fused hybrid, by the Style's species
+local FINISHES = { Golden = true, Rainbow = true }
+
+-- shared/PetCatalog, resolved on first use (only needed for a hybrid whose def does not carry its StyleDef)
+local catalogModule = nil
+local catalogTried = false
+local function catalogGet(id)
+	if not catalogTried then
+		catalogTried = true
+		local ok, mod = pcall(function()
+			local inst = script.Parent:FindFirstChild("PetCatalog")
+			return inst and require(inst) or nil
+		end)
+		if ok and type(mod) == "table" then
+			catalogModule = mod
+		end
+	end
+	if catalogModule and type(catalogModule.Get) == "function" and type(id) == "string" then
+		local ok, def = pcall(catalogModule.Get, id)
+		if ok and type(def) == "table" then
+			return def
+		end
+	end
+	return nil
+end
+
+-- A fused hybrid's Style parent (PetKeys merged defs carry StyleDef; Look.StyleId names it otherwise):
+-- { Species, Primary, Seed } or nil.
+local function readHybrid(petDef, src)
+	if src.Hybrid ~= true then
+		return nil
+	end
+	local style = type(petDef.StyleDef) == "table" and petDef.StyleDef or catalogGet(src.StyleId)
+	local sl = type(style) == "table" and type(style.Look) == "table" and style.Look or {}
+	local species = sl.Species
+	if type(species) ~= "string" or not SPECIES[species] then
+		species = nil
+	end
+	local seed = tonumber(src.Seed)
+	if not seed or seed ~= seed or seed == math.huge or seed == -math.huge then
+		seed = hashString(tostring(src.BodyId) .. "+" .. tostring(src.StyleId))
+	end
+	return {
+		Species = species,
+		Primary = asColor(sl.Primary, asColor(src.Secondary, rgb(200, 200, 220))),
+		Seed = floor(abs(seed)) % 2147483646 + 1,
+		StyleId = tostring(src.StyleId or (type(style) == "table" and style.Id) or ""),
+	}
+end
 
 local function readLook(petDef)
 	local src = {}
@@ -372,6 +441,10 @@ local function readLook(petDef)
 			id = tostring(petDef.Id)
 		end
 	end
+	local finish = src.Finish
+	if type(finish) ~= "string" or not FINISHES[finish] then
+		finish = nil
+	end
 	return {
 		Id = id,
 		Rarity = rarity,
@@ -383,13 +456,17 @@ local function readLook(petDef)
 		Eye = asColor(src.Eye, rgb(44, 38, 66)),
 		WingColor = asColor(src.WingColor, lighten(primary, 0.4)),
 		Glow = src.Glow == true,
+		Finish = finish, -- Phase 2 tier copies: "Golden" | "Rainbow" | nil
+		Hybrid = (type(petDef) == "table") and readHybrid(petDef, src) or nil, -- Phase 2 fused hybrids
 	}
 end
 
 local function lookSignature(look)
+	local hy = look.Hybrid
 	return table.concat({
 		look.Id, tostring(look.Rarity), look.Species, look.WingStyle, tostring(look.Accessory), hex(look.Primary),
-		hex(look.Secondary), hex(look.Eye), hex(look.WingColor), tostring(look.Glow),
+		hex(look.Secondary), hex(look.Eye), hex(look.WingColor), tostring(look.Glow), tostring(look.Finish),
+		hy and (tostring(hy.Species) .. "/" .. hex(hy.Primary) .. "/" .. tostring(hy.Seed)) or "-",
 	}, "|")
 end
 
@@ -2180,6 +2257,741 @@ ACCESSORIES.Flower = function(ctx)
 end
 
 ----------------------------------------------------------------------
+-- Fused hybrids (Phase 2, ARCHITECTURE_V3.md section 11). PetKeys merges the Look: the FIRST parent (Body) gives
+-- the species, body colour and eyes; the SECOND (Style) its Secondary colour, wings and accessory. Here the Style's
+-- species adds its signature feature in the Style pet's own colours (a fox's bushy tail and cheek ruffs, an
+-- axolotl's gills, a unicorn's horn and mane, a panda's eye patches...), so a hybrid reads as both parents at a
+-- glance. The hybrid's Seed varies the details (colour jitter, pattern placement), so no two hybrids are the same.
+-- Every feature grows out of the body's surface (found by scanning the grid): nothing floats.
+----------------------------------------------------------------------
+local MAIN_KEYS = { Fur = true, Scale = true, Base = true, Plate = true }
+-- species with ears (or gills) of their own: a Dog style adds floppy ears only to the others
+local HAS_EARS = { Cat = true, Dog = true, Fox = true, Bunny = true, Bear = true, Panda = true, Stormfang = true, Axolotl = true, Owl = true }
+-- the keys a species paints its paws / feet with (a Bear style recolours them)
+local PAW_KEYS = { Fur = true, Belly = true, Patch = true, Muzzle = true, Accent = true, Hoof = true, Feet = true, Scale = true, Toe = true }
+
+-- a small deterministic generator (Park-Miller) from the hybrid's seed: r() -> 0..1, r(a, b) -> a..b
+local function seededRandom(seed)
+	local s = floor(abs(tonumber(seed) or 1)) % 2147483646 + 1
+	return function(a, b)
+		s = (s * 16807) % 2147483647
+		local u = s / 2147483647
+		if a then
+			return a + (b - a) * u
+		end
+		return u
+	end
+end
+
+local function colorDistance(a, b)
+	local dr, dg, db = a.R - b.R, a.G - b.G, a.B - b.B
+	return math.sqrt(dr * dr + dg * dg + db * db)
+end
+
+-- surface finders in DESIGN units (they scan the sculpted grid at the current resolution)
+local function hyBounds(ctx)
+	local b = ctx.HyBounds
+	if not b then
+		local x0, y0, z0, x1, y1, z1 = Voxel.Bounds(ctx.Body)
+		b = { x0 or 0, y0 or 0, z0 or 0, x1 or 0, y1 or 0, z1 or 0 }
+		ctx.HyBounds = b
+	end
+	return b
+end
+
+-- y of the topmost voxel of column (x, z), or nil
+local function topAt(ctx, x, z)
+	local b = hyBounds(ctx)
+	local X, Z = vx(x), vx(z)
+	for y = b[5] + 2, b[2], -1 do
+		if get(ctx.Body, X, y, Z) then
+			return y / SK
+		end
+	end
+	return nil
+end
+
+-- z of the rearmost voxel of row (x, y), or nil
+local function backAt(ctx, x, y)
+	local b = hyBounds(ctx)
+	local X, Y = vx(x), vx(y)
+	for z = b[6] + 2, b[3], -1 do
+		if get(ctx.Body, X, Y, z) then
+			return z / SK
+		end
+	end
+	return nil
+end
+
+-- z of the frontmost voxel of row (x, y), or nil
+local function frontAt(ctx, x, y)
+	local z = frontZ(ctx.Body, vx(x), vx(y))
+	return z and z / SK or nil
+end
+
+-- x of the outermost voxel of row (y, z) on side s (+1 = the pet's right, -1 = left), or nil
+local function sideAt(ctx, y, z, s)
+	local b = hyBounds(ctx)
+	local Y, Z = vx(y), vx(z)
+	if s > 0 then
+		for x = b[4] + 2, 0, -1 do
+			if get(ctx.Body, x, Y, Z) then
+				return x / SK
+			end
+		end
+	else
+		for x = b[1] - 2, 0 do
+			if get(ctx.Body, x, Y, Z) then
+				return x / SK
+			end
+		end
+	end
+	return nil
+end
+
+-- a new tail grid for a swapped tail, rooted on the body's back at the species' tail height
+local function hyTail(ctx, wag)
+	local th = ctx.TailHinge or { 0, -8.5, 6 }
+	local y, z = th[2], th[3]
+	local back = backAt(ctx, 0, y)
+	if back and back - 0.8 > z then
+		z = back - 0.8
+	end
+	return newTail(ctx, { 0, y, z }, wag)
+end
+
+-- the head's anchors (every species sets them through head())
+local function headInfo(ctx)
+	local c, r = ctx.HeadC or { 0, 6.5, -0.5 }, ctx.HeadR or { 8, 7, 7 }
+	return c, r
+end
+
+HYBRID.Cat = function(ctx, hy)
+	local g = ctx.Body
+	local c = headInfo(ctx)
+	-- tabby bands over the back and three stripes on the forehead, in the cat's colour
+	local shift = hy.R(-0.6, 0.6)
+	for i = 0, 2 do
+		box(g, "HyA", { 0, -1.2 - i * 2.8 + shift, 6.5 }, { 26, 1, 11 }, { Op = "Paint", OnlyKeys = MAIN_KEYS })
+	end
+	if ctx.Fine then
+		for _, x in ipairs({ -1.6, 0, 1.6 }) do
+			local top = topAt(ctx, x, c[3] - 2)
+			if top then
+				box(g, "HyA", { x, top - 1.2, c[3] - 3.5 }, { 1, 2.6, 7 }, { Op = "Paint", OnlyKeys = MAIN_KEYS })
+			end
+		end
+	end
+	-- the long ringed cat tail: the body's own fur with the cat's rings
+	local k = ctx.HyMain
+	local t = hyTail(ctx, 0.32)
+	cap(t, k, { 0, 0, 0 }, { 0, 0.6, 5 }, 1.55, 1.4)
+	cap(t, k, { 0, 1, 5.8 }, { 0, 10.4, 6.4 }, 1.45, 1.2)
+	ell(t, k, { 0, 11.4, 5.6 }, { 1.3, 1.4, 1.4 })
+	for i = 1, 3 do
+		box(t, "HyA", { 0, 1.6 + i * 3.1, 7 }, { 7, 1, 7 }, { Op = "Paint", OnlyKeys = k })
+	end
+end
+
+HYBRID.Dog = function(ctx, hy)
+	local g = ctx.Body
+	-- round patches over the back and one around an eye side, in the dog's colour
+	local spots = { { 3.2, -3.6 }, { -2.8, -6.4 }, { 0.6, -1.2 } }
+	for i, p in ipairs(spots) do
+		local x = p[1] + hy.R(-0.8, 0.8)
+		local y = p[2] + hy.R(-0.6, 0.6)
+		local z = backAt(ctx, x, y)
+		if z and (ctx.Fine or i <= 2) then
+			paint(g, "HyA", { Kind = "Ellipsoid", Center = { x, y, z - 0.6 }, Radius = { 2.4, 2.2, 3 } }, MAIN_KEYS)
+		end
+	end
+	-- soft floppy ears on a body that has none of its own (a frog, a penguin, a slime...)
+	if not HAS_EARS[ctx.Look.Species] then
+		local c, r = headInfo(ctx)
+		pair(function(s)
+			local y = c[2] + r[2] * 0.3
+			local x = sideAt(ctx, y, c[3], s) or r[1]
+			ell(g, "HyA", { s * (abs(x) + 0.4), y - 1.4, c[3] + 0.4 }, { 1.7, 4.2, 2.6 }, { Rotation = CFrame.Angles(0, 0, s * 0.28) })
+			ell(g, "HyA", { s * (abs(x) + 1.2), y - 4.6, c[3] + 0.2 }, { 1.6, 1.7, 2.3 })
+		end)
+	end
+	-- the happy curled tail with a pale tip
+	local t = hyTail(ctx, 0.5)
+	curve(t, ctx.HyMain, { { 0, 0, 0 }, { 0, 2.6, 2.4 }, { 0, 5.4, 2.6 }, { 0, 6.8, 0.6 } }, 1.7, 1.1)
+	ell(t, "HyB", { 0, 6.9, 0.4 }, { 1.3, 1.3, 1.3 })
+end
+
+HYBRID.Fox = function(ctx, hy)
+	local g = ctx.Body
+	local c, r = headInfo(ctx)
+	-- pale cheek ruffs sweeping out and down below the eyes
+	pair(function(s)
+		local y = c[2] - r[2] * 0.55
+		local z = c[3] - r[3] * 0.3
+		local x = sideAt(ctx, y, z, s)
+		if x then
+			cone(g, "HyB", { x - s * 1.4, y + 0.4, z }, { x + s * 2.8, y - 2, z + 1.2 }, 1.9, 0.35)
+		end
+	end)
+	-- the big bushy fox tail in the fox's colour with a pale tip
+	local t = hyTail(ctx, 0.28)
+	ell(t, "HyA", { 0, 5.2, 5.5 }, { 3, 6, 3.4 })
+	ell(t, "HyB", { 0, 11, 6.1 }, { 2.4, 2.4, 2.4 })
+end
+
+HYBRID.Bunny = function(ctx, hy)
+	local g = ctx.Body
+	local c = headInfo(ctx)
+	-- long bunny ears standing up between the body's own ears, pink inside
+	local lean = hy.R(0.9, 1.6)
+	pair(function(s)
+		local x = 2.4
+		local z = c[3] + 1
+		local top = topAt(ctx, s * x, z)
+		if top then
+			local base = { s * x, top - 1.6, z }
+			local tip = { s * (x + lean), top + 7.4, z + 1 }
+			cap(g, "HyA", base, tip, 1.9, 1.5)
+			ell(g, "HyA", { s * (x + lean * 0.8), top + 5.2, z + 0.8 }, { 2, 2.8, 1.4 })
+			paint(g, "Inner", { Kind = "Capsule", A = { s * x, top, z - 1.2 }, B = { s * (x + lean), top + 6.6, z - 0.2 }, Radius = 1.05, RadiusB = 0.9 }, "HyA")
+		end
+	end)
+	-- a fluffy cotton tail
+	local t = hyTail(ctx, 0.25)
+	ell(t, "HyB", { 0, 0.6, 1.6 }, { 2.6, 2.6, 2.6 })
+end
+
+HYBRID.Bear = function(ctx, hy)
+	local g = ctx.Body
+	local c, r = headInfo(ctx)
+	-- a pale moon crescent on the chest and little round ears on the sides of the head
+	local y = (ctx.NeckY or 0) - 1.6
+	local z = frontAt(ctx, 0, y)
+	if z then
+		paint(g, "HyB", { Kind = "Ellipsoid", Center = { 0, y, z + 0.4 }, Radius = { 4.2, 1.6, 2 } }, MAIN_KEYS)
+		paint(g, ctx.HyMain, { Kind = "Ellipsoid", Center = { 0, y - 1.2, z + 0.4 }, Radius = { 3.2, 1.2, 2.4 } }, "HyB")
+	end
+	if not HAS_EARS[ctx.Look.Species] then
+		-- round bear ears on the upper sides of an earless head
+		pair(function(s)
+			local x = r[1] * 0.58
+			local top = topAt(ctx, s * x, c[3] + 0.4)
+			if top then
+				roundEar(ctx, s, { x, top - 0.4, c[3] + 0.4 }, 2.3, "HyA", "Inner")
+			end
+		end)
+	else
+		-- a body with its own ears gets big bear paws instead
+		local b = hyBounds(ctx)
+		box(g, "HyA", { 0, b[2] / SK + 1.2, -2 }, { 30, 2.4, 14 }, { Op = "Paint", OnlyKeys = PAW_KEYS })
+	end
+	-- (the Body keeps its own tail: a bear's stub says little)
+end
+
+HYBRID.Panda = function(ctx, hy)
+	local g = ctx.Body
+	-- dark panda patches around both eyes (painted before the eyes are carved, like the Panda's own)
+	for _, eye in ipairs(ctx.Eyes) do
+		local w, rows = #eye.Mask[1], #eye.Mask
+		local X = eye.XLeft - (w - 1) / 2
+		local Y = eye.Y - (rows - 1) / 2
+		local Z = frontZ(g, floor(X + 0.5), floor(Y + 0.5))
+		if Z then
+			local s = (X >= 0) and 1 or -1
+			paint(g, "HyB", { Kind = "Ellipsoid", Center = { X / SK + s * 0.3, Y / SK - 0.5, Z / SK + 0.8 }, Radius = { 3.2, 3.8, 2.1 }, Rotation = CFrame.Angles(0, 0, s * -0.45) }, MAIN_KEYS)
+		end
+	end
+	-- a dark band over the shoulders (the Body keeps its own tail)
+	local y = (ctx.NeckY or 0) - 1.2
+	box(g, "HyB", { 0, y, 2 }, { 26, 2.4, 16 }, { Op = "Paint", OnlyKeys = MAIN_KEYS })
+end
+
+HYBRID.Dragon = function(ctx, hy)
+	local g = ctx.Body
+	local c, r = headInfo(ctx)
+	-- a crest of stepped spikes running back over the head
+	for i = 0, 2 do
+		local z = c[3] + 0.6 + i * 2.6
+		local top = topAt(ctx, 0, z)
+		if top then
+			local y = top - 0.4 - i * 0.2
+			box(g, "HyB", { 0, y + 0.6, z }, { 3, 2, 3 })
+			box(g, "HyB", { 0, y + 2.1, z + 0.5 }, { 3 - (i > 1 and 2 or 0), 1, 2 })
+			if i < 2 then
+				box(g, "HyB", { 0, y + 3.1, z + 1 }, { 1, 1, 1 })
+			end
+		end
+	end
+	-- little horn nubs (unless the Horns accessory gives big ones)
+	if ctx.Look.Accessory ~= "Horns" then
+		pair(function(s)
+			local x = math.min((ctx.EarX or 5) - 1.4, r[1] * 0.5)
+			local top = topAt(ctx, s * x, c[3] - 0.2)
+			if top then
+				cone(g, "HyHorn", { s * x, top - 1.2, c[3] - 0.2 }, { s * (x + 1.2), top + 2.8, c[3] + 0.8 }, 1.4, 0.4)
+			end
+		end)
+	end
+	-- the dragon tail ending in a spade
+	local t = hyTail(ctx, 0.3)
+	local k = ctx.HyMain
+	cap(t, k, { 0, 0, 0 }, { 0, 0, 5.2 }, 1.8, 1.5)
+	cap(t, k, { 0, 0, 5.2 }, { 3.6, 1.4, 7.2 }, 1.5, 1.1)
+	cone(t, "HyB", { 3.2, 1.2, 7 }, { 6.2, 3.8, 8.4 }, 2.2, 0.2)
+end
+
+HYBRID.Owl = function(ctx, hy)
+	local g = ctx.Body
+	local c = headInfo(ctx)
+	-- feathery ear tufts with dark tips
+	pair(function(s)
+		local x = math.max(2.6, (ctx.EarX or 5) - 1.2)
+		local top = topAt(ctx, s * x, c[3])
+		if top then
+			cone(g, "HyA", { s * x, top - 1.4, c[3] }, { s * (x + 3.2), top + 4, c[3] + 1 }, 1.8, 0.35)
+			if ctx.Fine then
+				paint(g, "HyTip", { Kind = "Ellipsoid", Center = { s * (x + 2.9), top + 3.4, c[3] + 1 }, Radius = { 1.4, 1.4, 1.4 } }, "HyA")
+			end
+		end
+	end)
+	-- little v-shaped feather marks on the chest
+	if ctx.Fine then
+		local y0 = (ctx.NeckY or 0) - 2.4
+		for _, row in ipairs({ { y0, { -1.8, 1.8 } }, { y0 - 2.6, { 0 } } }) do
+			for _, x in ipairs(row[2]) do
+				face(ctx, "HyTip", { { x - 1, row[1] }, { x, row[1] - 1 }, { x + 1, row[1] } })
+			end
+		end
+	end
+end
+
+HYBRID.Slime = function(ctx, hy)
+	local g = ctx.Body
+	local c = headInfo(ctx)
+	-- a jelly curl on top of the head with a glossy glint
+	local top = topAt(ctx, 0, c[3])
+	if top then
+		ell(g, "HyA", { 0, top + 0.4, c[3] }, { 2.6, 1.8, 2.6 })
+		cone(g, "HyA", { 0, top + 1.4, c[3] }, { 1.6, top + 4.6, c[3] - 0.6 }, 1.6, 0.4)
+		if ctx.Fine then
+			local X, Y = vx(-1), vx(top + 1)
+			local z = frontZ(g, X, Y)
+			if z then
+				set(g, X, Y, z, "Spark")
+			end
+		end
+	end
+	-- glossy jelly drips down the cheeks
+	pair(function(s)
+		local y = c[2] - 1.5
+		local x = sideAt(ctx, y, c[3] - 1, s)
+		if x then
+			cap(g, "HyA", { x - s * 0.6, y, c[3] - 1 }, { x - s * 0.2, y - 2.8 - hy.R(0, 1), c[3] - 1.4 }, 1, 0.8)
+		end
+	end)
+end
+
+HYBRID.Unicorn = function(ctx, hy)
+	local g = ctx.Body
+	local c = headInfo(ctx)
+	-- a golden spiral horn on the forehead
+	if ctx.Look.Accessory ~= "Horns" then
+		local z = c[3] - 2.4
+		local top = topAt(ctx, 0, z)
+		if top then
+			cone(g, "Gold", { 0, top - 1, z }, { 0, top + 6.4, z - 1.8 }, 1.8, 0.3)
+			if ctx.Fine then
+				for i = 0, 2 do
+					box(g, "GoldDeep", { 0, top + 0.4 + i * 1.9, z - 0.4 - i * 0.45 }, { 5, 0.7, 5 }, { Op = "Paint", OnlyKeys = "Gold" })
+				end
+			end
+		end
+	end
+	-- a flowing mane over the back of the head
+	local zb = c[3] + 3
+	local top = topAt(ctx, 0, zb)
+	if top then
+		curve(g, "HyB", { { 0, top + 0.6, c[3] + 1 }, { 0, top - 1, zb + 2.4 }, { 0, top - 5.6, zb + 3.2 } }, 2.2, 1.4)
+	end
+	-- and a flowing tail
+	local t = hyTail(ctx, 0.26)
+	curve(t, "HyB", { { 0, 0, 0 }, { 0, 1.8, 3.6 }, { 0, -0.2, 7 }, { 0, -2.6, 8.2 } }, 2, 1.4)
+end
+
+HYBRID.Phoenix = function(ctx, hy)
+	local g = ctx.Body
+	local c = headInfo(ctx)
+	-- a crest of three flame plumes with glowing tips
+	for i = -1, 1 do
+		local x = i * 1.2
+		local top = topAt(ctx, x, c[3] - 0.6)
+		if top then
+			local tip = { i * 3, top + 5 - abs(i) * 1.2, c[3] + 3 }
+			curve(g, (i == 0) and "HyB" or "HyA", { { x, top - 1.2, c[3] - 0.6 }, { i * 2.1, top + 2.2, c[3] }, tip }, 1.3, 0.6)
+			ell(g, "HyGlow", { tip[1], tip[2] + 0.4, tip[3] + 0.6 }, { 0.9, 1.1, 0.9 })
+		end
+	end
+	-- long tail plumes with glowing ends
+	local t = hyTail(ctx, 0.18)
+	for i = -1, 1 do
+		local tip = { i * 3, -4 + abs(i) * 1.4, 11.6 }
+		curve(t, (i == 0) and "HyB" or "HyA", { { 0, 0, 0 }, { i * 1.2, -1.2, 4.4 }, { i * 2.4, -3, 8.4 }, tip }, 1.2, 0.6)
+		ell(t, "HyGlow", { tip[1], tip[2] - 0.6, tip[3] + 0.4 }, { 1, 1, 1 })
+	end
+end
+
+HYBRID.Frog = function(ctx, hy)
+	local g = ctx.Body
+	local c = headInfo(ctx)
+	-- frog spots over the back and the top of the head
+	local spots = { { 3, -2.6 }, { -3.4, -5.2 }, { 0.4, -7.4 } }
+	for i, p in ipairs(spots) do
+		local x = p[1] + hy.R(-0.6, 0.6)
+		local z = backAt(ctx, x, p[2])
+		if z and (ctx.Fine or i <= 2) then
+			paint(g, "HyA", { Kind = "Ellipsoid", Center = { x, p[2], z - 0.4 }, Radius = { 1.7, 1.7, 2.4 } }, MAIN_KEYS)
+		end
+	end
+	pair(function(s)
+		local x = 2.6 + hy.R(0, 1)
+		local top = topAt(ctx, s * x, c[3] + 1.4)
+		if top and ctx.Fine then
+			paint(g, "HyA", { Kind = "Ellipsoid", Center = { s * x, top, c[3] + 1.4 }, Radius = { 1.4, 1.6, 1.4 } }, MAIN_KEYS)
+		end
+	end)
+end
+
+HYBRID.Penguin = function(ctx, hy)
+	local g = ctx.Body
+	local c = headInfo(ctx)
+	-- a dark tuxedo coat over the back with a white bib on the chest, little orange feet
+	box(g, "HyA", { 0, -3, 7.5 }, { 26, 14, 9 }, { Op = "Paint", OnlyKeys = MAIN_KEYS })
+	local y = (ctx.NeckY or 0) - 3.6
+	local z = frontAt(ctx, 0, y)
+	if z then
+		paint(g, "HyB", { Kind = "Ellipsoid", Center = { 0, y, z + 1 }, Radius = { 4.4, 5.2, 3 } }, MAIN_KEYS)
+	end
+	local b = hyBounds(ctx)
+	box(g, "Feet", { 0, b[2] / SK + 0.9, -3 }, { 30, 1.8, 12 }, { Op = "Paint" })
+	-- a curl of feathers on the head
+	local top = topAt(ctx, 0, c[3])
+	if top and ctx.Fine then
+		curve(g, "HyA", { { 0, top - 0.6, c[3] }, { 0.4, top + 1.2, c[3] - 0.4 }, { 1.6, top + 1.8, c[3] - 0.8 } }, 1, 0.6)
+	end
+end
+
+HYBRID.Axolotl = function(ctx, hy)
+	local g = ctx.Body
+	local c, r = headInfo(ctx)
+	-- three feathery gills on each side of the head, sweeping up and back, with darker tips
+	pair(function(s)
+		for i = -1, 1 do
+			local y = c[2] + 1 + i * 2.2
+			local z = c[3] + 1
+			local x = sideAt(ctx, y, z, s)
+			if x then
+				local a = { x - s * 0.8, y, z }
+				local m = { x + s * 2.4, y + 1.4 + i * 0.6, z + 1 }
+				local b = { x + s * 4.2, y + 3.4 + i * 0.9, z + 2.2 }
+				curve(g, "HyB", { a, m, b }, 1.1, 0.7)
+				ell(g, "HyTip", b, { 0.9, 0.9, 0.9 })
+			end
+		end
+	end)
+	-- the paddle tail with a fin
+	local t = hyTail(ctx, 0.35)
+	curve(t, ctx.HyMain, { { 0, 0, 0 }, { 0, -0.4, 4 }, { 0, 0.6, 8 } }, 2, 1)
+	ell(t, "HyB", { 0, 1.4, 5.6 }, { 0.8, 3.2, 4.4 })
+end
+
+HYBRID.Stormfang = function(ctx, hy)
+	local g = ctx.Body
+	local c = headInfo(ctx)
+	-- glowing storm stripes over the back and a cyan gem on the forehead (they pulse softly)
+	for i = 0, 2 do
+		box(g, "HyGlow", { 0, -1 - i * 3, 7 }, { 26, 0.9, 10 }, { Op = "Paint", OnlyKeys = MAIN_KEYS })
+	end
+	local fy = c[2] + 2.4
+	local z = frontAt(ctx, 0, fy)
+	if z then
+		local Z = vx(z) - 1
+		local X, Y = 0, vx(fy)
+		set(g, X, Y, Z, "HyGem")
+		set(g, X, Y + 1, Z, "HyGem")
+		set(g, X, Y - 1, Z, "HyGem")
+		set(g, X + 1, Y, Z, "HyGem")
+		set(g, X - 1, Y, Z, "HyGem")
+	end
+	ctx.Pal.HyGem = { Color = rgb(63, 200, 255), Material = NEON }
+	ctx.Pulse = ctx.Pulse or {}
+	ctx.Pulse.HyGlow = true
+	ctx.Pulse.HyGem = true
+	-- an armoured tail with a glowing band and a white tip
+	local t = hyTail(ctx, 0.28)
+	local k = ctx.HyMain
+	cap(t, k, { 0, 0, 0 }, { 0, 3, 6 }, 1.8, 1.6)
+	ell(t, k, { 0, 5, 8 }, { 2.2, 2.6, 2.4 })
+	box(t, "HyGlow", { 0, 3.6, 7 }, { 7, 1, 7 }, { Op = "Paint", OnlyKeys = k })
+	ell(t, "HyB", { 0, 7, 9 }, { 1.5, 1.5, 1.5 })
+end
+
+-- two parents of the same species: a pattern in the Style pet's colour, picked by the seed
+HYBRID.Same = function(ctx, hy)
+	if hy.R() < 0.5 then
+		HYBRID.Frog(ctx, hy)
+	else
+		local g = ctx.Body
+		for i = 0, 2 do
+			box(g, "HyA", { 0, -1.2 - i * 2.8, 6.5 }, { 26, 1, 11 }, { Op = "Paint", OnlyKeys = MAIN_KEYS })
+		end
+	end
+end
+
+-- Runs before the eyes are carved: the palette keys of the hybrid features, then the Style species' feature.
+local function applyHybrid(ctx)
+	local look = ctx.Look
+	local hy = look.Hybrid
+	if not hy then
+		return
+	end
+	local r = seededRandom(hy.Seed)
+	hy = { Species = hy.Species, Primary = hy.Primary, Seed = hy.Seed, R = r }
+	local pal = ctx.Pal
+	-- the feature colour is the Style pet's own body colour (pushed away from the Body's when they are close)
+	local a = hy.Primary
+	if colorDistance(a, look.Primary) < 0.2 then
+		a = (luminance(look.Primary) > 0.5) and darken(a, 0.32) or lighten(a, 0.32)
+	end
+	local h, s, v = a:ToHSV()
+	a = Color3.fromHSV((h + r(-0.025, 0.025)) % 1, clamp(s + r(-0.06, 0.06), 0, 1), clamp(v + r(-0.05, 0.05), 0, 1))
+	local b = look.Secondary
+	if colorDistance(b, a) < 0.12 then
+		b = (luminance(a) > 0.5) and darken(b, 0.3) or lighten(b, 0.35)
+	end
+	pal.HyA = a
+	pal.HyB = b
+	pal.HyTip = darken(a, 0.42)
+	pal.HyHorn = mix(CREAM or rgb(255, 242, 218), b, 0.3)
+	pal.HyGlow = { Color = lighten(b, 0.3), Material = NEON }
+	ctx.HyMain = (look.Species == "Dragon") and "Scale" or ((look.Species == "Stormfang") and "Base" or "Fur")
+	if not pal[ctx.HyMain] then
+		ctx.HyMain = "Fur"
+	end
+	ctx.NoShade.HyGlow = true
+	ctx.Keep.HyGlow = true
+	ctx.Keep.HyA = true
+	ctx.Keep.HyB = true
+	local trait = nil
+	if hy.Species == nil or hy.Species == look.Species then
+		trait = HYBRID.Same
+	else
+		trait = HYBRID[hy.Species]
+	end
+	if trait then
+		ctx.HyBounds = nil
+		trait(ctx, hy)
+		ctx.HyBounds = nil
+	end
+end
+
+----------------------------------------------------------------------
+-- Finishes (Phase 2 tier copies, Look.Finish): GOLDEN = a gold-tinted palette (the pet's light and dark areas
+-- become a ramp from deep bronze to pale champagne, so its patterns still read), metallic gold accents (claws,
+-- horns, beaks, hooves, wing edges) and small glowing sparkle stars attached to the head, the cheek and the wing
+-- tips (they twinkle with the pulse), plus a gold sparkle emitter. RAINBOW = a pearly body, rainbow wings and accents
+-- (a fixed rainbow sweep across the model), a few of the biggest accent parts cycling their hue on the client
+-- (Animate, at most HUE_PARTS parts and 12 updates a second per model) and a rainbow sparkle emitter. Eyes, mouths,
+-- noses and blush keep their colours, so the face reads the same.
+----------------------------------------------------------------------
+local FINISH_KEEP = {
+	EyeIris = true, EyePupil = true, EyeShine = true, EyeGlint = true, EyeRing = true, Lash = true, LidLine = true,
+	Mouth = true, Tongue = true, Tooth = true, Nose = true, Nostril = true, Blush = true, GoldSpark = true,
+}
+local GOLD_METAL = {
+	Claw = true, Horn = true, HornRing = true, Gold = true, GoldDeep = true, Hoof = true, Beak = true, BeakLow = true,
+	Feet = true, WingEdge = true, WingTrim = true, Antler = true, AntlerTip = true, HyHorn = true, Toe = true,
+}
+local RAINBOW_KEYS = {
+	Accent = true, AccentDark = true, Stripe = true, Inner = true, Glow = true, Horn = true, HornRing = true, Gold = true,
+	GoldDeep = true, Patch = true, Ear = true, Wing = true, WingTrim = true, WingEdge = true, WingTip = true,
+	WingVein = true, WingCore = true, WingFlame = true, CloudTop = true, CloudMid = true, Cloud = true, HyA = true, HyB = true,
+	HyTip = true, HyGlow = true, NeonViolet = true, NeonBlue = true, Scarf = true, ScarfStripe = true, Petal = true,
+	PetalDeep = true, HaloGlow = true, AuraA = true, AuraB = true, AuraC = true, Cap = true, BellyMark = true,
+}
+
+local GOLD_DEEP, GOLD_MID, GOLD_PALE, PEARL = nil, nil, nil, nil
+
+local function goldTone(c, k)
+	-- (the luminance is squeezed into 0.3 .. 0.88: white pets stay a rich light gold, black ones a warm bronze)
+	local l = 0.3 + 0.58 * luminance(c)
+	local g
+	if l < 0.55 then
+		g = GOLD_DEEP:Lerp(GOLD_MID, l / 0.55)
+	else
+		g = GOLD_MID:Lerp(GOLD_PALE, (l - 0.55) / 0.45)
+	end
+	return c:Lerp(g, k)
+end
+
+-- calls fn(key, color, entryTable|nil) for every palette entry and stores what it returns
+local function remapPalette(pal, fn)
+	local keys = {}
+	for key in pairs(pal) do
+		keys[#keys + 1] = key
+	end
+	for _, key in ipairs(keys) do
+		local entry = pal[key]
+		local color = nil
+		if typeof(entry) == "Color3" then
+			color = entry
+		elseif type(entry) == "table" and typeof(entry.Color) == "Color3" then
+			color = entry.Color
+		end
+		if color then
+			local out = fn(key, color, type(entry) == "table" and entry or nil)
+			if out ~= nil then
+				pal[key] = out
+			end
+		end
+	end
+end
+
+local function withColor(entry, color, extra)
+	local out = {}
+	if entry then
+		for k, v in pairs(entry) do
+			out[k] = v
+		end
+	end
+	out.Color = color
+	for k, v in pairs(extra or {}) do
+		out[k] = v
+	end
+	return out
+end
+
+local function goldPalette(pal)
+	remapPalette(pal, function(key, color, entry)
+		local base = Voxel.BaseKey(key)
+		if FINISH_KEEP[base] then
+			return nil
+		end
+		if GOLD_METAL[base] then
+			local material = (entry and entry.Material == NEON) and NEON or Enum.Material.Metal
+			return withColor(entry, goldTone(color, 0.95), { Material = material, Reflectance = 0.18 })
+		end
+		local tinted = goldTone(color, 0.86)
+		if entry then
+			return withColor(entry, tinted)
+		end
+		return tinted
+	end)
+	pal.GoldSpark = { Color = rgb(255, 248, 214), Material = NEON }
+end
+
+local function rainbowPalette(pal)
+	remapPalette(pal, function(key, color, entry)
+		local base = Voxel.BaseKey(key)
+		if FINISH_KEEP[base] then
+			return nil
+		end
+		local tinted
+		if RAINBOW_KEYS[base] then
+			-- (instancing paints the real rainbow per part; the palette keeps a bright pastel for the merge)
+			local h = (hashString(base) % 360) / 360
+			tinted = Color3.fromHSV(h, 0.5, 1)
+		else
+			-- a pearly body: lighter, a little cooler, the patterns still a shade apart
+			tinted = color:Lerp(PEARL, 0.3)
+		end
+		if entry then
+			return withColor(entry, tinted)
+		end
+		return tinted
+	end)
+end
+
+-- a 4-point star of glowing voxels (arm voxels on each side) in the X-Y plane at voxel (X, Y, Z)
+local function sparkleStar(g, X, Y, Z, arm)
+	set(g, X, Y, Z, "GoldSpark")
+	for i = 1, arm do
+		set(g, X + i, Y, Z, "GoldSpark")
+		set(g, X - i, Y, Z, "GoldSpark")
+		set(g, X, Y + i, Z, "GoldSpark")
+		set(g, X, Y - i, Z, "GoldSpark")
+	end
+end
+
+-- Golden: little sparkle stars standing on the head and glinting on a cheek, the chest and the wings. Runs after the
+-- body is shaded (the stars are added outside the surface, touching it).
+local function goldSparkles(ctx)
+	local g = ctx.Body
+	local c, r = headInfo(ctx)
+	ctx.HyBounds = nil
+	local big = ctx.High and 2 or 1
+	local small = ctx.High and 1 or 0
+	-- the hero star on top of the head, a little off centre
+	local hx = r[1] * 0.38
+	local top = topAt(ctx, hx, c[3])
+	if top then
+		local X, Z = vx(hx), vx(c[3])
+		local Y = vx(top) + 1 + big
+		sparkleStar(g, X, Y, Z, big)
+	end
+	-- a glint on the other cheek and one on the chest, one voxel in front of the surface
+	for _, p in ipairs({ { -r[1] * 0.62, c[2] - r[2] * 0.25 }, { r[1] * 0.3, (ctx.NeckY or 0) - 3.2 } }) do
+		local X, Y = vx(p[1]), vx(p[2])
+		local z = frontZ(g, X, Y)
+		if z then
+			sparkleStar(g, X, Y, z - 1, small)
+		end
+	end
+	ctx.HyBounds = nil
+	-- glints painted onto the wing (a few voxels near the outer edge)
+	local w = ctx.Wing
+	if w and ctx.Look.WingStyle ~= "StormCloud" then
+		local x0, y0, z0, x1, y1, z1 = Voxel.Bounds(w)
+		if x0 then
+			local spots = ctx.High and { { 0.78, 0.7 }, { 0.55, 0.35 }, { 0.9, 0.3 } } or { { 0.75, 0.6 } }
+			for _, sp in ipairs(spots) do
+				-- the wing reaches towards -X: x0 is its tip
+				local X = floor(x1 + (x0 - x1) * sp[1] + 0.5)
+				local Y = floor(y0 + (y1 - y0) * sp[2] + 0.5)
+				for z = z0, z1 do
+					if get(w, X, Y, z) then
+						set(w, X, Y, z, "GoldSpark")
+					end
+				end
+			end
+		end
+	end
+	ctx.NoShade.GoldSpark = true
+	ctx.Keep.GoldSpark = true
+	ctx.Pulse = ctx.Pulse or {}
+	ctx.Pulse.GoldSpark = true
+end
+
+local function applyFinishPalette(ctx, bp)
+	local finish = ctx.Look.Finish
+	if not finish then
+		return
+	end
+	if not GOLD_DEEP then
+		GOLD_DEEP = rgb(140, 88, 26)
+		GOLD_MID = rgb(240, 180, 52)
+		GOLD_PALE = rgb(255, 230, 140)
+		PEARL = rgb(246, 244, 255)
+	end
+	if finish == "Golden" then
+		goldPalette(ctx.Pal)
+	elseif finish == "Rainbow" then
+		rainbowPalette(ctx.Pal)
+		bp.RainbowKeys = RAINBOW_KEYS
+	end
+	bp.Finish = finish
+end
+
+----------------------------------------------------------------------
 -- Secret aura: a ring of floating glowing voxels (orbits)
 ----------------------------------------------------------------------
 local function auraGrid(ctx)
@@ -2229,6 +3041,8 @@ local function buildBlueprint(look, detail, lean)
 		if look.Accessory then
 			ACCESSORIES[look.Accessory](ctx)
 		end
+		-- Phase 2: a fused hybrid gets its Style parent's signature feature (before the eyes are carved)
+		applyHybrid(ctx)
 		carveEyes(ctx)
 		-- (a species may tune its body and tail shading with ctx.BodyShade = Voxel.Shade options)
 		local bodyShade = { Skip = ctx.NoShade }
@@ -2239,6 +3053,10 @@ local function buildBlueprint(look, detail, lean)
 		WINGS[look.WingStyle](ctx, ctx.Wing)
 		if not ctx.WingNoShade then
 			Voxel.Shade(ctx.Wing, { Skip = ctx.NoShade, LightAt = 0.5 })
+		end
+		-- Phase 2: a Golden copy's sparkle stars (outside the shaded surface, touching it)
+		if look.Finish == "Golden" then
+			goldSparkles(ctx)
 		end
 
 		local bp = { Groups = {}, Pal = ctx.Pal, Look = look, Detail = detail, K = k, Pulse = ctx.Pulse }
@@ -2289,6 +3107,8 @@ local function buildBlueprint(look, detail, lean)
 		end
 		-- (a species that sets ctx.BodyFill may fill the whole remaining total, so its shades and colours survive)
 		bodyGroup.Boxes = mergeGroup(ctx, ctx.Body, max(30, min(ctx.BodyFill and budget.Total or budget.Body, budget.Total - used)))
+		-- Phase 2: the finish recolours the palette the parts are instanced with (the merge used the base colours)
+		applyFinishPalette(ctx, bp)
 		return bp
 	end)
 	SK = 1
@@ -2441,6 +3261,7 @@ local function instantiate(bp, scale)
 	model.PrimaryPart = root
 
 	local specs = {}
+	local rainbow = {} -- Rainbow finish: { Part, Volume } of every part with a rainbow key
 	for _, gr in ipairs(bp.Groups) do
 		local boxes = sortBoxes(gr.Boxes)
 		local hinge = nil
@@ -2466,6 +3287,10 @@ local function instantiate(bp, scale)
 			end
 			part.Name = uniqueName(name)
 			flagPart(part)
+			if bp.RainbowKeys and bp.RainbowKeys[base] and gr.Kind ~= "lid" then
+				local s = part.Size
+				rainbow[#rainbow + 1] = { Part = part, Volume = s.X * s.Y * s.Z }
+			end
 			if bp.Pulse and bp.Pulse[base] then
 				-- glowing parts that pulse softly (Animate)
 				part:SetAttribute("PB_Pulse", part.Transparency)
@@ -2489,6 +3314,33 @@ local function instantiate(bp, scale)
 	model:SetAttribute("PB_Detail", bp.Detail)
 	model:SetAttribute("PetId", bp.Look.Id)
 	model:SetAttribute("PB_Seed", hashString(bp.Look.Id .. bp.Look.Species))
+	if bp.Finish then
+		model:SetAttribute("PB_Finish", bp.Finish)
+	end
+	if bp.Look.Hybrid then
+		model:SetAttribute("PB_Hybrid", true)
+	end
+	if #rainbow > 0 then
+		-- a fixed rainbow sweeping up the pet and out along the wings; the biggest parts also cycle (Animate)
+		local unit = 2.8 * scale
+		for _, e in ipairs(rainbow) do
+			local p = e.Part.Position
+			local phase = (0.95 + 1.1 * (p.Y / unit) + 0.9 * (abs(p.X) / unit)) % 1
+			local neon = e.Part.Material == Enum.Material.Neon
+			e.Part.Color = Color3.fromHSV(phase, neon and 0.42 or 0.52, 1)
+			e.Phase = phase
+		end
+		table.sort(rainbow, function(a, b)
+			if a.Volume ~= b.Volume then
+				return a.Volume > b.Volume
+			end
+			return a.Phase < b.Phase
+		end)
+		local n = HUE_PARTS[bp.Detail] or HUE_PARTS.High
+		for i = 1, math.min(n, #rainbow) do
+			rainbow[i].Part:SetAttribute("PB_Hue", rainbow[i].Phase)
+		end
+	end
 	return model
 end
 
@@ -2523,11 +3375,17 @@ local function buildRig(model)
 	end
 	local lids = {}
 	local pulse = {}
+	local hue = {}
 	for _, part in ipairs(model:GetChildren()) do
 		if part:IsA("BasePart") then
 			local p0 = part:GetAttribute("PB_Pulse")
 			if type(p0) == "number" then
 				pulse[#pulse + 1] = { Part = part, T0 = p0 }
+			end
+			local h0 = part:GetAttribute("PB_Hue")
+			if type(h0) == "number" then
+				local _, s, v = part.Color:ToHSV()
+				hue[#hue + 1] = { Part = part, Phase = h0, S = s, V = v }
 			end
 			local spec = part:GetAttribute("PB_G")
 			if type(spec) == "string" then
@@ -2569,6 +3427,8 @@ local function buildRig(model)
 		Groups = moving,
 		Lids = lids,
 		Pulse = pulse,
+		Hue = hue, -- Rainbow finish: the few parts whose hue cycles
+		HueAt = nil,
 		Blinking = false,
 		St = { Flap = 0, Wag = 0, Sway = 0, Excite = 0, Stud = VOXEL * scale },
 		Offset = (seed % 628) / 100,
@@ -2657,6 +3517,24 @@ local function updatePulse(rig, t)
 	for i = 1, #list do
 		local e = list[i]
 		e.Part.Transparency = e.T0 + k
+	end
+end
+
+-- Rainbow finish: the flagged parts slide through the rainbow (at most every HUE_STEP seconds per model)
+local function updateHue(rig, t)
+	local list = rig.Hue
+	if #list == 0 then
+		return
+	end
+	local last = rig.HueAt
+	if last and t >= last and t - last < HUE_STEP then
+		return
+	end
+	rig.HueAt = t
+	local shift = t * HUE_RATE
+	for i = 1, #list do
+		local e = list[i]
+		e.Part.Color = Color3.fromHSV((e.Phase + shift) % 1, e.S, e.V)
 	end
 end
 
@@ -2758,6 +3636,47 @@ local function addSparkles(model, look, rate, scale)
 	emitter.Parent = root
 end
 
+-- Phase 2 finishes: a soft gold (Golden) or rainbow (Rainbow) sparkle emitter on the root
+local function addFinishSparkles(model, look, rate, scale)
+	local root = model.PrimaryPart
+	if not root then
+		return
+	end
+	local emitter = Instance.new("ParticleEmitter")
+	emitter.Name = "FinishSparkles"
+	emitter.Texture = SPARKLE_TEXTURE
+	if look.Finish == "Golden" then
+		emitter.Color = ColorSequence.new(rgb(255, 214, 96), rgb(255, 248, 214))
+	else
+		emitter.Color = ColorSequence.new({
+			ColorSequenceKeypoint.new(0, rgb(255, 140, 160)),
+			ColorSequenceKeypoint.new(0.25, rgb(255, 214, 120)),
+			ColorSequenceKeypoint.new(0.5, rgb(140, 236, 160)),
+			ColorSequenceKeypoint.new(0.75, rgb(130, 190, 255)),
+			ColorSequenceKeypoint.new(1, rgb(210, 150, 255)),
+		})
+	end
+	emitter.LightEmission = 1
+	emitter.LightInfluence = 0
+	emitter.Rate = rate
+	emitter.Lifetime = NumberRange.new(0.7, 1.3)
+	emitter.Speed = NumberRange.new(0.2 * scale, 0.8 * scale)
+	emitter.SpreadAngle = Vector2.new(180, 180)
+	emitter.Rotation = NumberRange.new(0, 360)
+	emitter.RotSpeed = NumberRange.new(-120, 120)
+	emitter.Size = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0),
+		NumberSequenceKeypoint.new(0.35, 0.26 * scale),
+		NumberSequenceKeypoint.new(1, 0),
+	})
+	emitter.Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 1),
+		NumberSequenceKeypoint.new(0.3, 0.15),
+		NumberSequenceKeypoint.new(1, 1),
+	})
+	emitter.Parent = root
+end
+
 ----------------------------------------------------------------------
 -- Public API
 ----------------------------------------------------------------------
@@ -2776,6 +3695,9 @@ function PetBuilder.Build(petDef, opts)
 	model.PrimaryPart = model:FindFirstChild("Body")
 	if look.Rarity == "Legendary" or look.Rarity == "Mythic" or look.Rarity == "Secret" then
 		addSparkles(model, look, (detail == "Low") and 3 or 5, scale)
+	end
+	if look.Finish then
+		addFinishSparkles(model, look, FINISH_SPARKLE_RATE[detail] or 3, scale)
 	end
 	return model
 end
@@ -2818,6 +3740,7 @@ function PetBuilder.Animate(model, t, opts)
 	end
 	updateBlink(rig, t)
 	updatePulse(rig, t)
+	updateHue(rig, t)
 end
 
 -- Height of the resting pose (studs, Scale 1), measured once per look from the High build.
