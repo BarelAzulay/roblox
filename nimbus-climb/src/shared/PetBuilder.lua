@@ -5,7 +5,7 @@
 -- API (ARCHITECTURE_V2.md section 2 + ARCHITECTURE_V3.md)
 --   PetBuilder.Build(petDef, opts) -> Model   opts: { Scale = 1, Detail = "High" (default) | "Low", Evolved = false }
 --                                             Evolved = true: the pet's evolved form (bigger, four-legged, fan wings,
---                                             gold jewellery; see "Evolved forms" below): High <= ~2500 parts, Low <= ~460
+--                                             gold jewellery; see "Evolved forms" below): High <= ~1560 parts, Low <= ~380
 --                                             High: <= ~350 parts (viewports, podiums, NPCs, your own pets)
 --                                             Low:  <= ~120 parts (other players' followers, far away)
 --   PetBuilder.Animate(model, t, opts)        opts: { Flap = 1 (speed multiplier), Excited = 0..1 }
@@ -78,8 +78,8 @@ local BUDGET = {
 	High = { Total = 344, Cap = 350, Body = 216, Wing = 32, Tail = 20, Halo = 10 },
 	Low = { Total = 116, Cap = 120, Body = 70, Wing = 11, Tail = 7, Halo = 4 },
 	-- evolved forms (bigger, more detailed: PetBuilder.Build(def, { Evolved = true }))
-	EvoHigh = { Total = 2400, Cap = 2500, Body = 1750, Wing = 280, Tail = 110, Halo = 40 },
-	EvoLow = { Total = 440, Cap = 460, Body = 300, Wing = 52, Tail = 20, Halo = 8 },
+	EvoHigh = { Total = 1500, Cap = 1560, Body = 1080, Wing = 190, Tail = 80, Halo = 30 },
+	EvoLow = { Total = 360, Cap = 380, Body = 240, Wing = 44, Tail = 16, Halo = 8 },
 }
 
 local function budgetOf(look, detail)
@@ -2203,43 +2203,37 @@ local EVO = { Species = {}, Wings = {}, Pets = {}, Ground = -18 }
 -- the evolved eye (High, sculpted at 1.6x): 10 x 11 voxels, lash line on top, a big highlight top left, a small one
 -- lower right, the pupil in a coloured iris that lightens towards the bottom
 EYE_MASKS.Evo = {
-	". . . L L L L L . . .",
-	". L L P P P P P L L .",
-	"L P S S S P P P P P L",
-	"P S S S S S P P P P P",
-	"P S S S S S P P P P I",
-	"P S S S S P P P P I I",
-	"P P S S P P P P I I I",
-	"I P P P P P P I I I I",
-	"I I P P P I I I S S I",
-	"I I I I I I I I S S I",
-	". I I G G G G G I I .",
-	". . I I G G G I I . .",
+	". . L L L L . .",
+	". L P P P P L .",
+	"L S S P P P P L",
+	"P S S S P P P P",
+	"P S S P P P P I",
+	"I P P P P I S I",
+	"I I P P I I S I",
+	". I G G G G I .",
+	". . I G G I . .",
 }
 -- the fierce evolved eye (dragons, Stormfang): the upper edge slants down towards the nose
 EYE_MASKS.EvoFierce = {
-	"L L L L . . . . . .",
-	"L L L L L L . . . .",
-	"P S S L L L L L . .",
-	"P S S S P P L L L L",
-	"P S S P P P P P P I",
-	"I P P P P P P I I I",
-	"I I P P P I I S S I",
-	". I I G G G I S I .",
-	". . I G G G I I . .",
+	"L L L . . . . .",
+	"L L L L L . . .",
+	"P S S L L L L .",
+	"P S S P P P L L",
+	"P S P P P P P I",
+	"I P P P P I S I",
+	". I G G G I I .",
 }
 EYE_MASKS.EvoFierceLow = {
-	"L L L . .",
-	"S S L L L",
-	"S P P P I",
-	". I G I .",
+	"L L . .",
+	"S L L L",
+	"S P P I",
+	". G G .",
 }
 EYE_MASKS.EvoLow = {
-	". L L L .",
-	"S S P P P",
-	"S S P P I",
-	"I P P S I",
-	". I G G .",
+	". L L .",
+	"S S P P",
+	"S P P I",
+	". G G .",
 }
 
 local function evoRGB(t)
@@ -2329,7 +2323,7 @@ end
 
 function EVO.Face(ctx, c, o)
 	o = o or {}
-	addEyes(ctx, (o.EyeX or 8) + 0.6, c[2] + (o.EyeY or 3.5) + 0.6, o.Fierce and "EvoFierce" or "Evo", o.Fierce)
+	addEyes(ctx, (o.EyeX or 8) + 0.4, c[2] + (o.EyeY or 3.5) + 0.4, o.Fierce and "EvoFierce" or "Evo", o.Fierce)
 	cuteEyes(ctx)
 	if o.Blush ~= false then
 		local r = ctx.HeadR
@@ -2501,7 +2495,7 @@ function EVO.Fan(ctx, w, o)
 	o = o or {}
 	local S = o.Size or 0.8
 	local a0, a1 = o.A0 or 80, o.A1 or 186 -- left wing frame: 90 = up, 180 = straight out (the hinge turns it back)
-	local fw = o.Width or 2.7
+	local fw = o.Width or 3.4
 	local function quill(key, deg, r0, ln, wd, z, tip)
 		local ang = math.rad(deg)
 		local dx, dy = math.cos(ang), math.sin(ang)
@@ -2514,7 +2508,7 @@ function EVO.Fan(ctx, w, o)
 		end
 	end
 	-- back layer: long flight feathers fanning from up to out, broad and overlapping, light tips
-	local n = 8
+	local n = o.N or 6
 	for i = n - 1, 0, -1 do
 		local t = i / (n - 1)
 		local ln = 12 + 15 * math.sin(math.pi * (0.22 + 0.62 * (1 - math.abs(t - 0.38) / 0.62) * 0.8))
@@ -2524,14 +2518,14 @@ function EVO.Fan(ctx, w, o)
 		quill((i % 2 == 0) and "Wing" or "WingTrim", a0 + (a1 - a0) * t, 2.5, ln * S * (o.Long or 1), fw, 0, "WingTip")
 	end
 	-- middle layer: shorter, lighter feathers
-	for i = 6, 0, -1 do
-		local t = i / 6
-		quill((i % 2 == 0) and "WingCov" or "WingCov2", a0 + 6 + (a1 - a0 - 12) * t, 2, (9.5 + 3 * (1 - math.abs(t - 0.4))) * S, 3, 1, "WingTip")
+	for i = 4, 0, -1 do
+		local t = i / 4
+		quill((i % 2 == 0) and "WingCov" or "WingCov2", a0 + 8 + (a1 - a0 - 16) * t, 2, (10 + 3 * (1 - math.abs(t - 0.4))) * S, 3.4, 1, "WingTip")
 	end
 	-- coverts: small rounded feathers over the roots
-	for i = 5, 0, -1 do
-		local t = i / 5
-		quill((i % 2 == 0) and "WingCov2" or "WingCov", a0 + 8 + (a1 - a0 - 16) * t, 1.5, 5.6 * S, 2.7, 1.8, nil)
+	for i = 3, 0, -1 do
+		local t = i / 3
+		quill((i % 2 == 0) and "WingCov2" or "WingCov", a0 + 10 + (a1 - a0 - 20) * t, 1.5, 5.8 * S, 3, 1.8, nil)
 	end
 	ell(w, "WingCov2", { -1.2, 1.4, 1.8 }, { 3.4, 3.4, 0.75 })
 	-- a light leading edge along the top feather
@@ -2608,6 +2602,49 @@ function EVO.BatWing(ctx, w, o)
 	ctx.WingTilt = o.Tilt or 0.22
 end
 
+-- the phoenixes' wings: spread like a firebird's, an arm rising out from the shoulder, long pointed flame feathers
+-- trailing out and down with glowing tips (the LEFT wing in its hinge frame: -X is out, +Y is up)
+function EVO.FlameWing(ctx, w, o)
+	o = o or {}
+	local arm = { { 0, 0 }, { -5, 5.5 }, { -11, 9.5 }, { -17, 12 }, { -22, 12.5 } }
+	local function armAt(t)
+		local f = t * (#arm - 1)
+		local i = math.min(#arm - 1, floor(f) + 1)
+		local u = f - (i - 1)
+		local a, b = arm[i], arm[i + 1]
+		return { a[1] + (b[1] - a[1]) * u, a[2] + (b[2] - a[2]) * u }
+	end
+	local function plume(key, p, deg, ln, wd, z, hot)
+		local ang = math.rad(deg)
+		local dx, dy = math.cos(ang), math.sin(ang)
+		local b = { p[1] + dx * ln, p[2] + dy * ln }
+		evoFeather(w, key, p, b, wd, z)
+		if hot then
+			local tc = { b[1] - dx * ln * 0.2, b[2] - dy * ln * 0.2, z }
+			shape(w, { Kind = "Ellipsoid", Center = tc, Radius = { ln * 0.26, wd + 0.6, 1.2 }, Key = "WingTip", Op = "Paint", OnlyKeys = { [key] = true }, Rotation = CFrame.Angles(0, 0, ang), Pivot = tc })
+		end
+	end
+	for i = 5, 0, -1 do
+		local f = i / 5
+		plume((i % 2 == 0) and "Wing" or "WingTrim", armAt(0.42 + 0.58 * f), 240 - 54 * f, 11 + 7 * f, 2.3, 0, true)
+	end
+	for i = 4, 0, -1 do
+		local f = i / 4
+		plume((i % 2 == 0) and "WingTrim" or "Wing", armAt(0.04 + 0.38 * f), 270 - 24 * f, 9 + 2.4 * f, 2.5, 0.4, true)
+	end
+	for i = 6, 0, -1 do
+		local f = i / 6
+		plume((i % 2 == 0) and "WingCov" or "WingCov2", armAt(0.04 + 0.86 * f), 258 - 60 * f, 5.6, 2.4, 1.2, false)
+	end
+	local pts = {}
+	for i, a in ipairs(arm) do
+		pts[i] = { a[1], a[2] + 0.6, 1 }
+	end
+	curve(w, "WingEdge", pts, 1.5, 0.9, { Smooth = true })
+	ctx.WingSweep = o.Sweep or 0.55
+	ctx.WingTilt = o.Tilt or 0.55
+end
+
 -- palette for the evolved wings and jewellery
 function EVO.Palette(ctx)
 	local pal, look = ctx.Pal, ctx.Look
@@ -2625,8 +2662,9 @@ function EVO.Palette(ctx)
 	pal.GoldLight = rgb(255, 232, 150)
 	pal.Gem = st.Gem and evoRGB(st.Gem) or rgb(232, 60, 100)
 	pal.GemB = st.GemB and evoRGB(st.GemB) or rgb(84, 172, 238)
+	pal.Gem = { Color = pal.Gem, Material = NEON }
+	pal.GemB = { Color = pal.GemB, Material = NEON }
 	if look.Glow then
-		pal.Gem = { Color = pal.Gem, Material = NEON }
 	end
 	pal.Toe = darken(asColor(pal.Belly, look.Primary), 0.3)
 	return st
@@ -3098,22 +3136,54 @@ end
 
 EVO.Species.Phoenix = function(ctx)
 	local g = ctx.Body
-	local c = EVO.Bird(ctx, { HeadR = { 10.2, 9, 9.2 } })
-	cone(g, "Beak", { 0, c[2] - 2, c[3] - 8.6 }, { 0, c[2] - 4, c[3] - 12.6 }, 2, 0.3)
-	-- flame crest: tall tongues of fire, hot core
-	local crest = { { 0, 12, 1 }, { 3, 9, 2.6 }, { -3, 9, 2.6 }, { 1.5, 7, 5 }, { -1.6, 7.4, 5 }, { 0, 6, 7 } }
-	for i, p in ipairs(crest) do
-		cone(g, (i % 2 == 1) and "Flame" or "FlameHot", { p[1] * 0.4, ctx.HeadTop - 2, c[3] + p[3] * 0.4 }, { p[1], ctx.HeadTop + p[2], c[3] + p[3] }, 2, 0.3)
-	end
+	local G0 = EVO.Ground
+	local pal = ctx.Pal
+	pal.Talon = rgb(250, 202, 72)
+	-- legs with golden talons
 	pair(function(s)
-		cone(g, "Flame", { s * 8, c[2] + 1, c[3] + 2 }, { s * 13, c[2] + 3, c[3] + 6 }, 1.8, 0.3)
+		cap(g, "Feet", { s * 3.6, -10, 1.5 }, { s * 3.8, G0 + 2.2, 0 }, 1.5, 1.2)
+		for _, dx in ipairs({ -1.6, 0, 1.6 }) do
+			cap(g, "Talon", { s * 3.8, G0 + 1.4, 0 }, { s * 3.8 + dx, G0 + 0.8, -4 }, 0.9, 0.5)
+		end
+		cap(g, "Talon", { s * 3.8, G0 + 1.4, 0.6 }, { s * 3.8, G0 + 0.8, 3 }, 0.8, 0.5)
 	end)
-	EVO.Face(ctx, c, { EyeX = 7.8, EyeY = 3.2 })
+	-- body leaning forward, a puffed golden chest
+	ell(g, "Fur", { 0, -6, 2.5 }, { 8.6, 9, 10.6 }, { Rotation = CFrame.Angles(0.42, 0, 0), Pivot = { 0, -6, 2.5 } })
+	ell(g, "Fur", { 0, -2.5, -3.6 }, { 7.6, 7.8, 7 })
+	paint(g, "Belly", { Kind = "Ellipsoid", Center = { 0, -4.5, -8.6 }, Radius = { 6.2, 8.6, 4.4 } }, "Fur")
+	-- neck and a round head
+	cap(g, "Fur", { 0, -1, -4.6 }, { 0, 8.6, -9.8 }, 5, 4.2)
+	local c = { 0, 12.6, -10.4 }
+	head(ctx, "Fur", c, { 7.6, 7.2, 7.4 })
+	shape(g, { Kind = "RoundBox", Center = { 0, c[2] + 0.2, c[3] + 0.4 }, Size = { 13.6, 12.6, 13 }, Round = 3.6, Key = "Fur" })
+	paint(g, "Belly", { Kind = "Ellipsoid", Center = { 0, c[2] - 3.6, c[3] - 5.6 }, Radius = { 5.6, 3.4, 3 } }, "Fur")
+	-- short hooked golden beak
+	shape(g, { Kind = "Cone", A = { 0, c[2] - 1.4, c[3] - 6.6 }, B = { 0, c[2] - 3.8, c[3] - 11.4 }, Radius = 2.2, RadiusB = 0.4, Key = "Beak" })
+	pal.Beak = rgb(250, 196, 70)
+	ctx.HeadC, ctx.HeadR = c, { 7.6, 7.2, 7.4 }
+	ctx.HeadTop = c[2] + 7.2
+	ctx.NeckY, ctx.NeckZ, ctx.NeckR = 4.6, -7.6, { 4.2, 4 }
+	ctx.WingHinge = { 6.8, 0.5, 0.5 }
+	ctx.TailHinge = { 0, -6, 11 }
+	ctx.EvoBelly = -6.5
+	EVO.Face(ctx, c, { EyeX = 6.6, EyeY = 2.6 })
+	-- flame crest sweeping back from the crown, hot cores
+	local crest = { { 0, 1, -1.5, 11 }, { 2.4, 0.6, 0, 9 }, { -2.4, 0.6, 0, 9 }, { 0, 0.4, 2.6, 10 }, { 1.8, 0, 4.2, 7 }, { -1.8, 0, 4.2, 7 } }
+	for i, f in ipairs(crest) do
+		local base = { f[1] * 0.6, ctx.HeadTop - 1.4, c[3] + f[3] }
+		local tip = { f[1] * 1.3, ctx.HeadTop + f[4], c[3] + f[3] + f[4] * 0.55 }
+		local mid = { (base[1] + tip[1]) / 2, (base[2] + tip[2]) / 2 + 0.8, (base[3] + tip[3]) / 2 - 0.8 }
+		curve(g, (i % 2 == 1) and "Flame" or "FlameHot", { base, mid, tip }, 1.9, 0.35, { Smooth = true })
+	end
 	shadeMain(ctx, { "Fur" })
-	-- long flame tail plumes
+	-- long tail plumes sweeping back and down, glowing tips
 	local t = newTail(ctx, ctx.TailHinge, 0.2)
-	for i = -1, 1 do
-		curve(t, (i == 0) and "FlameHot" or "Flame", { { 0, 0, 0 }, { i * 3, -2, 6 }, { i * 6, -3, 12 }, { i * 8, -1, 17 } }, 2.6, 0.8, { Smooth = true })
+	for i = -2, 2 do
+		local x = i * 1.6
+		local drop = math.abs(i) * 1.6
+		local key = (i % 2 == 0) and "Flame" or "Wing"
+		curve(t, key, { { x * 0.4, 0, 0 }, { x, 1 - drop * 0.3, 5 }, { x * 1.5, 4.5 - drop, 10 }, { x * 1.9, 9 - drop * 1.6, 12.5 - math.abs(i) } }, 2.2, 0.7, { Smooth = true })
+		ell(t, "FlameHot", { x * 1.9, 9 - drop * 1.6, 12.5 - math.abs(i) }, { 1.4, 2, 1.4 })
 	end
 end
 
@@ -3152,11 +3222,11 @@ EVO.Species.Unicorn = function(ctx)
 	EVO.Quad(ctx, { W = 0.92, L = 1.02, Leg = 1.3, PawKey = "Gold", Toes = false })
 	local c = EVO.Head(ctx, { 9, 8.8, 9 }, nil, 1.5, 1)
 	-- long horse snout, small ears
-	ell(g, "Fur", { 0, c[2] - 3, c[3] - 7.6 }, { 5.2, 5.4, 5.6 })
-	paint(g, "Muzzle", { Kind = "Ellipsoid", Center = { 0, c[2] - 5, c[3] - 10 }, Radius = { 4.8, 3.6, 3.6 } }, "Fur")
+	ell(g, "Fur", { 0, c[2] - 4.4, c[3] - 7.4 }, { 5, 4.4, 5.6 })
+	paint(g, "Muzzle", { Kind = "Ellipsoid", Center = { 0, c[2] - 6, c[3] - 9.8 }, Radius = { 4.6, 3.2, 3.6 } }, "Fur")
 	if ctx.Fine then
-		face(ctx, "Nostril", { { 2, c[2] - 4 }, { -2, c[2] - 4 } })
-		face(ctx, "Mouth", { { 0, c[2] - 6.6 }, { 1, c[2] - 7 }, { -1, c[2] - 7 } })
+		face(ctx, "Nostril", { { 2, c[2] - 4.8 }, { -2, c[2] - 4.8 } })
+		face(ctx, "Mouth", { { 0, c[2] - 7.4 }, { 1, c[2] - 7.8 }, { -1, c[2] - 7.8 } })
 	end
 	pair(function(s)
 		triEar(ctx, s, { 4.4, c[2] + 6.4, c[3] + 1.6 }, { 5.8, c[2] + 12.2, c[3] + 2.4 }, 2.4)
@@ -3177,7 +3247,7 @@ EVO.Species.Unicorn = function(ctx)
 	end
 	ell(g, "Mane", { 1.5, c[2] + 6.6, c[3] - 5.4 }, { 3.2, 2.4, 2.4 })
 	ell(g, "Mane2", { -1.8, c[2] + 6, c[3] - 4.4 }, { 2.6, 2.2, 2.2 })
-	EVO.Face(ctx, c, { EyeX = 8.4, EyeY = 5.2, Blush = false })
+	EVO.Face(ctx, c, { EyeX = 8.4, EyeY = 5.8, Blush = false })
 	shadeMain(ctx, { "Fur" })
 	local t = newTail(ctx, ctx.TailHinge, 0.3)
 	for i = -1, 1 do
@@ -3360,7 +3430,7 @@ end
 
 local function evoHalo(ctx, R, lift)
 	local h = Voxel.NewGrid(30)
-	shape(h, { Kind = "Torus", Center = { 0, 0, 0 }, Radius = R or 5.6, Thickness = 0.8, Key = "HaloGlow" })
+	shape(h, { Kind = "Torus", Center = { 0, 0, 0 }, Radius = R or 5.6, Thickness = 0.8, Key = "HaloGlow", Rotation = CFrame.Angles(-0.45, 0, 0), Pivot = { 0, 0, 0 } })
 	ctx.Halo = h
 	ctx.HaloAt = { 0, ctx.HeadTop + (lift or 3.4), ctx.HeadC[3] + 1 }
 	ctx.Pal.HaloGlow = { Color = rgb(255, 222, 120), Material = NEON }
@@ -3532,7 +3602,7 @@ EVO.Pets.nebula_axolotl = function(ctx)
 end
 
 EVO.Pets.ember_phoenix = function(ctx)
-	EVO.Necklace(ctx, { R = 9.4, DY = -0.5, Tilt = 0.3, Drops = 2 })
+	EVO.Necklace(ctx, { R = 4.8, DY = -0.6, Tilt = 0.5, Drops = 2 })
 end
 
 EVO.Pets.sunbeam_bear = function(ctx)
@@ -3571,9 +3641,9 @@ EVO.Pets.eclipse_dragon = function(ctx)
 end
 
 EVO.Pets.obsidian_phoenix = function(ctx)
-	EVO.Crown(ctx, { R = 5.2, Points = 7, Sink = 1.2 })
-	EVO.Flower(ctx, { 5.6, ctx.HeadTop + 1, ctx.HeadC[3] - 3.4 }, 1, "Petal")
-	EVO.Necklace(ctx, { R = 9.4, DY = -0.5, Tilt = 0.3, Drops = 4 })
+	EVO.Crown(ctx, { R = 4.6, Points = 7, Sink = 1.4 })
+	EVO.Flower(ctx, { 5, ctx.HeadTop, ctx.HeadC[3] - 3 }, 0.9, "Petal")
+	EVO.Necklace(ctx, { R = 4.8, DY = -0.6, Tilt = 0.5, Drops = 4 })
 end
 
 EVO.Pets.phantom_kitsune = function(ctx)
@@ -3626,12 +3696,11 @@ function EVO.Sculpt(ctx)
 		extra(ctx)
 	end
 	if ctx.BodyShade then
-		ctx.BodyShade.Noise = 0.42
-		ctx.BodyShade.Seed = 11
-		ctx.BodyShade.Crease = 0.14
-		ctx.BodyShade.Smooth = 1
-		ctx.BodyShade.LightAt = 0.5
-		ctx.BodyShade.DarkAt = -0.12
+		ctx.BodyShade.Noise = 0
+		ctx.BodyShade.Crease = 0
+		ctx.BodyShade.Smooth = 3
+		ctx.BodyShade.LightAt = 0.6
+		ctx.BodyShade.DarkAt = -0.3
 	end
 end
 
@@ -3642,7 +3711,7 @@ function EVO.SculptWing(ctx, w)
 	elseif look.Species == "Stormfang" then
 		EVO.ShardWing(ctx, w)
 	elseif look.Species == "Phoenix" then
-		EVO.Fan(ctx, w, { Size = 0.95, Long = 1.25, Width = 2.1, A0 = 70, A1 = 196 })
+		EVO.FlameWing(ctx, w)
 	else
 		EVO.Fan(ctx, w)
 	end
@@ -3688,7 +3757,7 @@ local function buildBlueprint(look, detail, lean)
 		k = LEAN_HIGH_K
 	end
 	if look.Evolved then
-		k = ((detail == "Low") and 0.8 or 1.6) * (lean and 0.85 or 1)
+		k = ((detail == "Low") and 0.65 or 1.25) * (lean and 0.85 or 1)
 	end
 	SK = k
 	local ok, result = pcall(function()
@@ -3721,7 +3790,7 @@ local function buildBlueprint(look, detail, lean)
 			WINGS[look.WingStyle](ctx, ctx.Wing)
 		end
 		if not ctx.WingNoShade then
-			Voxel.Shade(ctx.Wing, { Skip = ctx.NoShade, LightAt = 0.5, Noise = look.Evolved and 0.25 or nil, Seed = 7 })
+			Voxel.Shade(ctx.Wing, { Skip = ctx.NoShade, LightAt = 0.5, Smooth = look.Evolved and 2 or nil })
 		end
 
 		local bp = { Groups = {}, Pal = ctx.Pal, Look = look, Detail = detail, K = k, Pulse = ctx.Pulse }
