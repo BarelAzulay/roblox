@@ -1632,6 +1632,10 @@ local CLOSED_ENUMS = {
 	CollisionFidelity = "Default Hull Box PreciseConvexDecomposition",
 	RenderFidelity = "Automatic Precise Performance",
 	ActuatorRelativeTo = "Attachment0 Attachment1 World",
+	BulkMoveMode = "FireAllEvents FireCFrameChanged",
+	ProximityPromptStyle = "Default Custom",
+	ProximityPromptExclusivity = "OnePerButton OneGlobally AlwaysShow",
+	ProximityPromptInputType = "Keyboard Gamepad Touch",
 }
 
 -- Enum type names that exist (open lists: any member name is accepted).
@@ -1647,7 +1651,7 @@ for name in ("KeyCode UserInputType Font FontWeight FontStyle ContextActionPrior
 	.. "ChatVersion TextChatMessageStatus VRDeviceType AdornCullingMode HandlesStyle SelectionMode InputType "
 	.. "GamepadType UITheme CenterDialogType CustomCameraMode LeftRight PlayerChatType RenderPriority "
 	.. "SoundType CompletionState AssetType PrivilegeType MaterialPattern WaterDirection WrapLayer TerrainFace "
-	.. "AvatarContextMenuOption AvatarJointUpgrade BreakpointRemoveReason ConnectionError NormalId"):gmatch("%S+") do
+	.. "AvatarContextMenuOption AvatarJointUpgrade BreakpointRemoveReason ConnectionError NormalId CreatorType"):gmatch("%S+") do
 	OPEN_ENUMS[name] = true
 end
 
@@ -3446,6 +3450,42 @@ Mock.ApplyCFrame = function(part, v)
 	applyCFrame(part, part[STATE], v, true)
 end
 
+-- WorldRoot:BulkMoveTo(partList, cframeList, eventMode): sets every part's CFrame like a CFrame write (welded parts
+-- follow). Argument checks follow Roblox: two arrays of equal length (BaseParts / CFrames), an optional
+-- Enum.BulkMoveMode. FireCFrameChanged / FireAllEvents both fire CFrame + Position changed signals here.
+Mock.BulkMoveTo = function(partList, cframeList, eventMode, level)
+	level = (level or 1) + 1
+	if rawtype(partList) ~= "table" then
+		error("invalid argument #1 to 'BulkMoveTo' (table expected, got " .. typeof(partList) .. ")", level)
+	end
+	if rawtype(cframeList) ~= "table" then
+		error("invalid argument #2 to 'BulkMoveTo' (table expected, got " .. typeof(cframeList) .. ")", level)
+	end
+	if eventMode ~= nil and (typeof(eventMode) ~= "EnumItem" or tostring(eventMode.EnumType) ~= "Enum.BulkMoveMode") then
+		error("invalid argument #3 to 'BulkMoveTo' (Enum.BulkMoveMode expected, got " .. typeof(eventMode) .. ")", level)
+	end
+	local n = #partList
+	if #cframeList ~= n then
+		error("BulkMoveTo: partList and cframeList must have the same length (" .. n .. " vs " .. #cframeList .. ")", level)
+	end
+	for i = 1, n do
+		local part, value = partList[i], cframeList[i]
+		if typeof(part) ~= "Instance" or not part[STATE].class.isA.BasePart then
+			error("BulkMoveTo: partList[" .. i .. "] is not a BasePart", level)
+		end
+		if typeof(value) ~= "CFrame" then
+			error("BulkMoveTo: cframeList[" .. i .. "] is not a CFrame", level)
+		end
+	end
+	for i = 1, n do
+		local part = partList[i]
+		if not part[STATE].destroyed then
+			applyCFrame(part, part[STATE], cframeList[i], true)
+		end
+	end
+	Mock.BulkMoves = (Mock.BulkMoves or 0) + 1
+end
+
 local function degrees(r)
 	return r * 180 / math.pi
 end
@@ -3571,7 +3611,14 @@ defclass("Model", "PVInstance", {
 	},
 })
 defclass("Actor", "Model", { creatable = true })
-defclass("WorldModel", "Model", { creatable = true })
+defclass("WorldModel", "Model", {
+	creatable = true,
+	methods = {
+		BulkMoveTo = function(self, partList, cframeList, eventMode)
+			Mock.BulkMoveTo(partList, cframeList, eventMode, 2)
+		end,
+	},
+})
 
 defclass("BasePart", "PVInstance", {
 	creatable = false,
@@ -4095,7 +4142,16 @@ defclass("Camera", "Instance", {
 	},
 })
 defclass("ClickDetector", "Instance", { creatable = true, props = { MaxActivationDistance = T.num(32) }, events = { "MouseClick", "MouseHoverEnter", "MouseHoverLeave", "RightMouseClick" } })
-defclass("ProximityPrompt", "Instance", { creatable = true, props = { ActionText = T.str("Interact"), ObjectText = T.str(""), HoldDuration = T.num(0), MaxActivationDistance = T.num(10), Enabled = T.bool(true), RequiresLineOfSight = T.bool(true), KeyboardKeyCode = T.any(nil) }, events = { "Triggered", "TriggerEnded", "PromptShown", "PromptHidden" } })
+defclass("ProximityPrompt", "Instance", {
+	creatable = true,
+	props = {
+		ActionText = T.str("Interact"), ObjectText = T.str(""), HoldDuration = T.num(0), MaxActivationDistance = T.num(10), Enabled = T.bool(true),
+		RequiresLineOfSight = T.bool(true), KeyboardKeyCode = T.any(nil), GamepadKeyCode = T.any(nil), ClickablePrompt = T.bool(true),
+		Style = T.enum("ProximityPromptStyle", "Default"), Exclusivity = T.enum("ProximityPromptExclusivity", "OnePerButton"),
+		UIOffset = T.v2(0, 0), AutoLocalize = T.bool(true),
+	},
+	events = { "Triggered", "TriggerEnded", "PromptShown", "PromptHidden", "PromptButtonHoldBegan", "PromptButtonHoldEnded" },
+})
 defclass("Team", "Instance", { creatable = true, props = { TeamColor = T.brick(), AutoAssignable = T.bool(true) } })
 defclass("Tool", "Instance", { creatable = true, props = { CanBeDropped = T.bool(true), Enabled = T.bool(true), RequiresHandle = T.bool(true), ToolTip = T.str("") }, events = { "Activated", "Deactivated", "Equipped", "Unequipped" } })
 defclass("Backpack", "Instance", { creatable = true })
@@ -4709,11 +4765,16 @@ local function copyProps(base, extra)
 end
 defclass("TextLabel", "GuiObject", { creatable = true, props = textProps, getters = textGetters, init = textInit })
 local buttonEvents = { "Activated", "MouseButton1Click", "MouseButton1Down", "MouseButton1Up", "MouseButton2Click", "MouseButton2Down", "MouseButton2Up", "TouchLongPress" }
-defclass("TextButton", "GuiObject", {
-	creatable = true,
-	props = copyProps(textProps, { AutoButtonColor = T.bool(true), Modal = T.bool(false), Selected = T.bool(false), Style = T.any(nil) }),
-	getters = textGetters,
+-- GuiButton: the abstract base of TextButton and ImageButton (IsA("GuiButton") is true for both, as in Roblox).
+defclass("GuiButton", "GuiObject", {
+	creatable = false,
+	props = { AutoButtonColor = T.bool(true), Modal = T.bool(false), Selected = T.bool(false), Style = T.any(nil) },
 	events = buttonEvents,
+})
+defclass("TextButton", "GuiButton", {
+	creatable = true,
+	props = copyProps(textProps),
+	getters = textGetters,
 	init = textInit,
 })
 defclass("TextBox", "GuiObject", {
@@ -4732,7 +4793,7 @@ defclass("TextBox", "GuiObject", {
 })
 local imageProps = { Image = T.str(""), ImageColor3 = T.rgb(255, 255, 255), ImageTransparency = T.num(0), ImageRectOffset = T.v2(0, 0), ImageRectSize = T.v2(0, 0), ScaleType = T.enum("ScaleType", "Stretch"), SliceCenter = T.any(nil), SliceScale = T.num(1), TileSize = T.u2(1, 0, 1, 0), ResampleMode = T.any(nil) }
 defclass("ImageLabel", "GuiObject", { creatable = true, props = imageProps })
-defclass("ImageButton", "GuiObject", { creatable = true, props = copyProps(imageProps, { AutoButtonColor = T.bool(true), Modal = T.bool(false), Selected = T.bool(false) }), events = buttonEvents })
+defclass("ImageButton", "GuiButton", { creatable = true, props = copyProps(imageProps, { HoverImage = T.str(""), PressedImage = T.str("") }) })
 
 defclass("UIBase", "Instance", { creatable = false })
 defclass("UICorner", "UIBase", { creatable = true, props = { CornerRadius = T.ud(0, 8) } })
@@ -5581,10 +5642,30 @@ service("Workspace", {
 		GetRealPhysicsFPS = function()
 			return 60
 		end,
-		BulkMoveTo = function() end,
+		BulkMoveTo = function(self, partList, cframeList, eventMode)
+			Mock.BulkMoveTo(partList, cframeList, eventMode, 2)
+		end,
 	},
 })
-defclass("Terrain", "BasePart", { creatable = false, methods = { FillBlock = function() end, Clear = function() end } })
+defclass("Terrain", "BasePart", {
+	creatable = false,
+	-- Smooth-terrain API used to build soft cloud islands and ground. Voxel writes are not simulated; calls are
+	-- recorded in Terrain[STATE].fills so tests can assert that terrain was written (count and materials).
+	props = {
+		Decoration = T.bool(false), WaterColor = T.rgb(12, 84, 92), WaterReflectance = T.num(1),
+		WaterTransparency = T.num(0.3), WaterWaveSize = T.num(0.15), WaterWaveSpeed = T.num(10),
+	},
+	methods = {
+		FillBlock = function(self, cf, size, material) local st = self[STATE]; st.fills = st.fills or {}; table.insert(st.fills, { kind = "Block", material = material }) end,
+		FillBall = function(self, center, radius, material) local st = self[STATE]; st.fills = st.fills or {}; table.insert(st.fills, { kind = "Ball", material = material }) end,
+		FillCylinder = function(self, cf, height, radius, material) local st = self[STATE]; st.fills = st.fills or {}; table.insert(st.fills, { kind = "Cylinder", material = material }) end,
+		FillWedge = function(self, cf, size, material) local st = self[STATE]; st.fills = st.fills or {}; table.insert(st.fills, { kind = "Wedge", material = material }) end,
+		FillRegion = function(self, region, resolution, material) local st = self[STATE]; st.fills = st.fills or {}; table.insert(st.fills, { kind = "Region", material = material }) end,
+		Clear = function(self) self[STATE].fills = {} end,
+		SetMaterialColor = function(self, material, color) local st = self[STATE]; st.materialColors = st.materialColors or {}; st.materialColors[tostring(material)] = color end,
+		GetMaterialColor = function(self, material) local st = self[STATE]; return (st.materialColors and st.materialColors[tostring(material)]) or Color3.new(0.5, 0.5, 0.5) end,
+	},
+})
 
 service("Players", {
 	props = { CharacterAutoLoads = T.bool(true), RespawnTime = T.num(5), MaxPlayers = T.num(12), PreferredPlayers = T.num(12), BubbleChat = T.bool(false), ClassicChat = T.bool(false) },
@@ -6230,7 +6311,13 @@ service("TextService", {
 		end,
 	},
 })
-for _, n in ipairs({ "MarketplaceService", "TeleportService", "PhysicsService", "PathfindingService", "ProximityPromptService", "ContentProvider", "Stats", "SocialService", "BadgeService", "MessagingService", "MemoryStoreService", "GroupService", "AssetService", "InsertService", "LocalizationService", "VRService", "HapticService", "TestService", "VoiceChatService", "AvatarEditorService", "UserService", "PolicyService", "NotificationService", "AnalyticsService", "GamepadService", "MaterialService", "LogService", "CoreGui", "Selection", "StudioService", "ScriptContext", "NetworkClient", "UGCValidationService", "RbxAnalyticsService", "ChangeHistoryService", "CaptureService", "DraggerService", "AvatarChatService", "AdService" }) do
+-- ProximityPromptService: service-wide prompt signals (Mock.Trigger / Mock.ShowPrompt / Mock.HidePrompt fire them
+-- together with the prompt's own events, the way the engine does on the server and on the triggering client).
+service("ProximityPromptService", {
+	props = { Enabled = T.bool(true), MaxPromptsVisible = T.num(16), MaxIndicatorsVisible = T.num(4) },
+	events = { "PromptTriggered", "PromptTriggerEnded", "PromptShown", "PromptHidden", "PromptButtonHoldBegan", "PromptButtonHoldEnded" },
+})
+for _, n in ipairs({ "MarketplaceService", "TeleportService", "PhysicsService", "PathfindingService", "ContentProvider", "Stats", "SocialService", "BadgeService", "MessagingService", "MemoryStoreService", "GroupService", "AssetService", "InsertService", "LocalizationService", "VRService", "HapticService", "TestService", "VoiceChatService", "AvatarEditorService", "UserService", "PolicyService", "NotificationService", "AnalyticsService", "GamepadService", "MaterialService", "LogService", "CoreGui", "Selection", "StudioService", "ScriptContext", "NetworkClient", "UGCValidationService", "RbxAnalyticsService", "ChangeHistoryService", "CaptureService", "DraggerService", "AvatarChatService", "AdService" }) do
 	if not Classes[n] then
 		service(n, { generic = true })
 	end
@@ -6534,9 +6621,40 @@ end
 function Mock.FireSignal(inst, name, ...)
 	getSignal(inst, inst[STATE], name):Fire(...)
 end
--- A player uses a ProximityPrompt (what the engine does when the key is pressed in range).
+-- A player uses a ProximityPrompt (what the engine does when the key is pressed in range): the prompt's Triggered
+-- and ProximityPromptService.PromptTriggered fire, then TriggerEnded / PromptTriggerEnded (key released).
+local function promptService()
+	local game_ = Mock.game
+	return game_ and game_:GetService("ProximityPromptService") or nil
+end
 function Mock.Trigger(prompt, player)
-	getSignal(prompt, prompt[STATE], "Triggered"):Fire(player)
+	local st = prompt[STATE]
+	local svc = promptService()
+	getSignal(prompt, st, "Triggered"):Fire(player)
+	if svc then
+		getSignal(svc, svc[STATE], "PromptTriggered"):Fire(prompt, player)
+	end
+	getSignal(prompt, st, "TriggerEnded"):Fire(player)
+	if svc then
+		getSignal(svc, svc[STATE], "PromptTriggerEnded"):Fire(prompt, player)
+	end
+	Mock.PromptTriggers = (Mock.PromptTriggers or 0) + 1
+end
+-- The prompt pops up / hides on this client (walking into / out of MaxActivationDistance).
+function Mock.ShowPrompt(prompt, inputType)
+	inputType = inputType or Enum.ProximityPromptInputType.Keyboard
+	local svc = promptService()
+	getSignal(prompt, prompt[STATE], "PromptShown"):Fire(inputType)
+	if svc then
+		getSignal(svc, svc[STATE], "PromptShown"):Fire(prompt, inputType)
+	end
+end
+function Mock.HidePrompt(prompt)
+	local svc = promptService()
+	getSignal(prompt, prompt[STATE], "PromptHidden"):Fire()
+	if svc then
+		getSignal(svc, svc[STATE], "PromptHidden"):Fire(prompt)
+	end
 end
 
 -- Simulates a remote arriving at the other side

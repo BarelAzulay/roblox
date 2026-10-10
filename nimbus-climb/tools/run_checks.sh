@@ -2,12 +2,13 @@
 # Runs every verification step for Nimbus Climb and prints one summary line per step.
 #
 #   tools/run_checks.sh                 # syntax + static analysis + full smoke test
-#   tools/run_checks.sh --quick         # same, with a shorter smoke test (40 layout seeds instead of 300, ~75 s; the full run takes ~2 min)
+#   tools/run_checks.sh --quick         # same, with a shorter smoke test (40 layout seeds instead of 300, ~7 min; the full run takes ~10 min)
 #   tools/run_checks.sh --static        # only the fast checks (syntax + check.mjs)
 #   tools/run_checks.sh --smoke -v      # only the smoke test, verbose (every passing check is listed)
 #   tools/run_checks.sh --smoke --only match_victory,damage_rules
 #   tools/run_checks.sh --smoke --only layouts,cannon,courses --seeds 300
 #   tools/run_checks.sh --smoke --only client_menu --echo   # show the game's print() / warn() output
+#   tools/run_checks.sh --smoke --only storm_elements,storm_pet,storm_altar,client_storm   # the Stormfang round (tools/smoke_storm.lua)
 #   tools/run_checks.sh --smoke --strict-members --strict   # also fail on warnings / unknown Instance members
 #
 # Any argument that is not --static / --smoke is passed on to tools/smoke.py (python3 tools/smoke.py --list shows the scenarios).
@@ -27,7 +28,7 @@ for arg in "$@"; do
 		--static) do_smoke=0 ;;
 		--smoke) do_static=0 ;;
 		-h | --help)
-			sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+			sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 			exit 0
 			;;
 		*) smoke_args+=("$arg") ;;

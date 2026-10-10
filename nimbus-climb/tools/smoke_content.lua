@@ -1,7 +1,10 @@
 -- smoke_content.lua: scenarios for the game's CONTENT (no player needed, only the loaded modules):
---   catalog      PetCatalog / ItemCatalog data, roulette odds, RollPet frequencies, perks
---   config_shape Config.* tables the v2 systems read (difficulties, archetypes, themes, rarities, roulettes ...)
---   petbuilder   PetBuilder.Build / Animate / GetHeight for every pet (part budget, wings, flags)
+--   catalog      PetCatalog / ItemCatalog data, roulette odds, RollPet frequencies, perks; v3 roles / stats /
+--                specials, Secret pets (never rollable), GetStats, IndexGroups, TotalCount, elements and Stormfang
+--   config_shape Config.* tables the v2 systems read (difficulties, archetypes, themes, rarities, roulettes ...) and
+--                the v3 additions (remotes, Index rewards, tutorial gift, pet stats, the element wheel, Config.Art)
+--   petbuilder   PetBuilder.Build / Animate / GetHeight for every pet at both detail levels (High <= 350, Low <= 120
+--                parts), wings, flags, the species x wing x accessory matrix, and Stormfang's look vs the player's art
 --   layouts      5 difficulties x N seeds: GenerateLayout + ValidateLayout + an INDEPENDENT audit of the
 --                ARCHITECTURE_V2.md rules, statistics per difficulty (steps, tokens, archetype and theme mix)
 --   cannon       ballistics of every CannonPad in the generated layouts
@@ -90,6 +93,317 @@ local function rarityRank(Config)
 	return rank
 end
 
+local function perkSum(def)
+	local sum = 0
+	for _, v in pairs(def.Perks or {}) do
+		if type(v) == "number" then
+			sum = sum + v
+		end
+	end
+	return sum
+end
+
+-- ARCHITECTURE_V3.md section 2: roles, stats, specials, Secret pets, GetStats, IndexGroups, TotalCount.
+local function catalogV3(PC, Config, rank)
+	local SECRET = CONTRACT.v3.secretRarity
+	local roleSet, kindSet = {}, {}
+	for _, r in ipairs(Config.PetStats.Roles) do
+		roleSet[r] = true
+	end
+	for _, k in ipairs(PC.SpecialKinds or { "Blast", "Heal", "Shield", "Storm", "Pounce", "Freeze", "Beam" }) do
+		kindSet[k] = true
+	end
+	local roles = T.tally("every pet has a Role (Economy | Combat) and positive base Stats { Income, Power, Health, Speed }")
+	local fit = T.tally("Economy pets earn more than they hit (Income > Power); Combat pets the opposite")
+	local specials = T.tally("every pet has a Special { Id (unique), Name, Kind, Power > 0, Color }")
+	local perRole = {}
+	local specialIds = {}
+	for _, def in ipairs(PC.Pets) do
+		local st = def.Stats
+		local statsOk = type(st) == "table"
+		if statsOk then
+			for _, key in ipairs({ "Income", "Power", "Health", "Speed" }) do
+				statsOk = statsOk and T.finite(st[key]) and st[key] > 0
+			end
+		end
+		roles:case(roleSet[def.Role] == true and statsOk, def.Id .. ": Role " .. tostring(def.Role) .. ", Stats " .. tostring(st))
+		if statsOk then
+			fit:case((def.Role == "Economy" and st.Income > st.Power) or (def.Role == "Combat" and st.Power > st.Income), def.Id .. ": " .. tostring(def.Role) .. " with Income " .. st.Income .. " / Power " .. st.Power)
+		end
+		local sp = def.Special
+		local spOk = type(sp) == "table" and type(sp.Id) == "string" and sp.Id ~= "" and not specialIds[sp.Id] and type(sp.Name) == "string" and #sp.Name > 2
+			and kindSet[sp.Kind] == true and T.finite(sp.Power) and sp.Power > 0 and typeof(sp.Color) == "Color3"
+		specials:case(spOk, def.Id .. ": Special " .. (type(sp) == "table" and (tostring(sp.Id) .. "/" .. tostring(sp.Kind)) or tostring(sp)))
+		if type(sp) == "table" and type(sp.Id) == "string" then
+			specialIds[sp.Id] = true
+		end
+		perRole[def.Rarity] = perRole[def.Rarity] or { Economy = 0, Combat = 0, n = 0 }
+		local pr = perRole[def.Rarity]
+		pr.n = pr.n + 1
+		if def.Role == "Economy" or def.Role == "Combat" then
+			pr[def.Role] = pr[def.Role] + 1
+		end
+	end
+	roles:report()
+	fit:report()
+	specials:report()
+	-- "roughly half of each per rarity"
+	local split = T.tally("every rarity mixes Economy and Combat pets (roughly half each)")
+	local splitText = {}
+	for _, r in ipairs(Config.Rarities) do
+		local pr = perRole[r.Id]
+		if pr then
+			splitText[#splitText + 1] = string.format("%s %d/%d", r.Id, pr.Economy, pr.Combat)
+			if pr.n >= 2 then
+				split:case(pr.Economy >= 1 and pr.Combat >= 1 and abs(pr.Economy - pr.Combat) <= math.max(1, math.floor(pr.n / 2)), r.Id .. ": " .. pr.Economy .. " Economy / " .. pr.Combat .. " Combat")
+			end
+		end
+	end
+	split:report("Economy/Combat: " .. table.concat(splitText, "  "))
+	-- the mascot's signature special
+	local dragon = PC.Get(CONTRACT.v2.mascotPetId)
+	if dragon then
+		T.eq(dragon.Role, "Combat", "the Cloudy Dragon is a Combat pet")
+		T.check(type(dragon.Special) == "table" and dragon.Special.Name == "Cloud Breath" and dragon.Special.Kind == "Beam", "the Cloudy Dragon's special is 'Cloud Breath' (Kind Beam)", type(dragon.Special) == "table" and (tostring(dragon.Special.Name) .. " / " .. tostring(dragon.Special.Kind)) or "")
+	end
+
+	-- Secret pets: glowing, never rollable from any current roulette, stronger than the best Mythic
+	local secrets = PC.ListByRarity(SECRET)
+	local bestMythic = 0
+	for _, def in ipairs(PC.ListByRarity("Mythic")) do
+		bestMythic = max(bestMythic, perkSum(def))
+	end
+	local secretTally = T.tally("Secret pets glow (Look.Glow) and their perks beat the best Mythic (" .. string.format("%.2f", bestMythic) .. ")")
+	for _, def in ipairs(secrets) do
+		secretTally:case(def.Look.Glow == true and perkSum(def) >= bestMythic, def.Id .. ": glow " .. tostring(def.Look.Glow) .. ", perks " .. string.format("%.2f", perkSum(def)))
+	end
+	secretTally:report()
+	local rollable = {}
+	for _, r in ipairs(Config.Roulettes) do
+		for _, o in ipairs(PC.GetOdds(r.Id)) do
+			rollable[o.PetId] = r.Id
+		end
+		for _, def in ipairs(PC.PossiblePets(r.Id)) do
+			rollable[def.Id] = rollable[def.Id] or r.Id
+		end
+	end
+	local leaked = {}
+	for _, def in ipairs(secrets) do
+		if rollable[def.Id] then
+			leaked[#leaked + 1] = def.Id .. " (" .. rollable[def.Id] .. ")"
+		end
+	end
+	T.check(#leaked == 0, "no current roulette can roll a Secret pet (they come from the phase-2 gems-only roulette)", table.concat(leaked, ", "))
+	local Util = M["shared/Util"]
+	local rng = Util and Util.NewRng and Util.NewRng(31337)
+	if rng then
+		local secretRolls = 0
+		for _, r in ipairs(Config.Roulettes) do
+			for _ = 1, 400 do
+				local id = PC.RollPet(r.Id, rng)
+				local def = id and PC.Get(id)
+				if def and def.Rarity == SECRET then
+					secretRolls = secretRolls + 1
+				end
+			end
+		end
+		T.eq(secretRolls, 0, "1600 RollPet calls over every roulette never return a Secret pet")
+	end
+
+	-- GetStats(petId, level) = base * RarityScale[rarity] * (1 + 0.1 * (level - 1))
+	local stats = T.tally("GetStats(petId, level) = base * RarityScale * (1 + 0.1 * (level - 1)) for levels 1, 2, 10")
+	for _, def in ipairs(PC.Pets) do
+		local scale = Config.PetStats.RarityScale[def.Rarity] or 1
+		for _, level in ipairs({ 1, 2, 10 }) do
+			local got = PC.GetStats(def.Id, level)
+			local ok = type(got) == "table"
+			for _, key in ipairs({ "Income", "Power", "Health", "Speed" }) do
+				local want = def.Stats[key] * scale * (1 + 0.1 * (level - 1))
+				ok = ok and T.finite(got[key]) and abs(got[key] - want) <= 1e-6 * max(1, want)
+			end
+			stats:case(ok, def.Id .. " level " .. level)
+		end
+	end
+	stats:report()
+	local one, none = PC.GetStats(CONTRACT.v2.mascotPetId), PC.GetStats(CONTRACT.v2.mascotPetId, 1)
+	T.check(type(one) == "table" and type(none) == "table" and one.Power == none.Power, "GetStats(petId) defaults to level 1")
+	local okBad, bad = pcall(PC.GetStats, "ghost_pet", 3)
+	T.check(okBad and bad == nil, "GetStats of an unknown pet is nil (never raises)", tostring(bad))
+	local okWeird, weird = pcall(PC.GetStats, CONTRACT.v2.mascotPetId, -4)
+	T.check(okWeird and type(weird) == "table" and weird.Power == one.Power, "GetStats clamps a level below 1 to level 1")
+
+	-- IndexGroups: one group per rarity that has pets, rarity order, Secret last, Config.Index rewards
+	local groups = PC.IndexGroups()
+	local order, seen, covered, groupsOk = {}, {}, 0, type(groups) == "table"
+	local lastRank = 0
+	for i, g in ipairs(groupsOk and groups or {}) do
+		order[#order + 1] = tostring(g.Id)
+		local list = PC.ListByRarity(g.Id)
+		local same = type(g.Pets) == "table" and #g.Pets == #list and #list > 0
+		for j, def in ipairs(list) do
+			same = same and g.Pets[j] == def
+			seen[def.Id] = (seen[def.Id] or 0) + 1
+		end
+		covered = covered + #list
+		local want = Config.Index.Rewards[g.Id]
+		local rewardOk = type(g.Reward) == "table" and type(want) == "table" and g.Reward.Tokens == want.Tokens
+		T.check(g.Id == g.Rarity and rank[g.Id] ~= nil and rank[g.Id] > lastRank and same, "IndexGroups()[" .. i .. "] is the " .. tostring(g.Id) .. " group (ListByRarity, rarity order)")
+		T.check(rewardOk, tostring(g.Id) .. " group reward = Config.Index.Rewards." .. tostring(g.Id) .. " (" .. tostring(want and want.Tokens) .. " tokens)", type(g.Reward) == "table" and tostring(g.Reward.Tokens) or tostring(g.Reward))
+		lastRank = rank[g.Id] or lastRank
+	end
+	local rarityWithPets = 0
+	for _, r in ipairs(Config.Rarities) do
+		if #PC.ListByRarity(r.Id) > 0 then
+			rarityWithPets = rarityWithPets + 1
+		end
+	end
+	T.check(groupsOk and #groups == rarityWithPets and covered == #PC.Pets, "IndexGroups() covers every pet exactly once (" .. rarityWithPets .. " groups)", table.concat(order, ","))
+	T.eq(order[#order], SECRET, "the Secret group comes last")
+	if groupsOk and groups[1] then
+		groups[1].Pets[1] = nil
+		groups[1].Reward.Tokens = -1
+		local again = PC.IndexGroups()
+		T.check(again[1].Pets[1] ~= nil and again[1].Reward.Tokens > 0, "IndexGroups() returns fresh tables (a caller cannot corrupt the catalog)")
+	end
+end
+
+-- ARCHITECTURE_V3.md section 11: one Element per pet, the wheel and the Celestial / Shadow pair.
+local function catalogElements(PC, Config)
+	local E = Config.Elements
+	local anyElement = false
+	for _, def in ipairs(PC.Pets) do
+		if def.Element ~= nil then
+			anyElement = true
+		end
+	end
+	local helpers = type(PC.ElementMultiplier) == "function" or type(PC.GetElements) == "function" or type(PC.ElementsOf) == "function"
+	if not anyElement and not helpers then
+		T.warn("PetCatalog has no pet Elements yet (ARCHITECTURE_V3.md section 11: Element on every pet + GetElements / ElementMultiplier / ElementsOf)")
+		return
+	end
+	local valid = {}
+	for _, e in ipairs(E.Order) do
+		valid[e] = true
+	end
+	local byElement, rarities = {}, {}
+	local each = T.tally("every pet has one Element from Config.Elements.Order")
+	for _, def in ipairs(PC.Pets) do
+		each:case(valid[def.Element] == true, def.Id .. ": Element " .. tostring(def.Element))
+		if valid[def.Element] then
+			byElement[def.Element] = (byElement[def.Element] or 0) + 1
+			rarities[def.Element] = rarities[def.Element] or {}
+			rarities[def.Element][def.Rarity] = true
+		end
+	end
+	each:report()
+	local spread = T.tally("every element has at least " .. CONTRACT.v3.elements.minPetsPerElement .. " pets across several rarities")
+	local text = {}
+	for _, e in ipairs(E.Order) do
+		local nR = 0
+		for _ in pairs(rarities[e] or {}) do
+			nR = nR + 1
+		end
+		text[#text + 1] = e .. " " .. (byElement[e] or 0)
+		spread:case((byElement[e] or 0) >= CONTRACT.v3.elements.minPetsPerElement and nR >= 2, e .. ": " .. (byElement[e] or 0) .. " pets in " .. nR .. " rarities")
+	end
+	spread:report(table.concat(text, "  "))
+	-- theme rules that are spelled out in the doc
+	local function elementOf(id)
+		local def = PC.Get(id)
+		return def and def.Element
+	end
+	if PC.Get(CONTRACT.v3.stormfang.petId) then
+		T.eq(elementOf(CONTRACT.v3.stormfang.petId), CONTRACT.v3.stormfang.element, "Stormfang is a " .. CONTRACT.v3.stormfang.element .. " pet")
+	end
+	-- (dark Secret pets may be Shadow instead: "dark Secrets -> Shadow")
+	local speciesRule = T.tally("species elements follow the doc (Phoenix -> Flame, Penguin -> Frost; dark Secrets may be Shadow)")
+	for _, def in ipairs(PC.Pets) do
+		local darkSecret = def.Rarity == CONTRACT.v3.secretRarity and def.Element == "Shadow"
+		if def.Look.Species == "Phoenix" and not darkSecret then
+			speciesRule:case(def.Element == "Flame", def.Id .. ": Phoenix with Element " .. tostring(def.Element))
+		elseif def.Look.Species == "Penguin" and not darkSecret then
+			speciesRule:case(def.Element == "Frost", def.Id .. ": Penguin with Element " .. tostring(def.Element))
+		end
+	end
+	speciesRule:report()
+	-- helpers
+	if T.check(type(PC.ElementMultiplier) == "function", "PetCatalog.ElementMultiplier(attack, defend) exists") then
+		local wheel, pair = CONTRACT.v3.elements.wheel, CONTRACT.v3.elements.pair
+		local strong, weak = CONTRACT.v3.elements.strong, CONTRACT.v3.elements.weak
+		local chart = T.tally("ElementMultiplier follows the wheel (x" .. strong .. " / x" .. weak .. " / x1) and the Celestial <-> Shadow pair")
+		local function want(a, d)
+			for i, e in ipairs(wheel) do
+				local nextE = wheel[i % #wheel + 1]
+				if a == e and d == nextE then
+					return strong
+				elseif d == e and a == nextE then
+					return weak
+				end
+			end
+			if (a == pair[1] and d == pair[2]) or (a == pair[2] and d == pair[1]) then
+				return strong
+			end
+			return 1
+		end
+		for _, a in ipairs(E.Order) do
+			for _, d in ipairs(E.Order) do
+				local ok, got = pcall(PC.ElementMultiplier, a, d)
+				chart:case(ok and type(got) == "number" and abs(got - want(a, d)) < 1e-9, a .. " vs " .. d .. ": " .. tostring(got) .. " (want " .. want(a, d) .. ")")
+			end
+		end
+		chart:report()
+		local okJunk, junk = pcall(PC.ElementMultiplier, "Plasma", nil)
+		T.check(okJunk and junk == 1, "ElementMultiplier of unknown elements is x1 (never raises)", tostring(junk))
+	end
+	if T.check(type(PC.GetElements) == "function", "PetCatalog.GetElements(petId) exists") then
+		local got = PC.GetElements(CONTRACT.v2.mascotPetId)
+		T.check(type(got) == "table" and got[1] == elementOf(CONTRACT.v2.mascotPetId), "GetElements(petId) lists the pet's element", type(got) == "table" and table.concat(got, ",") or tostring(got))
+		local okNo, none = pcall(PC.GetElements, "ghost_pet")
+		T.check(okNo and (none == nil or (type(none) == "table" and #none == 0)), "GetElements of an unknown pet is empty / nil")
+	end
+	if T.check(type(PC.ElementsOf) == "function", "PetCatalog.ElementsOf(def) exists") then
+		local dragon = PC.Get(CONTRACT.v2.mascotPetId)
+		local got = PC.ElementsOf(dragon)
+		T.check(type(got) == "table" and got[1] == dragon.Element, "ElementsOf(def) lists the definition's element")
+		local hybrid = PC.ElementsOf({ Elements = { "Water", "Flame", "Water" } })
+		T.check(type(hybrid) == "table" and #hybrid == 2, "ElementsOf a fused hybrid ({ Elements = {...} }) is deduplicated", type(hybrid) == "table" and table.concat(hybrid, ",") or tostring(hybrid))
+	end
+end
+
+-- ARCHITECTURE_V3.md section 10: the player's own creature. Checked once it is in the catalog.
+local function catalogStormfang(PC, Config)
+	local spec = CONTRACT.v3.stormfang
+	local def = PC.Get(spec.petId)
+	if not def then
+		T.warn("Stormfang (" .. spec.petId .. ") is not in the catalog yet (ARCHITECTURE_V3.md section 10)")
+		return
+	end
+	local SECRET = CONTRACT.v3.secretRarity
+	T.eq(def.Name, spec.name, "Stormfang: Name")
+	T.eq(def.Rarity, SECRET, "Stormfang: Rarity Secret")
+	T.eq(def.Role, spec.role, "Stormfang: Role Combat")
+	T.eq(def.Look.Species, spec.species, "Stormfang: its own species (not a recoloured Fox / Cat)")
+	T.eq(def.Look.WingStyle, spec.wingStyle, "Stormfang: rides a storm cloud (WingStyle StormCloud)")
+	T.check(T.contains(PC.Species, spec.species) and T.contains(PC.WingStyles or {}, spec.wingStyle), "PetCatalog.Species / WingStyles list Stormfang and StormCloud")
+	T.eq(def.Look.Glow, true, "Stormfang: Glow (neon accents)")
+	local sp = def.Special or {}
+	T.check(sp.Name == "Storm Pounce" and sp.Kind == spec.specialKind, "Stormfang: Special 'Storm Pounce' (Kind Pounce)", tostring(sp.Name) .. " / " .. tostring(sp.Kind))
+	if typeof(sp.Color) == "Color3" then
+		T.check(sp.Color.B > 0.7 and sp.Color.B > sp.Color.R + 0.2, "Stormfang: the special is electric blue", tostring(sp.Color))
+	end
+	local secrets = PC.ListByRarity(SECRET)
+	T.check(secrets[1] == def, "Stormfang is listed first among the Secrets (the player's signature creature)", secrets[1] and secrets[1].Id or "")
+	local topPerks, topPower = true, true
+	for _, other in ipairs(secrets) do
+		if other ~= def then
+			topPerks = topPerks and perkSum(def) >= perkSum(other) - 1e-9
+			topPower = topPower and def.Stats.Power >= other.Stats.Power
+		end
+	end
+	T.check(topPerks, "Stormfang: perks at the top of the Secret tier", string.format("%.2f", perkSum(def)))
+	T.check(topPower, "Stormfang: Power at the top of the Secret tier", tostring(def.Stats.Power))
+end
+
 S.catalog = guarded("catalog", function()
 	local Config = config()
 	local PC, IC = M["shared/PetCatalog"], M["shared/ItemCatalog"]
@@ -99,12 +413,18 @@ S.catalog = guarded("catalog", function()
 		return
 	end
 	local rank = rarityRank(Config)
+	local SECRET = CONTRACT.v3.secretRarity
+	local stormfangId = CONTRACT.v3.stormfang.petId
 	-- lineup
 	local counts, total = {}, 0
 	local ids, names = {}, {}
 	local speciesUsed, wingUsed, accessoryUsed = {}, {}, {}
 	local shape = T.tally("every pet has a valid Id / Name / Rarity / Blurb / Look / Perks")
 	local sorted = true
+	-- sort key inside one rarity: Name, except that Stormfang (the player's signature creature) leads the Secrets
+	local function leads(def)
+		return def.Id == stormfangId and def.Rarity == SECRET
+	end
 	for i, def in ipairs(PC.Pets) do
 		total = total + 1
 		counts[def.Rarity] = (counts[def.Rarity] or 0) + 1
@@ -134,19 +454,27 @@ S.catalog = guarded("catalog", function()
 		local prev = PC.Pets[i - 1]
 		if prev then
 			local a, b = rank[prev.Rarity] or 0, rank[def.Rarity] or 0
-			if a > b or (a == b and prev.Name > def.Name) then
+			if a > b or (a == b and leads(def)) or (a == b and not leads(prev) and prev.Name > def.Name) then
 				sorted = false
 			end
 		end
 		T.check(PC.ById[def.Id] == def and PC.Get(def.Id) == def, def.Id .. ": ById / Get return the definition")
 	end
 	shape:report()
-	T.check(sorted, "PetCatalog.Pets is sorted by rarity order, then Name")
+	T.check(sorted, "PetCatalog.Pets is sorted by rarity order, then Name (Stormfang, the player's own creature, leads the Secrets)")
+	-- the v2 rarities keep their v2 lineup; v3 adds the Secret tier (3 dark Secrets + Stormfang) after the Mythics
 	for rarity, want in pairs(CONTRACT.v2.petCounts) do
 		T.eq(counts[rarity] or 0, want, "lineup has " .. want .. " " .. rarity .. " pets")
 		T.eq(#PC.ListByRarity(rarity), want, "ListByRarity('" .. rarity .. "') returns them")
 	end
-	T.eq(total, 26, "the lineup has 26 pets")
+	T.check((counts[SECRET] or 0) >= CONTRACT.v3.minSecretPets, "lineup has at least " .. CONTRACT.v3.minSecretPets .. " Secret pets", tostring(counts[SECRET]))
+	T.eq(#PC.ListByRarity(SECRET), counts[SECRET] or 0, "ListByRarity('Secret') returns them")
+	local perRarity = 0
+	for _, r in ipairs(Config.Rarities) do
+		perRarity = perRarity + (counts[r.Id] or 0)
+	end
+	T.eq(perRarity, total, "every pet's rarity is a Config.Rarities id (the per-rarity counts add up to the lineup)")
+	T.eq(PC.TotalCount(), total, "PetCatalog.TotalCount() is the size of the lineup (" .. total .. " pets, Secret pets included)")
 	T.check(#PC.ListByRarity("NoSuchRarity") == 0, "ListByRarity of an unknown rarity is empty")
 	T.check(PC.Get("nope") == nil and PC.Get(nil) == nil and PC.Get(5) == nil, "Get of an unknown id is nil")
 	local missing = {}
@@ -156,11 +484,36 @@ S.catalog = guarded("catalog", function()
 		end
 	end
 	T.check(#missing == 0, "every species is used by at least one pet", "unused: " .. table.concat(missing, ", "))
-	T.check(#PC.Species == 14, "PetCatalog.Species lists 14 species", #PC.Species .. "")
-	for _, wstyle in ipairs({ "Feather", "Bat", "Fairy", "Cloud", "Crystal", "Flame" }) do
+	for _, s in ipairs({ "Cat", "Dog", "Fox", "Bunny", "Bear", "Panda", "Dragon", "Owl", "Slime", "Unicorn", "Phoenix", "Frog", "Penguin", "Axolotl" }) do
+		T.check(T.contains(PC.Species, s), "PetCatalog.Species keeps the v2 species " .. s)
+	end
+	local PB = M["shared/PetBuilder"]
+	if PB and type(PB.Species) == "table" then
+		local unbuilt = {}
+		for _, s in ipairs(PC.Species) do
+			if not T.contains(PB.Species, s) then
+				unbuilt[#unbuilt + 1] = s
+			end
+		end
+		T.check(#unbuilt == 0, "PetBuilder sculpts every catalog species (PetBuilder.Species)", "missing: " .. table.concat(unbuilt, ", "))
+	end
+	-- the v2 wing styles / accessories stay, and every value the catalog lists is used by some pet
+	local function withExtras(base, extra)
+		local out = {}
+		for _, v in ipairs(base) do
+			out[#out + 1] = v
+		end
+		for _, v in ipairs(extra or {}) do
+			if not T.contains(out, v) then
+				out[#out + 1] = v
+			end
+		end
+		return out
+	end
+	for _, wstyle in ipairs(withExtras({ "Feather", "Bat", "Fairy", "Cloud", "Crystal", "Flame" }, PC.WingStyles)) do
 		T.check(wingUsed[wstyle] == true, "wing style " .. wstyle .. " is used by a pet")
 	end
-	for _, acc in ipairs({ "Horns", "Crown", "Halo", "Leaf", "Mushroom", "Scarf", "Antlers", "Flower" }) do
+	for _, acc in ipairs(withExtras({ "Horns", "Crown", "Halo", "Leaf", "Mushroom", "Scarf", "Antlers", "Flower" }, PC.Accessories)) do
 		T.check(accessoryUsed[acc] == true, "accessory " .. acc .. " is used by a pet")
 	end
 	-- the mascot
@@ -177,7 +530,34 @@ S.catalog = guarded("catalog", function()
 		T.check(K.colorDistance255(dragon.Look.WingColor, Color3.fromRGB(200, 225, 255)) < 2, "mascot WingColor (200,225,255)")
 		T.near(dragon.Perks.MaxHealth or -1, 0.12, 1e-9, "mascot perk MaxHealth +12%")
 		T.near(dragon.Perks.TokenBonus or -1, 0.25, 1e-9, "mascot perk TokenBonus +25%")
-		T.check(PC.Pets[#PC.Pets - 1] == dragon or PC.Pets[#PC.Pets] == dragon, "the mascot is one of the two Mythics at the end of the list")
+		-- v3: the Secret tier (Order 7) sorts after the Mythics, so the mascot closes the rollable lineup instead of the list
+		local at, firstSecret = nil, nil
+		for i, def in ipairs(PC.Pets) do
+			if def == dragon then
+				at = i
+			end
+			if def.Rarity == SECRET and not firstSecret then
+				firstSecret = i
+			end
+		end
+		local tailOk = at ~= nil
+		for i = (at or 1) + 1, #PC.Pets do
+			local r = PC.Pets[i].Rarity
+			if r ~= "Mythic" and r ~= SECRET then
+				tailOk = false
+			end
+		end
+		local mythics = PC.ListByRarity("Mythic")
+		T.check(tailOk and (dragon == mythics[#mythics] or dragon == mythics[#mythics - 1]), "the mascot is one of the two Mythics at the end of the rollable lineup (only Mythics / Secrets follow it)", "index " .. tostring(at) .. " of " .. #PC.Pets)
+		local secretsLast = true
+		if firstSecret then
+			for i = firstSecret, #PC.Pets do
+				if PC.Pets[i].Rarity ~= SECRET then
+					secretsLast = false
+				end
+			end
+		end
+		T.check(secretsLast, "the Secret pets close the list (rarity Order 7)")
 	end
 	-- perk strength scales with rarity
 	local meanPerk, maxPerk = {}, {}
@@ -192,12 +572,15 @@ S.catalog = guarded("catalog", function()
 	local prevMean, scales = 0, true
 	local line = {}
 	for _, r in ipairs(Config.Rarities) do
-		local mean = meanPerk[r.Id] or 0
-		line[#line + 1] = string.format("%s %.3f", r.Id, mean)
-		if mean < prevMean then
-			scales = false
+		-- a rarity with no pets yet (v3's Secret rarity before its pets are added) has no average to compare
+		if counts[r.Id] then
+			local mean = meanPerk[r.Id] or 0
+			line[#line + 1] = string.format("%s %.3f", r.Id, mean)
+			if mean < prevMean then
+				scales = false
+			end
+			prevMean = mean
 		end
-		prevMean = mean
 	end
 	T.check(scales, "average perk strength never drops with rarity", table.concat(line, "  "))
 	T.check((maxPerk.Common or 1) <= 0.06, "Common pets give small perks (<= 6% total)", tostring(maxPerk.Common))
@@ -242,6 +625,11 @@ S.catalog = guarded("catalog", function()
 		end
 		T.check(top <= Config.Pets.PerkCaps[key] + 1e-9, "the best " .. Config.Pets.MaxEquipped .. " pets cannot exceed the " .. key .. " cap on their own", string.format("%.2f vs cap %.2f", top, Config.Pets.PerkCaps[key]))
 	end
+
+	-- v3: roles / stats / specials / Secret pets / GetStats / IndexGroups, elements and Stormfang
+	catalogV3(PC, Config, rank)
+	catalogElements(PC, Config)
+	catalogStormfang(PC, Config)
 
 	-- roulettes: odds
 	local cheapest = huge
@@ -299,6 +687,9 @@ S.catalog = guarded("catalog", function()
 			T.check(mythic > 0, r.Id .. ": can roll Mythic pets")
 		else
 			T.check(mythic == 0, r.Id .. ": never rolls Mythic pets (cheap roulette)", string.format("%.4f", mythic))
+		end
+		if not r.AllowSecret then
+			T.check((byRarity[CONTRACT.v3.secretRarity] or 0) == 0, r.Id .. ": never offers Secret pets")
 		end
 		if r.Id == "Cloud" then
 			T.check((byRarity.Common or 0) > 0 and (byRarity.Uncommon or 0) > 0, "Cloud roulette offers Commons and Uncommons")
@@ -461,7 +852,8 @@ S.config_shape = guarded("config_shape", function()
 	for i, r in ipairs(Config.Rarities) do
 		T.check(r.Order == i and typeof(r.Color) == "Color3" and type(r.Id) == "string", "rarity " .. i .. " (" .. tostring(r.Id) .. ") has Order " .. i .. " and a Color")
 	end
-	T.eq(#Config.Rarities, 6, "six rarities")
+	T.eq(#Config.Rarities, 7, "seven rarities (v3 adds Secret)")
+	T.eq(Config.Rarities[7].Id, "Secret", "the seventh rarity is Secret")
 	T.check(Config.Pets.MaxEquipped >= 1 and Config.Pets.MaxPerStack >= 1, "Config.Pets.MaxEquipped / MaxPerStack")
 	for _, key in ipairs({ "MaxHealth", "TokenBonus", "StaminaRegen", "CheckpointHeal" }) do
 		T.check(type(Config.Pets.PerkCaps[key]) == "number" and Config.Pets.PerkCaps[key] > 0, "PerkCaps." .. key)
@@ -503,6 +895,88 @@ S.config_shape = guarded("config_shape", function()
 	T.check(Config.Course.MaxRadius > 100 and Config.Course.Clearance >= 6, "Config.Course.MaxRadius / Clearance")
 	T.eq(Config.Lobby.SpotCount, 16, "16 lobby spots")
 	T.check(Config.Lobby.SpotRingRadius > Config.Lobby.PortalRingRadius and Config.Lobby.PortalRingRadius < Config.Lobby.PlazaRadius, "lobby rings: portals inside the plaza, spots outside")
+
+	-- v3 (ARCHITECTURE_V3.md): currencies, remotes, home plots, Pet Index, tutorial, pet stats, elements, art
+	for _, name in ipairs(CONTRACT.v3.tutorialRemotes) do
+		T.check(T.contains(Config.Remotes, name), "Config.Remotes lists " .. name)
+	end
+	local remoteSeen, dupRemotes = {}, {}
+	for _, name in ipairs(Config.Remotes) do
+		if remoteSeen[name] then
+			dupRemotes[#dupRemotes + 1] = name
+		end
+		remoteSeen[name] = true
+	end
+	T.check(#dupRemotes == 0, "every Config.Remotes name is unique", table.concat(dupRemotes, ", "))
+	T.check(Config.Attr.Cash == "Cash" and Config.Attr.Gems == "Gems", "Config.Attr.Cash / Gems exist (phase-2 currencies)")
+	T.check(Config.Lobby.PlotSize >= 48 and 2 * math.pi * Config.Lobby.SpotRingRadius / Config.Lobby.SpotCount > Config.Lobby.PlotSize + 20,
+		"home plots (PlotSize " .. tostring(Config.Lobby.PlotSize) .. ") fit side by side on the spot ring (radius " .. tostring(Config.Lobby.SpotRingRadius) .. ")")
+	local rewardPrev, rewardOk, rewardText = 0, true, {}
+	for _, r in ipairs(Config.Rarities) do
+		local reward = Config.Index.Rewards[r.Id]
+		local tokens = type(reward) == "table" and reward.Tokens
+		rewardText[#rewardText + 1] = r.Id .. " " .. tostring(tokens)
+		if not (type(tokens) == "number" and tokens > rewardPrev and tokens == floor(tokens)) then
+			rewardOk = false
+		end
+		rewardPrev = type(tokens) == "number" and tokens or rewardPrev
+	end
+	T.check(rewardOk, "Config.Index.Rewards: a whole-token reward for every rarity, growing with rarity", table.concat(rewardText, ", "))
+	local cheapestPrice = huge
+	for _, r in ipairs(Config.Roulettes) do
+		cheapestPrice = min(cheapestPrice, r.Price)
+	end
+	T.check(type(Config.Tutorial.GiftTokens) == "number" and Config.Tutorial.GiftTokens >= cheapestPrice, "the tutorial gift (" .. tostring(Config.Tutorial.GiftTokens) .. ") pays for the cheapest roulette spin (" .. cheapestPrice .. ")")
+	T.check(type(Config.Tutorial.FinishReward) == "table" and type(Config.Tutorial.FinishReward.Tokens) == "number" and Config.Tutorial.FinishReward.Tokens > 0, "Config.Tutorial.FinishReward.Tokens is a positive reward")
+	T.eq(table.concat(Config.PetStats.Roles, ","), "Economy,Combat", "Config.PetStats.Roles")
+	local scalePrev, scaleOk = 0, true
+	for _, r in ipairs(Config.Rarities) do
+		local sc = Config.PetStats.RarityScale[r.Id]
+		if not (type(sc) == "number" and sc > scalePrev) then
+			scaleOk = false
+		end
+		scalePrev = type(sc) == "number" and sc or scalePrev
+	end
+	T.check(scaleOk, "Config.PetStats.RarityScale grows with every rarity (Common 1 ... Secret)")
+	-- elements: eight of them, the wheel Water > Flame > Frost > Nature > Earth > Storm > Water and Celestial <-> Shadow
+	local E = Config.Elements
+	local wheel, pair = CONTRACT.v3.elements.wheel, CONTRACT.v3.elements.pair
+	local wantOrder = {}
+	for _, e in ipairs(wheel) do
+		wantOrder[#wantOrder + 1] = e
+	end
+	for _, e in ipairs(pair) do
+		wantOrder[#wantOrder + 1] = e
+	end
+	T.eq(table.concat(E.Order, ","), table.concat(wantOrder, ","), "Config.Elements.Order lists the eight elements")
+	local infoOk, colors = true, {}
+	for _, e in ipairs(E.Order) do
+		local info = E.Info[e]
+		infoOk = infoOk and type(info) == "table" and typeof(info.Color) == "Color3" and type(info.Blurb) == "string" and #info.Blurb > 3
+		if type(info) == "table" and typeof(info.Color) == "Color3" then
+			colors[#colors + 1] = { e, info.Color }
+		end
+	end
+	T.check(infoOk, "every element has Info { Color, Blurb } (badges use the colour, no asset ids)")
+	local closest, closestPair = huge, ""
+	for i = 1, #colors do
+		for j = i + 1, #colors do
+			local d = K.colorDistance255(colors[i][2], colors[j][2])
+			if d < closest then
+				closest, closestPair = d, colors[i][1] .. "/" .. colors[j][1]
+			end
+		end
+	end
+	T.check(closest > 40, "element badge colours are distinct (closest pair " .. closestPair .. ")", fmt(closest, 0))
+	local chartOk = true
+	for i, e in ipairs(wheel) do
+		local beats = E.Strong[e]
+		chartOk = chartOk and type(beats) == "table" and #beats == 1 and beats[1] == wheel[i % #wheel + 1]
+	end
+	chartOk = chartOk and type(E.Strong[pair[1]]) == "table" and E.Strong[pair[1]][1] == pair[2] and type(E.Strong[pair[2]]) == "table" and E.Strong[pair[2]][1] == pair[1]
+	T.check(chartOk, "Config.Elements.Strong is the wheel (each beats the next) plus the Celestial <-> Shadow pair")
+	T.check(E.StrongMultiplier == CONTRACT.v3.elements.strong and E.WeakMultiplier == CONTRACT.v3.elements.weak, "element damage: strong x" .. CONTRACT.v3.elements.strong .. ", weak x" .. CONTRACT.v3.elements.weak)
+	T.eq(Config.Art.StormfangImage, CONTRACT.v3.artImage, "Config.Art.StormfangImage is the player's uploaded Stormfang sheet")
 	flushErrors("config_shape")
 end)
 
@@ -568,13 +1042,19 @@ S.petbuilder = guarded("petbuilder", function()
 		T.fail("petbuilder needs PetBuilder and PetCatalog")
 		return
 	end
-	local budget = CONTRACT.v2.partBudget.pet
+	-- ARCHITECTURE_V3.md "ART DIRECTION": two levels of detail, High (default) <= ~350 parts, Low <= ~120 parts
+	local budget = CONTRACT.v3.partBudget.petHigh
+	local lowBudget = CONTRACT.v3.partBudget.petLow
 	local holder = Instance.new("Folder")
 	holder.Name = "SmokePets"
 	holder.Parent = workspace
 	local tally = {
 		model = T.tally("PetBuilder.Build returns a Model with a PrimaryPart for every pet"),
-		budget = T.tally("every pet stays within the part budget (<= " .. budget .. " parts)"),
+		budget = T.tally("every pet stays within the High detail part budget (<= " .. budget .. " parts)"),
+		detail = T.tally("Build(def) defaults to Detail = \"High\" and Build returns a fresh model every call (cached template, cloned)"),
+		low = T.tally("Build(def, { Detail = \"Low\" }) stays within the Low budget (<= " .. lowBudget .. " parts) and is lighter than High"),
+		lowShape = T.tally("the Low detail pet keeps the High one's size, colours, WingL / WingR and part flags"),
+		lowAnimate = T.tally("Animate runs on a Low detail pet without errors, NaN or new instances"),
 		flags = T.tally("every pet part is Anchored, CanCollide=false, CanTouch=false, CanQuery=false, Massless"),
 		shadows = T.tally("small pet parts have CastShadow = false"),
 		wings = T.tally("every pet has two wings named WingL and WingR (BaseParts)"),
@@ -585,7 +1065,7 @@ S.petbuilder = guarded("petbuilder", function()
 		flair = T.tally("Legendary and Mythic pets carry a low-rate sparkle emitter"),
 		noAssets = T.tally("pets use no external assets (no mesh ids, no textures except built-in particles)"),
 		animate = T.tally("Animate runs for 120 frames without errors, NaN or new instances"),
-		flap = T.tally("Animate flaps the wings and WingL/WingR mirror each other"),
+		flap = T.tally("Animate flaps the wings (a storm cloud sways gently) and WingL/WingR mirror each other"),
 		pivot = T.tally("Animate is relative to the PrimaryPart (same pose after PivotTo)"),
 		clone = T.tally("a Clone() of a pet animates like the original"),
 		species = T.tally("pets look different from each other (distinct part-name + colour signatures per species)"),
@@ -608,6 +1088,52 @@ S.petbuilder = guarded("petbuilder", function()
 			end
 			minParts = min(minParts, n)
 			tally.budget:case(n <= budget and n >= 25, who .. ": " .. n .. " parts (25-" .. budget .. ")")
+			-- detail levels
+			local okHigh, high = pcall(PB.Build, def, { Detail = "High" })
+			local nHigh = okHigh and typeof(high) == "Instance" and countParts(high) or -1
+			tally.detail:case(nHigh == n and high ~= model, who .. ": Detail High gives " .. nHigh .. " parts, default " .. n)
+			if okHigh and typeof(high) == "Instance" then
+				high:Destroy()
+			end
+			local okLow, low = pcall(PB.Build, def, { Detail = "Low" })
+			local lowBuilt = okLow and typeof(low) == "Instance" and low:IsA("Model") and low.PrimaryPart ~= nil
+			if lowBuilt then
+				low.Parent = holder
+				low:PivotTo(CFrame.new(60, 3000, 0))
+				local nLow = countParts(low)
+				tally.low:case(nLow <= lowBudget and nLow >= 12 and nLow < n, who .. ": Low " .. nLow .. " parts vs High " .. n)
+				local lowExt = low:GetExtentsSize().Y
+				local hiExt = model:GetExtentsSize().Y
+				local badFlags = 0
+				local bestPrimary = huge
+				for _, d in ipairs(low:GetDescendants()) do
+					if d:IsA("BasePart") then
+						if not (d.Anchored and not d.CanCollide and not d.CanTouch and not d.CanQuery) then
+							badFlags = badFlags + 1
+						end
+						bestPrimary = min(bestPrimary, K.colorDistance255(d.Color, def.Look.Primary))
+					end
+				end
+				local lwl, lwr = low:FindFirstChild("WingL", true), low:FindFirstChild("WingR", true)
+				tally.lowShape:case(abs(lowExt - hiExt) <= 0.45 and bestPrimary <= 70 and badFlags == 0 and lwl ~= nil and lwr ~= nil,
+					who .. ": height " .. fmt(lowExt, 2) .. " vs " .. fmt(hiExt, 2) .. ", primary colour distance " .. fmt(bestPrimary, 0) .. ", " .. badFlags .. " bad flags, wings " .. tostring(lwl) .. "/" .. tostring(lwr))
+				local before = Mock.CountDescendants(low)
+				local animOk, animErr = pcall(function()
+					for i = 1, 45 do
+						PB.Animate(low, i / 30, { Flap = 1, Excited = 0.3 })
+					end
+				end)
+				local finite = true
+				for _, d in ipairs(low:GetDescendants()) do
+					if d:IsA("BasePart") and not finiteCFrame(d.CFrame) then
+						finite = false
+					end
+				end
+				tally.lowAnimate:case(animOk and finite and Mock.CountDescendants(low) == before, who .. ": " .. tostring(animErr) .. " finite=" .. tostring(finite))
+				low:Destroy()
+			else
+				tally.low:case(false, who .. ": Build with Detail Low failed: " .. tostring(low))
+			end
 			-- flags
 			local badFlags, loudShadows = 0, 0
 			for _, d in ipairs(model:GetDescendants()) do
@@ -766,16 +1292,31 @@ S.petbuilder = guarded("petbuilder", function()
 					fresh:Destroy()
 					return sum
 				end
-				local calm, wild, quick = path(1, 0), path(1, 1), path(2, 0)
 				local note = ""
-				if spread < 40 then
-					note = "wings swing only " .. fmt(spread, 0) .. " degrees (expected about +-35)"
-				elseif mirror > 0.05 then
-					note = "WingL and WingR are not mirror images (max difference " .. fmt(mirror, 3) .. ")"
-				elseif wild < calm * 1.2 then
-					note = "Excited = 1 does not flap faster (" .. fmt(wild, 0) .. " vs " .. fmt(calm, 0) .. " degrees travelled)"
-				elseif quick < calm * 1.5 then
-					note = "Flap = 2 does not flap faster (" .. fmt(quick, 0) .. " vs " .. fmt(calm, 0) .. " degrees travelled)"
+				if look.WingStyle == "StormCloud" then
+					-- Stormfang rides a storm cloud: its halves (WingL / WingR) sway and drift gently instead of flapping
+					local drift = 0
+					for i = 2, #frames do
+						drift = max(drift, (frames[i].Position - frames[1].Position).Magnitude)
+					end
+					if spread < 1 and drift < 0.02 then
+						note = "the storm cloud halves never move (expected a gentle sway / drift)"
+					elseif spread > 40 then
+						note = "the storm cloud flaps like a wing (" .. fmt(spread, 0) .. " degrees); it should only sway gently"
+					elseif mirror > 0.05 then
+						note = "WingL and WingR are not mirror images (max difference " .. fmt(mirror, 3) .. ")"
+					end
+				else
+					local calm, wild, quick = path(1, 0), path(1, 1), path(2, 0)
+					if spread < 40 then
+						note = "wings swing only " .. fmt(spread, 0) .. " degrees (expected about +-35)"
+					elseif mirror > 0.05 then
+						note = "WingL and WingR are not mirror images (max difference " .. fmt(mirror, 3) .. ")"
+					elseif wild < calm * 1.2 then
+						note = "Excited = 1 does not flap faster (" .. fmt(wild, 0) .. " vs " .. fmt(calm, 0) .. " degrees travelled)"
+					elseif quick < calm * 1.5 then
+						note = "Flap = 2 does not flap faster (" .. fmt(quick, 0) .. " vs " .. fmt(calm, 0) .. " degrees travelled)"
+					end
 				end
 				tally.flap:case(note == "", who .. ": " .. note)
 			end
@@ -887,6 +1428,138 @@ S.petbuilder = guarded("petbuilder", function()
 		T.check(#belly >= 1 and belly[1].Color.R > 0.85 and belly[1].Color.B < belly[1].Color.R, "Cloudy Dragon has a cream belly", belly[1] and tostring(belly[1].Color))
 		model:Destroy()
 	end
+	-- Stormfang, the player's own creature, faithful to their art (ARCHITECTURE_V3.md section 10). The catalog pet is
+	-- used once it exists; until then a definition with the doc's colours exercises PetBuilder's sculpt.
+	local sf = CONTRACT.v3.stormfang
+	if T.contains(PB.Species or {}, sf.species) then
+		local function rgb3(t)
+			return Color3.fromRGB(t[1], t[2], t[3])
+		end
+		local pal = sf.palette
+		local def = PC.Get(sf.petId) or {
+			Id = sf.petId, Name = sf.name, Rarity = CONTRACT.v3.secretRarity, Blurb = "-",
+			Look = { Species = sf.species, WingStyle = sf.wingStyle, Glow = true, Primary = rgb3(pal.armour), Secondary = rgb3(pal.electric), Eye = rgb3(pal.electric), WingColor = rgb3(pal.cloud) },
+			Perks = {},
+		}
+		local hiOk, hi = pcall(PB.Build, def, {})
+		local loOk, lo = pcall(PB.Build, def, { Detail = "Low" })
+		if T.check(hiOk and typeof(hi) == "Instance" and loOk and typeof(lo) == "Instance", "Stormfang builds at both detail levels", tostring(hi) .. " / " .. tostring(lo)) then
+			hi.Parent, lo.Parent = holder, holder
+			T.check(countParts(hi) <= budget and countParts(lo) <= lowBudget, "Stormfang: High <= " .. budget .. " and Low <= " .. lowBudget .. " parts", countParts(hi) .. " / " .. countParts(lo))
+			-- how many visible parts carry a colour close to `target` (small face details like the nose do not count)
+			local function count(target, limit, filter)
+				local n, best = 0, huge
+				for _, d in ipairs(hi:GetDescendants()) do
+					if d:IsA("BasePart") and d.Transparency < 1 and not d.Name:find("^Eye") and not d.Name:find("^Nose") and not d.Name:find("^Mouth") and (not filter or filter(d)) then
+						local dist = K.colorDistance255(d.Color, target)
+						best = min(best, dist)
+						if dist <= limit then
+							n = n + 1
+						end
+					end
+				end
+				return n, best
+			end
+			local function isNeon(d)
+				return d.Material == Enum.Material.Neon
+			end
+			local function isWing(d)
+				return d.Name:find("^Wing") ~= nil
+			end
+			local function feature(label, target, limit, minParts, filter)
+				local n, best = count(target, limit, filter)
+				T.check(n >= minParts, "Stormfang: " .. label, n .. " part(s) within " .. limit .. " (closest colour distance " .. fmt(best, 0) .. ", needs " .. minParts .. ")")
+				return n >= minParts
+			end
+			-- layered charcoal armour: 3-4 greys (base, mid, light, bevelled edges); the charcoal base must be one of them
+			local greys = {
+				{ "charcoal base ~#2a2c33", rgb3(pal.armour), 24 },
+				{ "mid grey ~#4b4d57", rgb3(pal.armourMid), 32 },
+				{ "light grey ~#70737e", rgb3(pal.armourLight), 32 },
+				{ "bevelled edge ~#a3a6ae", Color3.fromRGB(163, 166, 174), 32 },
+			}
+			local found, shown = 0, {}
+			for _, gr in ipairs(greys) do
+				local n, best = count(gr[2], gr[3])
+				if n >= 2 then
+					found = found + 1
+				end
+				shown[#shown + 1] = gr[1] .. ": " .. n .. " parts (closest " .. fmt(best, 0) .. ")"
+			end
+			local baseParts = count(greys[1][2], greys[1][3])
+			T.check(found >= 3 and baseParts >= 2, "Stormfang: layered charcoal armour plates in 3-4 greys, charcoal base included", table.concat(shown, "; "))
+			feature("white fluffy face mask / cheek ruff", Color3.fromRGB(242, 244, 248), 24, 3)
+			feature("neon violet ear stripes / eye rims (~#7a3cff, Neon)", rgb3(pal.violet), 40, 2, isNeon)
+			feature("neon electric-blue stripes and glowing claws (~#2fb4ff, Neon)", rgb3(pal.electric), 50, 2, isNeon)
+			feature("cyan diamond gems (~#3fc8ff, Neon core)", rgb3(pal.gem), 40, 1, isNeon)
+			feature("dark navy storm cloud (~#2e3a66) as WingL / WingR", rgb3(pal.cloud), 36, 2, isWing)
+			feature("lighter blue cloud tops (~#6b77a8)", Color3.fromRGB(107, 119, 168), 36, 1, isWing)
+			feature("a few white puffs on the storm cloud", Color3.fromRGB(236, 240, 250), 30, 1, isWing)
+			local glass, neonEyes = false, false
+			for _, d in ipairs(hi:GetDescendants()) do
+				if d:IsA("BasePart") then
+					glass = glass or d.Material == Enum.Material.Glass
+					neonEyes = neonEyes or (d.Name:find("^Eye") ~= nil and d.Material == Enum.Material.Neon)
+				end
+			end
+			T.check(glass, "Stormfang: the gems have a Glass rim")
+			T.check(neonEyes, "Stormfang: fierce glowing eyes (Neon eye parts)")
+			T.check(hi:FindFirstChild("WingL", true) ~= nil and hi:FindFirstChild("WingR", true) ~= nil, "Stormfang: the storm cloud halves are WingL / WingR (Animate sways them)")
+			-- the neon accents pulse softly while animated (client side)
+			local neon = {}
+			for _, d in ipairs(hi:GetDescendants()) do
+				if d:IsA("BasePart") and d.Material == Enum.Material.Neon then
+					neon[#neon + 1] = { d, d.Transparency, d.Color }
+				end
+			end
+			PB.Animate(hi, 0.2, { Flap = 1, Excited = 0 })
+			local snap = {}
+			for i, e in ipairs(neon) do
+				snap[i] = e[1].Transparency
+			end
+			PB.Animate(hi, 0.9, { Flap = 1, Excited = 0 })
+			local pulsed, maxT = false, 0
+			for i, e in ipairs(neon) do
+				if abs(e[1].Transparency - snap[i]) > 0.02 or K.colorDistance255(e[1].Color, e[3]) > 3 then
+					pulsed = true
+				end
+				maxT = max(maxT, e[1].Transparency)
+			end
+			T.check(pulsed and maxT < 0.6, "Stormfang: the neon accents pulse softly when animated (and never fade out)", "max transparency " .. fmt(maxT, 2))
+			-- its own species: not a recoloured Fox or Cat
+			local function nameSet(m)
+				local set, list = {}, {}
+				for _, d in ipairs(m:GetDescendants()) do
+					if d:IsA("BasePart") then
+						local n = d.Name:gsub("%d+$", "")
+						if not set[n] then
+							set[n] = true
+							list[#list + 1] = n
+						end
+					end
+				end
+				table.sort(list)
+				return table.concat(list, ",")
+			end
+			local mine = nameSet(hi)
+			for _, other in ipairs({ "Fox", "Cat" }) do
+				local look = {}
+				for k, v in pairs(def.Look) do
+					look[k] = v
+				end
+				look.Species = other
+				local okO, m = pcall(PB.Build, { Id = "sf_" .. other, Name = other, Rarity = def.Rarity, Blurb = "-", Look = look, Perks = {} }, {})
+				if okO and typeof(m) == "Instance" then
+					T.check(nameSet(m) ~= mine, "Stormfang is its own sculpt, not a recoloured " .. other)
+					m:Destroy()
+				end
+			end
+			hi:Destroy()
+			lo:Destroy()
+		end
+	else
+		T.warn("PetBuilder does not sculpt the Stormfang species yet (ARCHITECTURE_V3.md section 10)")
+	end
 	-- defensive: unknown Species / WingStyle / Accessory fall back, never raise
 	local weird = {
 		Id = "weird", Name = "Weird", Rarity = "Common", Blurb = "-",
@@ -898,31 +1571,57 @@ S.petbuilder = guarded("petbuilder", function()
 	if weirdOk and typeof(weirdModel) == "Instance" then
 		weirdModel:Destroy()
 	end
-	-- every species x wing style x accessory builds within budget (small synthetic matrix)
-	local combos, worstCombo, comboBad = 0, 0, nil
-	for _, species in ipairs(PC.Species) do
-		for wi, wing in ipairs(PC.WingStyles or { "Feather", "Bat", "Fairy", "Cloud", "Crystal", "Flame" }) do
-			local acc = (PC.Accessories or { "Horns", "Crown", "Halo", "Leaf", "Mushroom", "Scarf", "Antlers", "Flower" })[(wi + #species) % 9 + 1]
-			local d = {
-				Id = "combo", Name = "Combo", Rarity = (wi % 2 == 0) and "Mythic" or "Common", Blurb = "-",
-				Look = { Species = species, WingStyle = wing, Accessory = acc, Glow = wi % 2 == 0, Primary = Color3.fromRGB(180, 120, 90), Secondary = Color3.fromRGB(240, 220, 200), Eye = Color3.fromRGB(30, 30, 50), WingColor = Color3.fromRGB(200, 160, 220) },
-				Perks = {},
-			}
-			local okc, m = pcall(PB.Build, d, { Scale = 1 })
-			combos = combos + 1
-			if not okc or typeof(m) ~= "Instance" then
-				comboBad = comboBad or (species .. "/" .. wing .. "/" .. tostring(acc) .. ": " .. tostring(m))
-			else
-				local n = countParts(m)
-				worstCombo = max(worstCombo, n)
-				if n > budget then
-					comboBad = comboBad or (species .. "/" .. wing .. "/" .. tostring(acc) .. ": " .. n .. " parts")
-				end
-				m:Destroy()
+	-- every species x wing style x accessory builds within budget at BOTH detail levels (small synthetic matrix; the
+	-- builder's own species / wing lists count too, so a new species is covered before the catalog uses it)
+	local speciesList, wingList = {}, {}
+	for _, list in ipairs({ PC.Species, PB.Species or {} }) do
+		for _, sp in ipairs(list) do
+			if not T.contains(speciesList, sp) then
+				speciesList[#speciesList + 1] = sp
 			end
 		end
 	end
-	T.check(comboBad == nil, "every Species x WingStyle x Accessory combination builds within the part budget (" .. combos .. " combos, worst " .. worstCombo .. " parts)", comboBad)
+	for _, list in ipairs({ PC.WingStyles or { "Feather", "Bat", "Fairy", "Cloud", "Crystal", "Flame" }, PB.WingStyles or {} }) do
+		for _, w in ipairs(list) do
+			if not T.contains(wingList, w) then
+				wingList[#wingList + 1] = w
+			end
+		end
+	end
+	local accessories = PC.Accessories or { "Horns", "Crown", "Halo", "Leaf", "Mushroom", "Scarf", "Antlers", "Flower" }
+	for _, level in ipairs(CONTRACT.v3.petDetail.levels) do
+		local cap = level == "Low" and lowBudget or budget
+		local combos, worstCombo, worstName, comboBad = 0, 0, "", nil
+		for _, species in ipairs(speciesList) do
+			for wi, wing in ipairs(wingList) do
+				local acc = accessories[(wi + #species) % (#accessories + 1) + 1]
+				local d = {
+					Id = "combo", Name = "Combo", Rarity = (wi % 3 == 0) and "Secret" or ((wi % 2 == 0) and "Mythic" or "Common"), Blurb = "-",
+					Look = { Species = species, WingStyle = wing, Accessory = acc, Glow = wi % 2 == 0, Primary = Color3.fromRGB(180, 120, 90), Secondary = Color3.fromRGB(240, 220, 200), Eye = Color3.fromRGB(30, 30, 50), WingColor = Color3.fromRGB(200, 160, 220) },
+					Perks = {},
+				}
+				local okc, m = pcall(PB.Build, d, { Scale = 1, Detail = level })
+				combos = combos + 1
+				local name = species .. "/" .. wing .. "/" .. tostring(acc)
+				if not okc or typeof(m) ~= "Instance" then
+					comboBad = comboBad or (name .. ": " .. tostring(m))
+				else
+					local n = countParts(m)
+					if n > worstCombo then
+						worstCombo, worstName = n, name
+					end
+					if n > cap then
+						comboBad = comboBad or (name .. ": " .. n .. " parts")
+					end
+					if not (m:FindFirstChild("WingL", true) and m:FindFirstChild("WingR", true)) then
+						comboBad = comboBad or (name .. ": no WingL / WingR")
+					end
+					m:Destroy()
+				end
+			end
+		end
+		T.check(comboBad == nil, "every Species x WingStyle x Accessory combination builds at Detail " .. level .. " within " .. cap .. " parts (" .. combos .. " combos, worst " .. worstCombo .. " parts: " .. worstName .. ")", comboBad)
+	end
 	holder:Destroy()
 	flushErrors("petbuilder")
 	flushWarnings("petbuilder")

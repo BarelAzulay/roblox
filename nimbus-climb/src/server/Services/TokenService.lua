@@ -1,19 +1,25 @@
--- TokenService: the cloud tokens. MakeTokenPart builds the visual (a glowing golden coin with a
--- little cloud puff on it), one shared Heartbeat driver gives the tokens right next to a player a
--- cheap spin + bob (see "Shared animation driver" for what that costs), and Watch() turns tokens
--- inside a match course into collectable pickups.
+-- TokenService: the cloud tokens. MakeTokenPart builds the visual (a detailed voxel coin: a rounded golden disc
+-- on a fine block lattice with a lighter glowing rim, a gold face and a cream cloud emblem in relief on both
+-- sides, plus a soft halo), and Watch() turns tokens inside a match course into collectable pickups.
 --
--- Animation cost: a server-side pose replicates to EVERY client (StreamingEnabled is off) and the
--- clients do not interpolate it, so the server only poses what a player can actually see, slowly.
--- If Config.Tokens.ClientAnimated is true the server does not animate at all and a client
--- controller is expected to spin/bob the coins locally instead (that costs the network nothing).
+-- Animation: with Config.Tokens.ClientAnimated (the shipping setting) the server never poses a coin; the client
+-- controller TokenFx spins + bobs every coin locally and moves the "Halo" child with it (the halo is an anchored,
+-- unwelded child of the coin root, so it bobs but never has to spin). With the flag false a cheap server-side
+-- driver poses only the coins next to a player (see "Shared animation driver").
+--
+-- The voxel coin (v3, ARCHITECTURE_V3.md "ART DIRECTION"): every piece is a block on one lattice (u studs per
+-- voxel, 11 voxels across). The round silhouette is three overlapping centred blocks (11x5, 9x9, 5x11 voxels: a
+-- clean stepped circle) in a lighter glowing gold, the gold face sits half a voxel proud of the rim on both sides
+-- (a 7x7 plate; an octagon of two plates on golden coins), and the cream cloud emblem (a 5x2 base under a
+-- centred 3x1 dome: a cloud's rounded top) stands half a voxel proud of the face. Overlapping centred blocks keep
+-- the part count tiny (a Saint course holds ~100 coins and the course part budget counts them, so the coin can
+-- never grow): 7 parts per coin, 8 for a golden one, halo included.
 --
 -- v2: golden bonus tokens. MakeTokenPart(position, parent, value) with value >= Config.Tokens.GoldenValue
--- builds a bigger (1.5x), paler-gold, brighter-sparkling coin with a flare disc and a glint star,
--- tagged BOTH Config.Tags.GoldenToken and Config.Tags.CloudToken. Watch() stays the only collector.
+-- builds a bigger (1.5x), paler-gold, brighter-sparkling coin, tagged BOTH Config.Tags.GoldenToken and
+-- Config.Tags.CloudToken. Watch() stays the only collector.
 --
 -- Plain Lua 5.1-compatible syntax only. No asset ids: Parts + built-in particle textures.
--- Palette: warm but calm golds (Theme.World.Token when available); nothing is pure white.
 
 local CollectionService = game:GetService("CollectionService")
 local Debris = game:GetService("Debris")
@@ -43,11 +49,8 @@ local SPARKLE_TEXTURE = "rbxasset://textures/particles/sparkles_main.dds"
 ----------------------------------------------------------------------
 -- Tunables
 ----------------------------------------------------------------------
-local COIN_DIAMETER = 3.1
-local COIN_THICKNESS = 0.55
-local RIM_DIAMETER = 3.6
-local RIM_THICKNESS = 0.4
-local HALO_DIAMETER = 5.2
+local VOXEL = 0.32 -- studs per coin voxel (normal coin: 11 voxels = 3.5 studs across)
+local HALO_DIAMETER = 5.4
 
 local ANIM_STEP = 1 / 15 -- the driver poses tokens at 15 Hz: a slow spin does not need more
 local CULL_DISTANCE = 65 -- tokens farther than this from every player are left alone (not even looked at)
@@ -59,7 +62,7 @@ local GOLDEN_PICKUP_RADIUS = 4.4 -- golden tokens are bigger, so they are easier
 local COLLECT_FADE = 0.3
 
 ----------------------------------------------------------------------
--- Palette
+-- Palette (warm, calm golds; nothing is pure white)
 ----------------------------------------------------------------------
 local WORLD = Theme.World or {}
 
@@ -70,26 +73,19 @@ local function colorOr(value, fallback)
 	return fallback
 end
 
-local GOLD = colorOr(WORLD.Token, Color3.fromRGB(232, 184, 62))
+local GOLD = colorOr(WORLD.Token, Color3.fromRGB(232, 168, 48))
 local GLOW = GOLD:Lerp(Color3.fromRGB(255, 240, 190), 0.45)
-local AMBER = Color3.fromRGB(192, 124, 38)
-local PUFF = Color3.fromRGB(218, 226, 240)
-
-local GOLDEN_CORE = Color3.fromRGB(255, 236, 168) -- golden-white
-local GOLDEN_RIM = Color3.fromRGB(232, 182, 72)
-local GOLDEN_PUFF = Color3.fromRGB(246, 240, 214)
-local GOLDEN_GLOW = Color3.fromRGB(255, 230, 150)
 
 -- Everything that differs between a normal and a golden token.
 local LOOKS = {
 	normal = {
 		scale = 1,
-		core = GOLD,
-		rim = AMBER,
-		puff = PUFF,
+		rim = Color3.fromRGB(255, 206, 92), -- the glowing outer ring (Neon)
+		face = GOLD, -- the coin face
+		cloud = Color3.fromRGB(255, 244, 218), -- the cloud emblem in relief
 		glow = GLOW,
 		haloScale = 1,
-		haloTransparency = 0.88,
+		haloTransparency = 0.86,
 		lightBrightness = 1.0,
 		lightRange = 11,
 		sparkleRate = 5,
@@ -100,12 +96,12 @@ local LOOKS = {
 	},
 	golden = {
 		scale = 1.5,
-		core = GOLDEN_CORE,
-		rim = GOLDEN_RIM,
-		puff = GOLDEN_PUFF,
-		glow = GOLDEN_GLOW,
-		haloScale = 1.25,
-		haloTransparency = 0.85,
+		rim = Color3.fromRGB(255, 236, 156),
+		face = Color3.fromRGB(255, 212, 92),
+		cloud = Color3.fromRGB(255, 250, 238),
+		glow = Color3.fromRGB(255, 230, 150),
+		haloScale = 1.2,
+		haloTransparency = 0.82,
 		lightBrightness = 2.0,
 		lightRange = 17,
 		sparkleRate = 16,
@@ -115,6 +111,8 @@ local LOOKS = {
 		bob = 0.6,
 	},
 }
+local GOLDEN_GLOW = LOOKS.golden.glow
+local GOLDEN_RIM = LOOKS.golden.face
 
 local BOB_SPEED = 2.2 -- radians per second of the up/down sine
 
@@ -244,10 +242,10 @@ end
 ----------------------------------------------------------------------
 -- The token visual
 ----------------------------------------------------------------------
--- A non-colliding decorative piece welded to the token root, positioned by `offset` (relative to
--- the root). Welded children follow every CFrame change of the anchored root.
--- static = true: the piece is anchored and NOT welded, so it stays where it is when the root is posed
--- (only for shapes that look the same whatever the coin does, e.g. the spherical aura).
+-- A non-colliding block welded to the token root, positioned by `offset` (relative to the root). Welded children
+-- follow every CFrame change of the anchored root.
+-- static = true: the piece is anchored and NOT welded, so it stays where it is when the root is posed (only for
+-- shapes that look the same whatever the coin does: the spherical halo, which TokenFx bobs along with the coin).
 local function addPiece(token, name, shape, size, offset, color, material, transparency, static)
 	local piece = Instance.new("Part")
 	piece.Name = name
@@ -262,6 +260,8 @@ local function addPiece(token, name, shape, size, offset, color, material, trans
 	piece.CanTouch = false
 	piece.CanQuery = false
 	piece.CastShadow = false
+	piece.TopSurface = Enum.SurfaceType.Smooth
+	piece.BottomSurface = Enum.SurfaceType.Smooth
 	piece.CFrame = token.CFrame * offset
 	piece.Parent = token
 	if not static then
@@ -273,6 +273,12 @@ local function addPiece(token, name, shape, size, offset, color, material, trans
 	return piece
 end
 
+-- One block of the coin lattice: centre (y, z) and size (thickness x height x width) in voxels.
+local function addBlock(token, name, u, y, z, thick, height, width, color, material)
+	return addPiece(token, name, Enum.PartType.Block, Vector3.new(thick * u, height * u, width * u),
+		CFrame.new(0, y * u, z * u), color, material, 0)
+end
+
 -- True when `value` makes a token golden.
 local function isGoldenValue(value)
 	return type(value) == "number" and value >= GOLDEN_VALUE
@@ -281,7 +287,8 @@ end
 -- THE visual cloud token. position: world Vector3 (centre of the coin). parent: Instance or nil.
 -- value: how many tokens it is worth (attribute "Value", default Config.Tokens.DefaultValue).
 -- value >= Config.Tokens.GoldenValue makes a golden token (also tagged GoldenToken).
--- The returned Part is the coin: Anchored, CanCollide=false, tagged CloudToken.
+-- The returned Part is the coin (its 9x9 voxel core block): Anchored, CanCollide=false, tagged CloudToken.
+-- The coin stands on its edge facing local X, so spinning it around the world Y axis shows both faces.
 function TokenService.MakeTokenPart(position, parent, value)
 	ensureDriver()
 	if type(value) ~= "number" or value ~= value then
@@ -289,61 +296,57 @@ function TokenService.MakeTokenPart(position, parent, value)
 	end
 	local golden = isGoldenValue(value)
 	local look = golden and LOOKS.golden or LOOKS.normal
-	local s = look.scale
+	local u = VOXEL * look.scale
 	local phase = phaseRng:NextNumber(0, math.pi * 2)
+	local neon = Enum.Material.Neon
+	local smooth = Enum.Material.SmoothPlastic
 
-	-- Roblox cylinders have their axis along X, so this is a coin standing on its edge; spinning
-	-- it around the world Y axis shows both faces.
+	-- the root: the 9x9 core of the rim silhouette (2 voxels thick)
 	local token = Instance.new("Part")
 	token.Name = golden and "GoldenCloudToken" or "CloudToken"
-	token.Shape = Enum.PartType.Cylinder
-	token.Size = Vector3.new(COIN_THICKNESS * s, COIN_DIAMETER * s, COIN_DIAMETER * s)
-	token.Material = Enum.Material.Neon
-	token.Color = look.core
+	token.Shape = Enum.PartType.Block
+	token.Size = Vector3.new(2 * u, 9 * u, 9 * u)
+	token.Material = neon
+	token.Color = look.rim
 	token.Anchored = true
 	token.CanCollide = false
 	token.CanTouch = true
 	token.CanQuery = false
 	token.CastShadow = false
+	token.TopSurface = Enum.SurfaceType.Smooth
+	token.BottomSurface = Enum.SurfaceType.Smooth
 	token.CFrame = CFrame.new(position) * CFrame.Angles(0, phase, 0)
 	token:SetAttribute("Value", value)
 	if golden then
 		token:SetAttribute("Golden", true)
 	end
 
-	-- deeper rim peeking out behind the coin
-	addPiece(token, "Rim", Enum.PartType.Cylinder,
-		Vector3.new(RIM_THICKNESS * s, RIM_DIAMETER * s, RIM_DIAMETER * s), CFrame.new(0, 0, 0),
-		look.rim, Enum.Material.SmoothPlastic, 0)
+	-- the rest of the stepped round silhouette: a wide and a tall band (11x5 and 5x11 voxels)
+	addBlock(token, "RimWide", u, 0, 0, 2, 5, 11, look.rim, neon)
+	addBlock(token, "RimTall", u, 0, 0, 2, 11, 5, look.rim, neon)
 
-	-- the little cloud puff, poking through both faces of the coin (local X is the thickness)
-	addPiece(token, "PuffMiddle", Enum.PartType.Ball, Vector3.new(1.2 * s, 1.2 * s, 1.2 * s),
-		CFrame.new(0, 0.22 * s, 0), look.puff, Enum.Material.SmoothPlastic, 0)
-	addPiece(token, "PuffLeft", Enum.PartType.Ball, Vector3.new(0.85 * s, 0.85 * s, 0.85 * s),
-		CFrame.new(0, -0.12 * s, -0.7 * s), look.puff, Enum.Material.SmoothPlastic, 0)
-	addPiece(token, "PuffRight", Enum.PartType.Ball, Vector3.new(0.85 * s, 0.85 * s, 0.85 * s),
-		CFrame.new(0, -0.12 * s, 0.7 * s), look.puff, Enum.Material.SmoothPlastic, 0)
-
-	-- soft translucent aura so tokens read from far away. A sphere looks the same however the coin turns
-	-- and it is 2.6+ studs in radius against a 0.45-0.6 stud bob, so it stays put (static) instead of
-	-- being re-posed with the coin: one replicated part less per coin and per pose.
-	local haloSize = HALO_DIAMETER * look.haloScale * s
-	addPiece(token, "Halo", Enum.PartType.Ball, Vector3.new(haloSize, haloSize, haloSize),
-		CFrame.new(0, 0, 0), look.glow, Enum.Material.Neon, look.haloTransparency, true)
-
+	-- the gold face, half a voxel proud of the rim on both sides: a 7x7 plate, or an octagon of two plates on
+	-- golden coins
 	if golden then
-		-- a big thin flare disc behind the coin and a four-point glint star across its face
-		addPiece(token, "Flare", Enum.PartType.Cylinder, Vector3.new(0.12, 8.4, 8.4), CFrame.new(0, 0, 0),
-			GOLDEN_GLOW, Enum.Material.Neon, 0.84)
-		addPiece(token, "GlintVertical", Enum.PartType.Block, Vector3.new(0.1, 7.4, 0.28), CFrame.new(0, 0, 0),
-			GOLDEN_GLOW, Enum.Material.Neon, 0.5)
-		addPiece(token, "GlintHorizontal", Enum.PartType.Block, Vector3.new(0.1, 0.28, 7.4), CFrame.new(0, 0, 0),
-			GOLDEN_GLOW, Enum.Material.Neon, 0.5)
+		addBlock(token, "FaceWide", u, 0, 0, 3, 5, 7, look.face, smooth)
+		addBlock(token, "FaceTall", u, 0, 0, 3, 7, 5, look.face, smooth)
+	else
+		addBlock(token, "Face", u, 0, 0, 3, 7, 7, look.face, smooth)
 	end
+
+	-- the cloud emblem in relief (both sides): a 5x2 base under a centred 3x1 dome
+	addBlock(token, "CloudBase", u, -0.5, 0, 4, 2, 5, look.cloud, smooth)
+	addBlock(token, "CloudPuff", u, 1, 0, 4, 1, 3, look.cloud, smooth)
+
+	-- soft translucent halo so tokens read from far away. A sphere looks the same however the coin turns, so it
+	-- is not welded (TokenFx bobs it along with the coin; it never spins).
+	local haloSize = HALO_DIAMETER * look.haloScale * look.scale
+	addPiece(token, "Halo", Enum.PartType.Ball, Vector3.new(haloSize, haloSize, haloSize),
+		CFrame.new(0, 0, 0), look.glow, neon, look.haloTransparency, true)
 
 	local light = Instance.new("PointLight")
 	light.Name = "TokenLight"
-	light.Color = look.core
+	light.Color = look.face
 	light.Brightness = look.lightBrightness
 	light.Range = look.lightRange
 	light.Shadows = false
@@ -352,7 +355,7 @@ function TokenService.MakeTokenPart(position, parent, value)
 	local sparkles = Instance.new("ParticleEmitter")
 	sparkles.Name = "Sparkles"
 	sparkles.Texture = SPARKLE_TEXTURE
-	sparkles.Color = ColorSequence.new(look.glow, look.rim)
+	sparkles.Color = ColorSequence.new(look.glow, look.face)
 	sparkles.LightEmission = 1
 	sparkles.LightInfluence = 0
 	sparkles.Rate = look.sparkleRate

@@ -40,6 +40,21 @@ local function loadService(name)
 end
 
 -- Call module[funcName](...) under pcall. Returns (result, success).
+-- Optional (newer) services: Rojo syncs every module before scripts run, so a module that is not there
+-- right away is simply not part of this build. Do not wait for it (waiting would delay the whole boot).
+local function loadOptionalService(name)
+	local moduleScript = Services:FindFirstChild(name)
+	if not moduleScript then
+		return nil
+	end
+	local ok, result = pcall(require, moduleScript)
+	if not ok then
+		warn(TAG .. "failed to load " .. name .. ": " .. tostring(result))
+		return nil
+	end
+	return result
+end
+
 local function call(label, module, funcName, ...)
 	if type(module) ~= "table" or type(module[funcName]) ~= "function" then
 		warn(TAG .. label .. " skipped (module or function unavailable)")
@@ -191,6 +206,12 @@ local HazardService = loadService("HazardService")
 local CourseBuilder = loadService("CourseBuilder")
 local MatchService = loadService("MatchService")
 local PortalService = loadService("PortalService")
+-- v3 services (ARCHITECTURE_V3.md)
+local IndexService = loadOptionalService("IndexService")
+local NpcService = loadOptionalService("NpcService")
+local TutorialService = loadOptionalService("TutorialService")
+local DevService = loadOptionalService("DevService") -- owner-only developer tools (Config.Dev)
+local StormAltar = loadOptionalService("StormAltar") -- the player's Stormfang landmark (ARCHITECTURE_V3.md section 10)
 
 ----------------------------------------------------------------------
 -- 2. World: lighting, lobby, damage, tokens, persistence
@@ -204,6 +225,9 @@ step("Hold spawns", holdSpawns)
 
 local lobbyInfo = call("LobbyBuilder.Build", LobbyBuilder, "Build")
 lobbyInfo = normaliseLobbyInfo(lobbyInfo)
+if StormAltar then
+	call("StormAltar.Build", StormAltar, "Build", lobbyInfo)
+end
 
 call("DamageService.Init", DamageService, "Init")
 call("TokenService.Init", TokenService, "Init")
@@ -291,6 +315,23 @@ if type(ItemService) == "table" and type(ItemService.SetMatchService) == "functi
 end
 
 call("PortalService.Init", PortalService, "Init", lobbyInfo, MatchService)
+
+-- v3: Pet Index rewards, lobby NPC pets, new-player tutorial (each handles players who joined before Init).
+if IndexService then call("IndexService.Init", IndexService, "Init", { DataService = DataService, PetService = PetService }) end
+if NpcService then call("NpcService.Init", NpcService, "Init", lobbyInfo, {}) end
+if TutorialService then call("TutorialService.Init", TutorialService, "Init", lobbyInfo, {
+	DataService = DataService,
+	PetService = PetService,
+	MatchService = MatchService,
+	SpotService = SpotService,
+	IndexService = IndexService,
+}) end
+if DevService then call("DevService.Init", DevService, "Init", {
+	DataService = DataService,
+	PetService = PetService,
+	TutorialService = TutorialService,
+	IndexService = IndexService,
+}) end
 
 ----------------------------------------------------------------------
 -- 6. Dash relay: validate the cooldown server-side, then show the trail to everyone

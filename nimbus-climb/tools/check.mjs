@@ -19,7 +19,14 @@
 //   bad-require         require(script.Parent.Missing) / require(Shared.Missing).
 //   module-return       a ModuleScript that does not end with `return <value>`.
 //   too-many-locals     more than 200 active locals in one function (does not compile).
-//   contract            a public member listed in tools/contract.json is not defined.
+//   contract            a public member listed in tools/contract.json is not defined (a 'pending' group of members
+//                       that is being added this round may be absent entirely, but not partly).
+//   asset-id            an asset id / web URL outside Config.Art (rbxassetid://, rbxthumb://, http(s)://). The only
+//                       asset the game may reference is the player's own upload, Config.Art.StormfangImage
+//                       (tools/contract.json v3.artImage); built-in rbxasset:// content is fine.
+//   wrong-context       a client-only API in server code (RenderStepped, BindToRenderStep, LocalPlayer, FireServer,
+//                       OnClientEvent, UserInputService, ...) or a server-only API in client code (OnServerEvent,
+//                       FireClient, FireAllClients, BindToClose, DataStoreService, ServerStorage, ...).
 // Warnings (printed, exit code 0 unless --strict):
 //   many-locals, loop-no-yield, deprecated-api, contract (dynamic modules).
 
@@ -120,6 +127,15 @@ const DEPRECATED_CLASSES = {
 	Message: "a ScreenGui text label",
 	Hint: "a ScreenGui text label",
 };
+
+// Members / services that only work on one side of the client-server boundary (src/server vs src/client).
+const CLIENT_ONLY_MEMBERS = new Set(["RenderStepped", "BindToRenderStep", "UnbindFromRenderStep", "LocalPlayer", "FireServer", "OnClientEvent", "CurrentCamera"]);
+const CLIENT_ONLY_SERVICES = new Set(["UserInputService", "ContextActionService", "GuiService", "HapticService", "VRService"]);
+const SERVER_ONLY_MEMBERS = new Set(["OnServerEvent", "FireClient", "FireAllClients", "BindToClose", "OnServerInvoke"]);
+const SERVER_ONLY_SERVICES = new Set(["DataStoreService", "ServerStorage", "ServerScriptService", "MessagingService", "MemoryStoreService"]);
+
+// Asset ids and web URLs (built-in rbxasset:// content is not an asset upload).
+const ASSET_PATTERN = /rbxassetid:\/\/|rbxthumb:\/\/|https?:\/\/|roblox\.com\/asset/i;
 
 const DEPRECATED_MEMBERS = {
 	Velocity: "AssemblyLinearVelocity (BasePart.Velocity is deprecated)",
@@ -310,6 +326,10 @@ function analyse(file) {
 
 	const base = path.basename(file);
 	const isTheme = base === "Theme.lua" && path.basename(path.dirname(file)) === "shared";
+	const isConfig = base === "Config.lua" && path.basename(path.dirname(file)) === "shared";
+	const normPath = file.replace(/\\/g, "/");
+	const side = /\/src\/server\//.test(normPath) ? "server" : /\/src\/client\//.test(normPath) ? "client" : "shared";
+	const allowedArt = contract.v3 && typeof contract.v3.artImage === "string" ? contract.v3.artImage : null;
 	const isScript = base.endsWith(".server.lua") || base.endsWith(".client.lua");
 	const dir = path.dirname(file);
 	const sharedVars = new Set(); // local names bound to ReplicatedStorage.Shared
@@ -382,6 +402,8 @@ function analyse(file) {
 			if (callee.indexer === ":" && method === "GetService") {
 				const s = strValue(args2[0]);
 				if (s && !KNOWN_SERVICES.has(s)) report(node, "error", "unknown-service", "GetService(\"" + s + "\") is not a known Roblox service");
+				if (s && side === "server" && CLIENT_ONLY_SERVICES.has(s)) report(node, "error", "wrong-context", "GetService(\"" + s + "\") is client-only; server code must not use it");
+				if (s && side === "client" && SERVER_ONLY_SERVICES.has(s)) report(node, "error", "wrong-context", "GetService(\"" + s + "\") is server-only; client code cannot use it");
 			}
 			// lowercase / removed methods
 			if (callee.indexer === ":" && Object.prototype.hasOwnProperty.call(DEPRECATED_METHODS, method)) {
@@ -408,6 +430,12 @@ function analyse(file) {
 	}
 
 	function checkMember(node) {
+		const member = node.identifier.name;
+		if (side === "server" && CLIENT_ONLY_MEMBERS.has(member)) {
+			report(node.identifier, "error", "wrong-context", "." + member + " is client-only (server code; per-frame visuals belong on the client)");
+		} else if (side === "client" && SERVER_ONLY_MEMBERS.has(member)) {
+			report(node.identifier, "error", "wrong-context", "." + member + " is server-only (client code)");
+		}
 		// Enum.Font outside Theme
 		if (!isTheme && isGlobalId(node.base, "Enum") && node.identifier.name === "Font") {
 			report(node, "error", "raw-font", "Enum.Font is only allowed in shared/Theme.lua; use Theme.Style / Theme.Label / Theme.Fonts.<Role>");
@@ -430,6 +458,17 @@ function analyse(file) {
 				}
 				visit(node.base);
 				visit(node.index);
+				return;
+			}
+			case "StringLiteral": {
+				const v = strValue(node);
+				if (v && ASSET_PATTERN.test(v)) {
+					if (!isConfig) {
+						report(node, "error", "asset-id", "asset id / URL '" + v.slice(0, 60) + "' outside Config.Art; reference Config.Art.StormfangImage instead (the only allowed asset)");
+					} else if (allowedArt && v !== allowedArt) {
+						report(node, "error", "asset-id", "asset id / URL '" + v.slice(0, 60) + "' in Config: the only allowed asset is " + allowedArt + " (Config.Art.StormfangImage)");
+					}
+				}
 				return;
 			}
 			case "TableKeyString":
@@ -679,7 +718,19 @@ function checkContract(file, ast) {
 	for (const name of wanted) {
 		if (!defined.has(name)) {
 			const sev = dynamic ? "warning" : "error";
-			report(last, sev, "contract", "public member '" + name + "' (ARCHITECTURE.md + ARCHITECTURE_V2.md, tools/contract.json) is not defined" + (dynamic ? " (module fills its table dynamically; verify at runtime)" : ""));
+			report(last, sev, "contract", "public member '" + name + "' (ARCHITECTURE.md / _V2 / _V3, tools/contract.json) is not defined" + (dynamic ? " (module fills its table dynamically; verify at runtime)" : ""));
+		}
+	}
+	// 'pending': members being added this round; nothing defined yet is fine, a partly defined group is not
+	const pending = entry.pending || {};
+	const pendingNames = [...(pending.functions || []), ...(pending.signals || []), ...(pending.fields || [])];
+	const landed = pendingNames.filter((name) => defined.has(name));
+	if (landed.length > 0) {
+		for (const name of pendingNames) {
+			if (!defined.has(name)) {
+				const sev = dynamic ? "warning" : "error";
+				report(last, sev, "contract", "public member '" + name + "' (tools/contract.json pending group) is not defined although " + landed.join(", ") + " of its group is");
+			}
 		}
 	}
 }

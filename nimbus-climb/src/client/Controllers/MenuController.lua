@@ -1,22 +1,43 @@
--- MenuController (client, v2): the left-centre menu column and every window the player opens.
+-- MenuController (client, v3): the left menu of icon tiles and every window the player opens.
 --
 --   MenuController.Init()
---   MenuController.Open(panelId, args)   -- "Inventory" | "Pets" | "Shop" | "Stats" (what the OpenPanel remote does)
+--   MenuController.Open(panelId, args)   -- "Inventory" | "Pets" | "Index" | "Shop" | "Stats" (what OpenPanel does)
 --   MenuController.Close()               -- closes whatever window / overlay is open
+--   MenuController.WindowOpened          -- Util.Signal, Fire(windowId) whenever a window opens:
+--                                           "Inventory", "Shop", "Stats" or "Index" (the tutorial listens)
+--   Extra: MenuController.GetButton(id) -> the MenuButton_<id> tile (or nil)
+--          MenuController.IsOpen() -> true while a window, the odds popup or the roulette stage is up
+--          MenuController.IsPrewarmed(petId) -> true once that pet was pre-sculpted for the roulette strip
 --
 -- Screen: ScreenGui "NimbusMenu" (display order 20, IgnoreGuiInset = false).
---   * Menu column, left-centre: five round CloudUI.IconButtons - Inventory (items tab), Pets (pets tab),
---     Shop, Spot (fires GoToSpot) and Stats. A gold tab shows which window is open.
---   * Windows (CloudUI.Panel, centred because the player asked for them): Inventory (tabs Pets + Items,
---     pet detail card with Equip / Unequip), Shop (tabs Roulettes + Items, odds popup), Stats.
---     One window at a time, Esc / gamepad B / the red X / the menu button / a click outside closes it.
---     Gamepad B is bound (ContextActionService, High priority, sunk) only while something is open, so it does
---     not also fire MovementController's dash.
+--   * Menu column, left-centre (the reference style): square-ish rounded icon tiles with a big glyph and a
+--     bold label under each - Inventory, Pets, Index, Shop, My Spot (fires GoToSpot) and Stats. Each tile is a
+--     TextButton named MenuButton_<Id> (Ids Inventory, Pets, Index, Shop, Spot, Stats) inside a frame
+--     Entry_<Id> of the frame "MenuColumn". The open window's tile glows gold; a red "!" marks new pets and
+--     Pet Index rewards waiting to be claimed. On short screens (landscape phones) the column becomes a
+--     2 x 3 grid so it keeps a readable scale.
+--   * Windows (CloudUI.Panel, centred because the player asked for them, nudged right only when the menu
+--     column would cover them): Inventory (tabs Pets + Items, pet detail card with Equip / Unequip), Shop
+--     (tabs Roulettes + Items, odds popup), Stats. The Pet Index is IndexController's window: the Index tile
+--     and OpenPanel("Index") open it. One window at a time; Esc / gamepad B / the red X / the tile again / a
+--     click outside closes it. Gamepad B is bound (ContextActionService, High priority, sunk) only while
+--     something is open, so it does not also fire MovementController's dash.
 --   * Roulette stage: a scrolling strip of pet viewports that eases to the server result (RouletteResult),
---     then a reveal card with a rarity glow, a NEW! flag and an Equip button.
+--     then a reveal card with a rarity glow, a NEW! flag and an Equip button (a landscape card on short screens).
+--   * v3 readability rule: everything is designed in 1080p pixels (body 18-19, captions >= 18, buttons 20+,
+--     titles 28-34) under ONE UIScale per window = min(screen factor clamp(viewportY / 1080, 0.8, 1.25), fit).
+--     Window sizes adapt between a minimum and a preferred design size and their columns scroll, so phones
+--     keep the 0.8 scale instead of shrinking the text.
 --   * Every window re-renders from State.Changed (and when the token count or the InMatch attribute
 --     changes). Pet slots are kept per pet id and updated in place, so nothing is rebuilt or leaked; the
---     pet viewports of the Inventory grid are attached PETS_PER_FRAME at a time so a big collection never hitches.
+--     pet viewports of the Inventory grid, the odds popup and the roulette strip are attached under a per-frame
+--     TIME budget (K.BUILD_BUDGET, at least one per frame), so neither a big collection nor a fresh client's
+--     first-time pet sculpts hitch. The strip cells and odds tiles use PetBuilder's Low detail (the reveal card
+--     stays High), and the roulette pools are sculpted ahead of time (one pet per frame) when the Shop opens and
+--     when a spin is requested, so the spin itself only clones.
+--   * Touch screens: the menu column never reaches Roblox's thumbstick (bottom-left); in landscape it sits in the
+--     band between the top margin and the stick (2 x 3 grid with the labels on the tiles, or icon-only tiles
+--     when labels would drop below 14 px).
 --
 -- Remotes used: OpenPanel, RouletteResult (in); BuyRoulette, EquipPet, UnequipPet, BuyItem, GoToSpot (out).
 -- Plain Lua 5.1-compatible syntax only. All text goes through Theme roles.
@@ -73,47 +94,83 @@ local ItemCatalog = safeRequire("ItemCatalog", {
 })
 
 local MenuController = {}
+MenuController.WindowOpened = Util.Signal()
 
 ----------------------------------------------------------------------
--- Tunables + constants
+-- Tunables (design pixels of a 1080p screen unless noted)
 ----------------------------------------------------------------------
-local REF_W, REF_H = 1280, 720
-local EDGE, TOUCH_EDGE = 10, 20
-local BTN = 56 -- diameter of a menu button
-local COL_W = 68
-local CAPTION_H = 18
-local FIRE_GAP = 0.3 -- client-side spacing between two sends of the same remote
-local HINT_SECONDS = 2.6
-local WAIT_TIMEOUT = 7 -- seconds to wait for a RouletteResult
-local COMPACT_BELOW = 560 -- gui height under which the menu captions are hidden
-local PETS_PER_FRAME = 3 -- pet viewports the Inventory grid builds per frame (a PetBuilder model is 35-66 parts)
-local BACK_ACTION = "NimbusMenuBack" -- ContextActionService action that owns gamepad B while something is closable
-
-local WIN_SIZES = {
-	Inventory = { 800, 540 },
-	Shop = { 830, 540 },
-	Stats = { 740, 480 },
+local K = {
+	EDGE = 12, -- screen px between the column and the left edge
+	TOUCH_EDGE = 20,
+	TILE = 84, -- a menu tile (square)
+	ENTRY_W = 100, -- tile + room for its label
+	ENTRY_H = 98,
+	GAP = 6, -- between two entries
+	LABEL_TEXT = 19,
+	MARGIN = 12, -- screen px kept free around a window
+	BUMPS = 28, -- room the panels' cloud bumps need above the top edge
+	NARROW = 1100, -- windows narrower than this (design px) use narrower side cards
+	SHORT = 560, -- windows lower than this (design px) use their compact layout
+	DETAIL_W = 340,
+	DETAIL_W_NARROW = 296,
+	FIRE_GAP = 0.3, -- client-side spacing between two sends of the same remote
+	HINT_SECONDS = 2.8,
+	WAIT_TIMEOUT = 7, -- seconds to wait for a RouletteResult
+	-- pet viewports (Inventory grid, odds popup, roulette strip) are built under a TIME budget per frame: the first
+	-- build of a frame always runs, more only while the frame has spent < BUILD_BUDGET s building, at most BUILD_MAX
+	-- (a first-time High sculpt costs tens of ms, a cached clone a few: a count budget hitches on fresh clients)
+	BUILD_BUDGET = 0.004,
+	BUILD_MAX = 3,
+	STRIP_DETAIL = "Low", -- roulette strip cells: small, static, moving fast (the reveal card keeps High)
+	ODDS_DETAIL = "Low", -- 88 px odds tiles
+	-- Roblox's touch thumbstick (bottom-left), gui px above the bottom edge: classic 70 px stick at 20 px on small
+	-- screens (the dynamic stick's idle ring reaches ~93) and 120 px at 0.75 * 120 on large ones
+	STICK_TOP_SMALL = 96,
+	STICK_TOP_LARGE = 210,
+	STICK_GAP = 8,
+	MIN_LABEL_PX = 14, -- smallest on-screen menu label on phones / tablets (readability rule)
+	GRID_ENTRY_H = 86, -- "Grid" layout: the label sits on the tile's bottom edge, so a row is shorter ...
+	GRID_LABEL_Y = -8, -- ... (label centre this far above the tile's bottom; "Column": 2 px below it)
+	BACK_ACTION = "NimbusMenuBack", -- ContextActionService action that owns gamepad B while something is closable
+	CARD_H = 474, -- roulette card
+	CARD_H_SHORT = 216,
+	ITEM_CARD_H = 440,
+	ITEM_CARD_H_SHORT = 214,
+	SHOP_COMPACT = 650, -- Shop windows lower than this (design px) use the compact cards
 }
-local REVEAL_W, REVEAL_H = 380, 480
-local STAGE_W, STAGE_H = 700, 292
-local STRIP = { Cell = 116, W = 652, H = 150, Target = 34, MinCells = 42, Seconds = 5.6, Curve = 2.8 }
+
+-- Preferred / minimum design sizes of each window (W x H), the reveal card, the spin stage and its strip.
+K.WIN = {
+	Inventory = { 1180, 740, 800, 380 },
+	Shop = { 1180, 740, 800, 380 },
+	Stats = { 1080, 700, 800, 380 },
+	Odds = { 780, 680, 600, 380 },
+}
+K.REVEAL = { TallW = 480, TallH = 640, WideW = 790, WideH = 372 }
+K.STAGE = { W = 920, H = 380 }
+K.STRIP = { Cell = 150, W = 860, H = 190, Target = 34, MinCells = 42, Seconds = 5.6, Curve = 2.8 }
 
 local Colors = Theme.Colors
 local WHITE = Colors.White
 local NAVY = Colors.Navy or Colors.Ink
 local MUTED = Colors.Muted or Colors.CloudShade
 local GOLD = Colors.Gold or Colors.Token
+local INK = Colors.TextStroke or Colors.Ink
 local GOOD = Colors.Good
 local BAD = Colors.Bad
 local WELL_EDGE = Colors.WellEdge or NAVY
 local BUTTONS = Theme.Buttons or {}
 local KINDS = Theme.Kinds or {}
 local PURPLE = Color3.fromRGB(150, 122, 226)
+local TEAL = Color3.fromRGB(70, 182, 196)
+local INSET_COLOR = Color3.fromRGB(20, 30, 70)
+local ROLE_COLORS = { Economy = Color3.fromRGB(96, 196, 108), Combat = Color3.fromRGB(228, 104, 96) }
 
 -- Glyphs as UTF-8 byte escapes (the source stays plain ASCII).
 local G = {
 	Backpack = "\240\159\142\146",
 	Paw = "\240\159\144\190",
+	Book = "\240\159\147\150",
 	Money = "\240\159\146\176",
 	House = "\240\159\143\160",
 	Chart = "\240\159\147\138",
@@ -122,9 +179,8 @@ local G = {
 	StarOutline = "\226\152\134",
 	Cloud = "\226\152\129",
 	Down = "\226\150\188",
-	Dot = "\226\128\162",
 	Dash = "\226\128\148",
-	Check = "\226\156\147",
+	Sparkle = "\226\156\166",
 }
 
 ----------------------------------------------------------------------
@@ -136,27 +192,30 @@ local gui = nil
 local U = {} -- shared UI references (backdrop, column, hint ...)
 local windows = {} -- id -> window table (see createWindow)
 local openId = nil -- id of the window that is currently open
-local warned = {}
-local remoteCache = {}
-local lastFire = {}
+local Net = { Warned = {}, Cache = {}, Last = {} } -- warnOnce keys, remote cache, last send per remote
 local touchDevice = false
 
-local Spin = { Waiting = false, WaitToken = 0, Queue = {}, Stage = nil }
-local Odds = { Gui = nil, Token = 0, Slots = {} }
+local Spin = { Waiting = false, WaitToken = 0, Queue = {}, Stage = nil, Last = nil }
+-- per-frame build budget + roulette pool pre-sculpting (functions defined with the helpers below)
+local Warm = { Queue = {}, Seen = {}, Done = {}, Running = false, Module = nil, Tried = false }
+local Odds = { Gui = nil, Token = 0, Slots = {}, Holder = nil, Fit = nil }
 local Badge = { LastPetTotal = nil }
 local Back = { Bound = false, Busy = false, Swallowed = false } -- gamepad B binding state (see syncBackBinding)
+local Index = { Module = nil, Tried = false } -- IndexController (loaded lazily, optional)
+local Entries = {} -- id -> menu tile widgets
+local Hint = { Frame = nil, Label = nil, Token = 0 }
 
 -- forward declarations
 local openWindow, closeWindow, toggleWindow, refreshOpenWindow, updateMenuActive
 local requestSpin, closeStage, skipSpin, closeOdds, openOdds, showHint, handleBack, beginStage
-local syncBackBinding
+local syncBackBinding, closeIndex, relayoutMenu
 
 ----------------------------------------------------------------------
 -- Small helpers
 ----------------------------------------------------------------------
 local function warnOnce(key, err)
-	if not warned[key] then
-		warned[key] = true
+	if not Net.Warned[key] then
+		Net.Warned[key] = true
 		warn("[MenuController] " .. tostring(key) .. ": " .. tostring(err))
 	end
 end
@@ -167,6 +226,90 @@ local function safe(key, fn, ...)
 		warnOnce(key, err)
 	end
 	return ok
+end
+
+-- Per-frame build budget for pet viewports: the first build of a frame always runs, the next ones only while the
+-- frame has spent less than K.BUILD_BUDGET seconds and at most K.BUILD_MAX builds. Callers add 1 to Count per build.
+function Warm.Budget()
+	return { Start = os.clock(), Count = 0 }
+end
+
+function Warm.Allows(budget)
+	return budget.Count < K.BUILD_MAX and (budget.Count == 0 or os.clock() - budget.Start < K.BUILD_BUDGET)
+end
+
+-- shared/PetBuilder, loaded lazily (the pre-sculpting below is optional: nil when it cannot load)
+function Warm.Builder()
+	if not Warm.Tried then
+		Warm.Tried = true
+		local ok, result = pcall(function()
+			return require(Shared:WaitForChild("PetBuilder", 5))
+		end)
+		if ok and type(result) == "table" then
+			Warm.Module = result
+		end
+	end
+	return Warm.Module
+end
+
+-- Pre-sculpts pets at the strip's detail, a few per frame (time budget), so a roulette spin only clones cached
+-- templates instead of sculpting on the frame a cell scrolls into view. `front` puts them first in the queue.
+-- Paused while the roulette stage runs (its cells attach under their own budget).
+function Warm.Pets(defs, front)
+	if type(defs) ~= "table" or not Warm.Builder() then
+		return
+	end
+	local fresh = {}
+	for _, def in ipairs(defs) do
+		local id = type(def) == "table" and def.Id or nil
+		if type(id) == "string" and not Warm.Seen[id] then
+			Warm.Seen[id] = true
+			fresh[#fresh + 1] = def
+		end
+	end
+	for i, def in ipairs(fresh) do
+		if front then
+			table.insert(Warm.Queue, i, def)
+		else
+			Warm.Queue[#Warm.Queue + 1] = def
+		end
+	end
+	if Warm.Running or #Warm.Queue == 0 then
+		return
+	end
+	Warm.Running = true
+	task.spawn(function()
+		task.wait() -- never in the frame that opens the Shop (it builds the window)
+		while #Warm.Queue > 0 do
+			if Spin.Stage then
+				task.wait(0.25)
+			else
+				local budget = Warm.Budget()
+				while #Warm.Queue > 0 and Warm.Allows(budget) do
+					local def = table.remove(Warm.Queue, 1)
+					local ok, model = pcall(Warm.Module.Build, def, { Detail = K.STRIP_DETAIL, Scale = 1 })
+					if ok and typeof(model) == "Instance" then
+						model:Destroy()
+						Warm.Done[def.Id] = true
+					end
+					budget.Count = budget.Count + 1
+				end
+				task.wait()
+			end
+		end
+		Warm.Running = false
+	end)
+end
+
+-- the possible pets of one roulette (pre-sculpted when the Shop opens and when that roulette is requested)
+function Warm.Roulette(rouletteId, front)
+	if type(rouletteId) ~= "string" or type(PetCatalog.PossiblePets) ~= "function" then
+		return
+	end
+	local ok, defs = pcall(PetCatalog.PossiblePets, rouletteId)
+	if ok then
+		Warm.Pets(defs, front)
+	end
 end
 
 local function makeFrame(parent, name, props)
@@ -180,7 +323,7 @@ local function makeFrame(parent, name, props)
 	return Util.Create("Frame", p)
 end
 
--- Theme-styled TextLabel with optional property overrides.
+-- Theme-styled TextLabel (stroke + glyph outline, readable on any panel) with optional property overrides.
 local function makeText(parent, name, text, role, size, color, props)
 	local p = { Name = name }
 	if props then
@@ -188,7 +331,22 @@ local function makeText(parent, name, text, role, size, color, props)
 			p[key] = value
 		end
 	end
-	local label = Theme.Label(tostring(text), role, { Size = size, Color = color or WHITE, Stroke = 0.3, Props = p })
+	local label = Theme.Label(tostring(text), role, {
+		Size = size,
+		Color = color or WHITE,
+		Stroke = 0.25,
+		StrokeColor = INK,
+		Outline = 1.5,
+		OutlineColor = INK,
+		Props = p,
+	})
+	local faded = tonumber(p.TextTransparency)
+	if faded and faded > 0 then
+		local outline = label:FindFirstChild("TextOutline")
+		if outline then
+			outline.Transparency = math.min(1, faded + 0.2)
+		end
+	end
 	label.Parent = parent
 	return label
 end
@@ -226,12 +384,47 @@ local function listLayout(parent, direction, gap, hAlign, vAlign)
 	})
 end
 
+-- Vertical ScrollingFrame with an automatic canvas.
+local function scroller(parent, name, props)
+	local p = props or {}
+	p.Name = name
+	p.BackgroundTransparency = 1
+	p.BorderSizePixel = 0
+	p.CanvasSize = UDim2.new(0, 0, 0, 0)
+	p.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	p.ScrollingDirection = Enum.ScrollingDirection.Y
+	p.ScrollBarThickness = 10
+	p.ScrollBarImageColor3 = Colors.FrameTop or Colors.Cloud
+	p.ScrollBarImageTransparency = 0.1
+	p.Parent = parent
+	return Util.Create("ScrollingFrame", p)
+end
+
 local function tween(inst, seconds, goal, style, direction)
 	return Util.Tween(inst, seconds, goal, style, direction)
 end
 
+-- The dark inset card used inside the windows.
+local function makeInset(parent, name, props)
+	local p = props or {}
+	p.BackgroundColor3 = INSET_COLOR
+	p.BackgroundTransparency = 0.42
+	local inset = makeFrame(parent, name, p)
+	corner(inset, 12)
+	stroke(inset, WELL_EDGE, 3, 0.15)
+	return inset
+end
+
 local function rarityOf(def)
 	return CloudUI.RarityColor(def and def.Rarity)
+end
+
+-- A rarity colour that still reads on dark panels (the Secret rarity is near-black).
+local function rarityText(def)
+	if def and def.Rarity == "Secret" then
+		return Color3.fromRGB(196, 168, 255)
+	end
+	return Theme.Lighten(rarityOf(def), 0.3)
 end
 
 local function rarityOrder(rarityId)
@@ -306,15 +499,7 @@ local function starText(count)
 	return string.rep(G.Star, count) .. string.rep(G.StarOutline, 5 - count)
 end
 
-local function petRankMap()
-	local rank = {}
-	for index, def in ipairs(PetCatalog.Pets or {}) do
-		rank[def.Id] = index
-	end
-	return rank
-end
-
--- Owned pet ids, rarest first (the catalog is sorted common -> mythic).
+-- Owned pet ids, rarest first (the catalog is sorted common -> secret).
 local function ownedPetIds()
 	local out = {}
 	local pets = PetCatalog.Pets or {}
@@ -338,17 +523,144 @@ local function petTotals()
 	return distinct, total
 end
 
+-- Catalog pets discovered (v3: every pet ever owned or rolled; owned pets always count).
+local function discoveredCount()
+	local n = 0
+	for _, def in ipairs(PetCatalog.Pets or {}) do
+		local found
+		if type(State.IsDiscovered) == "function" then
+			found = State.IsDiscovered(def.Id)
+		else
+			found = State.OwnedCount(def.Id) > 0
+		end
+		if found then
+			n = n + 1
+		end
+	end
+	return n
+end
+
+local function catalogTotal()
+	if type(PetCatalog.TotalCount) == "function" then
+		local ok, n = pcall(PetCatalog.TotalCount)
+		if ok and type(n) == "number" then
+			return n
+		end
+	end
+	return #(PetCatalog.Pets or {})
+end
+
+-- Element ids of a pet (v3 section 11), filtered by Config.Elements; empty while the catalog has none.
+local function elementsOf(def)
+	local info = Config.Elements and Config.Elements.Info
+	if type(def) ~= "table" or type(info) ~= "table" then
+		return {}
+	end
+	local raw = nil
+	if type(PetCatalog.ElementsOf) == "function" then
+		local ok, result = pcall(PetCatalog.ElementsOf, def)
+		if ok then
+			raw = result
+		end
+	end
+	if raw == nil and type(PetCatalog.GetElements) == "function" then
+		local ok, result = pcall(PetCatalog.GetElements, def.Id)
+		if ok then
+			raw = result
+		end
+	end
+	if raw == nil then
+		raw = def.Elements or def.Element
+	end
+	if type(raw) == "string" then
+		raw = { raw }
+	end
+	local out, seen = {}, {}
+	if type(raw) == "table" then
+		for _, e in ipairs(raw) do
+			if type(e) == "string" and info[e] and not seen[e] then
+				seen[e] = true
+				table.insert(out, e)
+			end
+		end
+	end
+	return out
+end
+
+-- CloudUI slots carry small count / key / marker texts (16-17 design px); at the phone scale (0.8) they
+-- would render under 14 px, so the slots this menu makes get a size that stays readable.
+local function readableSlot(slot)
+	if not slot or not slot.Root then
+		return slot
+	end
+	local count = slot.Root:FindFirstChild("Count", true)
+	if count and count:IsA("TextLabel") and count.TextSize < 19 then
+		count.TextSize = 19
+		count.Size = UDim2.new(count.Size.X.Scale, count.Size.X.Offset, 0, 22)
+	end
+	for _, name in ipairs({ "Key", "Mark" }) do
+		local label = slot.Root:FindFirstChild(name, true)
+		if label and label:IsA("TextLabel") and label.TextSize < 18 then
+			label.TextSize = 18
+			local chip = label.Parent
+			if chip and chip:IsA("GuiObject") and chip.Size.X.Offset < 28 then
+				chip.Size = UDim2.fromOffset(28, 28)
+			end
+		end
+	end
+	return slot
+end
+
+-- CloudUI.Pill with a text size that stays >= 14 px at the phone scale (0.8).
+local function readablePill(text, kind, parent)
+	local pill = CloudUI.Pill(text, kind, parent)
+	if pill then
+		pill.TextSize = math.max(pill.TextSize, 18)
+	end
+	return pill
+end
+
+-- Coloured pill with the element name (no asset ids).
+local function elementPill(parent, element, textSize, layoutOrder)
+	local info = Config.Elements and Config.Elements.Info and Config.Elements.Info[element]
+	local color = info and info.Color or Colors.PanelLight
+	local dark = Theme.Darken(color, 0.62)
+	local size = textSize or 17
+	local pill = Theme.Label(element, "Heading", {
+		Size = size,
+		Color = WHITE,
+		Stroke = 0.1,
+		StrokeColor = dark,
+		Outline = 1.5,
+		OutlineColor = dark,
+		Props = {
+			Name = "Element_" .. element,
+			BackgroundTransparency = 0,
+			BackgroundColor3 = color,
+			AutomaticSize = Enum.AutomaticSize.X,
+			Size = UDim2.fromOffset(0, size + 9),
+			LayoutOrder = layoutOrder or 0,
+		},
+	})
+	round(pill)
+	stroke(pill, NAVY, 2, 0)
+	Theme.Gradient(pill, Color3.fromRGB(255, 255, 255), Color3.fromRGB(196, 204, 226), 90)
+	pad(pill, 9, 0, 9, 1)
+	pill.Parent = parent
+	return pill
+end
+
 ----------------------------------------------------------------------
 -- Remotes (sent at most every FIRE_GAP seconds each, the server rate-limits as well)
 ----------------------------------------------------------------------
 local function getRemote(name)
-	local cached = remoteCache[name]
+	local cached = Net.Cache[name]
 	if cached then
 		return cached
 	end
 	local ok, remote = pcall(Remotes.Get, name)
 	if ok and remote then
-		remoteCache[name] = remote
+		Net.Cache[name] = remote
 		return remote
 	end
 	return nil
@@ -356,14 +668,14 @@ end
 
 local function fire(name, a, b)
 	local now = os.clock()
-	if lastFire[name] and now - lastFire[name] < FIRE_GAP then
+	if Net.Last[name] and now - Net.Last[name] < K.FIRE_GAP then
 		return false
 	end
 	local remote = getRemote(name)
 	if not remote then
 		return false
 	end
-	lastFire[name] = now
+	Net.Last[name] = now
 	local ok = pcall(function()
 		remote:FireServer(a, b)
 	end)
@@ -371,58 +683,138 @@ local function fire(name, a, b)
 end
 
 ----------------------------------------------------------------------
+-- IndexController (optional module written next to this one)
+----------------------------------------------------------------------
+local function getIndex()
+	if not Index.Tried then
+		Index.Tried = true
+		local moduleScript = script.Parent:FindFirstChild("IndexController")
+		if moduleScript then
+			local ok, result = pcall(require, moduleScript)
+			if ok and type(result) == "table" then
+				Index.Module = result
+			else
+				warnOnce("IndexController", result)
+			end
+		end
+	end
+	return Index.Module
+end
+
+local function indexOpen()
+	local index = Index.Module
+	if index and type(index.IsOpen) == "function" then
+		local ok, open = pcall(index.IsOpen)
+		return ok and open == true
+	end
+	return false
+end
+
+function closeIndex()
+	local index = Index.Module
+	if index and type(index.Close) == "function" and indexOpen() then
+		safe("Index.Close", index.Close)
+	end
+end
+
+----------------------------------------------------------------------
 -- Screen size helpers
 ----------------------------------------------------------------------
 local function guiSize()
-	local size = gui and gui.AbsoluteSize or Vector2.new(REF_W, REF_H)
+	local size = gui and gui.AbsoluteSize or Vector2.new(1280, 720)
 	if size.X < 2 or size.Y < 2 then
-		return Vector2.new(REF_W, REF_H)
+		return Vector2.new(1280, 720)
 	end
 	return size
 end
 
--- Scale that makes a w x h window (plus its title ribbon) fit the screen.
-local function fitScale(w, h)
-	local size = guiSize()
-	local k = math.min((size.X - 40) / (w + 24), (size.Y - 20) / (h + 56), 1.2)
-	return Util.Clamp(k, 0.3, 1.2)
+local function screenFactor()
+	local camera = workspace.CurrentCamera
+	local vp = camera and camera.ViewportSize
+	if vp and vp.Y > 2 then
+		return Theme.ScreenFactor(vp.Y)
+	end
+	return Theme.ScreenFactor(guiSize().Y)
 end
 
 local function screenMargin()
 	if touchDevice then
-		return TOUCH_EDGE
+		return K.TOUCH_EDGE
 	end
-	return EDGE
+	return K.EDGE
+end
+
+-- Right edge (gui px) of the menu column.
+local function columnRight()
+	local column = U.Column
+	if column and column.Visible and column.AbsoluteSize.X > 0 then
+		return column.AbsolutePosition.X + column.AbsoluteSize.X
+	end
+	return 0
+end
+
+-- Size + scale + position for a design-pixel box: { w, h, scale, x, y } (x, y = centre in gui px).
+-- The box gets its preferred size when the screen has room for it at the readability scale, shrinks
+-- towards its minimum size first, and only then is scaled below the screen factor. It is centred on the
+-- screen unless that would put it under the menu column; on small screens it may cover the column when
+-- that buys a bigger (more readable) scale.
+local function fitBox(prefW, prefH, minW, minH)
+	local area = guiSize()
+	local factor = screenFactor()
+	local freeH = area.Y - 2 * K.MARGIN
+	local function solve(left)
+		local freeW = area.X - left - 2 * K.MARGIN
+		local w = Util.Clamp(math.floor(freeW / factor), minW, prefW)
+		local h = Util.Clamp(math.floor((freeH - K.BUMPS * factor) / factor), minH, prefH)
+		local scale = Util.Clamp(math.min(factor, freeW / w, freeH / h), 0.3, 1.25)
+		return w, h, scale
+	end
+	local left = columnRight()
+	local w, h, scale = solve(left)
+	if left > 0 and scale < factor - 0.001 then
+		local w2, h2, scale2 = solve(0)
+		if scale2 > scale + 0.001 then
+			w, h, scale, left = w2, h2, scale2, 0
+		end
+	end
+	local half = w * scale / 2
+	local x = math.max(area.X / 2, left + K.MARGIN + half)
+	x = math.min(x, area.X - K.MARGIN - half)
+	local halfH = h * scale / 2
+	local y = math.min(area.Y / 2 + K.BUMPS * scale / 2, area.Y - K.MARGIN / 2 - halfH)
+	y = math.max(y, halfH)
+	return { w = w, h = h, scale = scale, x = math.floor(x + 0.5), y = math.floor(y + 0.5) }
 end
 
 ----------------------------------------------------------------------
 -- Side hint (tiny message next to the menu column; never in the middle of the screen)
 ----------------------------------------------------------------------
-local Hint = { Frame = nil, Label = nil, Token = 0 }
-
 local function buildHint()
 	local frame = makeFrame(gui, "MenuHint", {
 		AnchorPoint = Vector2.new(0, 0.5),
-		Position = UDim2.new(0, 90, 0.5, 0),
+		Position = UDim2.new(0, 120, 0.5, 0),
 		Size = UDim2.fromOffset(0, 0),
 		AutomaticSize = Enum.AutomaticSize.XY,
-		BackgroundColor3 = Colors.Panel,
-		BackgroundTransparency = 0.06,
+		BackgroundColor3 = WHITE,
+		BackgroundTransparency = 0.04,
 		Visible = false,
 		ZIndex = 9,
 	})
-	corner(frame, 10)
+	corner(frame, 12)
 	stroke(frame, NAVY, 3, 0)
-	pad(frame, 12, 7, 12, 7)
-	local label = makeText(frame, "Text", "", "Toast", 15, WHITE, {
+	Theme.Gradient(frame, Colors.PanelLight, Colors.Panel, 90)
+	pad(frame, 14, 8, 14, 8)
+	local label = makeText(frame, "Text", "", "Toast", 20, WHITE, {
 		AutomaticSize = Enum.AutomaticSize.XY,
 		Size = UDim2.fromOffset(0, 0),
 		TextWrapped = true,
 		TextXAlignment = Enum.TextXAlignment.Left,
+		ZIndex = 10,
 	})
-	Util.Create("UISizeConstraint", { MaxSize = Vector2.new(230, 200), Parent = label })
+	Hint.Limit = Util.Create("UISizeConstraint", { MaxSize = Vector2.new(300, 220), Parent = label })
 	Hint.Frame = frame
 	Hint.Label = label
+	Hint.Scale = Util.Create("UIScale", { Name = "ReadScale", Scale = 1, Parent = frame })
 end
 
 function showHint(text, kind)
@@ -433,9 +825,9 @@ function showHint(text, kind)
 	local mine = Hint.Token
 	local color = KINDS[kind or "info"] or KINDS.info or Colors.PanelLight
 	Hint.Label.Text = tostring(text)
-	Hint.Label.TextColor3 = Theme.Lighten(color, 0.45)
+	Hint.Label.TextColor3 = Theme.Lighten(color, 0.55)
 	Hint.Frame.Visible = true
-	task.delay(HINT_SECONDS, function()
+	task.delay(K.HINT_SECONDS, function()
 		if Hint.Token == mine and Hint.Frame then
 			Hint.Frame.Visible = false
 		end
@@ -444,8 +836,8 @@ end
 
 ----------------------------------------------------------------------
 -- Window manager
--- window = { Id, Holder, Fit (UIScale), Pop (UIScale), Panel, Shown, Built, Dirty, Token,
---            Tab, Refresh = fn(), OnOpen = fn(args), OnClose = fn() }
+-- window = { Id, Spec, Holder, Fit (UIScale), Pop (UIScale), Panel, Shown, Built, Dirty, Token, W, H,
+--            Tab, Refresh = fn(), OnOpen = fn(args), OnClose = fn(), OnLayout = fn(w, h, narrow) }
 ----------------------------------------------------------------------
 local function setBackdrop(on)
 	local backdrop = U.Backdrop
@@ -455,7 +847,7 @@ local function setBackdrop(on)
 	U.BackdropOn = on
 	if on then
 		backdrop.Visible = true
-		tween(backdrop, 0.18, { BackgroundTransparency = 0.6 })
+		tween(backdrop, 0.18, { BackgroundTransparency = 0.55 })
 	else
 		tween(backdrop, 0.15, { BackgroundTransparency = 1 })
 		task.delay(0.17, function()
@@ -466,8 +858,33 @@ local function setBackdrop(on)
 	end
 end
 
+-- The Pet Index (its own gui) replaced our window: drop our backdrop at once.
+local function hideBackdropNow()
+	if openId then
+		return
+	end
+	U.BackdropOn = false
+	if U.Backdrop then
+		U.Backdrop.Visible = false
+		U.Backdrop.BackgroundTransparency = 1
+	end
+end
+
+local function layoutWindow(win)
+	local size = K.WIN[win.Id] or { 1100, 700, 860, 420 }
+	local box = fitBox(size[1], size[2], size[3], size[4])
+	win.Holder.Size = UDim2.fromOffset(box.w, box.h)
+	win.Holder.Position = UDim2.fromOffset(box.x, box.y)
+	win.Fit.Scale = box.scale
+	local changed = win.W ~= box.w or win.H ~= box.h
+	win.W, win.H = box.w, box.h
+	if changed and win.Built and win.OnLayout then
+		safe("layout " .. win.Id, win.OnLayout, box.w, box.h, box.w < K.NARROW, box.h < K.SHORT)
+	end
+end
+
 local function createWindow(spec)
-	local size = WIN_SIZES[spec.Id] or { 760, 500 }
+	local size = K.WIN[spec.Id] or { 1100, 700, 860, 420 }
 	local win = { Id = spec.Id, Spec = spec, Shown = false, Built = false, Dirty = true, Token = 0 }
 	win.Holder = makeFrame(gui, "Window_" .. spec.Id, {
 		AnchorPoint = Vector2.new(0.5, 0.5),
@@ -476,8 +893,7 @@ local function createWindow(spec)
 		Visible = false,
 		ZIndex = 3,
 	})
-	win.Fit = Util.Create("UIScale", { Name = "Fit", Scale = fitScale(size[1], size[2]), Parent = win.Holder })
-	win.Size = size
+	win.Fit = Util.Create("UIScale", { Name = "Fit", Scale = 1, Parent = win.Holder })
 	win.Panel = CloudUI.Panel({
 		Name = spec.Id .. "Panel",
 		Size = UDim2.new(1, 0, 1, 0),
@@ -502,6 +918,9 @@ local function ensureBuilt(win)
 	end
 	win.Built = true
 	safe("build " .. win.Id, win.Spec.Build, win)
+	if win.OnLayout and win.W then
+		safe("layout " .. win.Id, win.OnLayout, win.W, win.H, win.W < K.NARROW, win.H < K.SHORT)
+	end
 end
 
 local function refreshWindow(win)
@@ -547,7 +966,7 @@ function openWindow(id, args)
 		return
 	end
 	args = type(args) == "table" and args or {}
-	ensureBuilt(win)
+	closeIndex()
 	if openId and openId ~= id then
 		closeWindow(openId, true)
 	end
@@ -556,7 +975,8 @@ function openWindow(id, args)
 	win.Token = win.Token + 1
 	openId = id
 	syncBackBinding()
-	win.Fit.Scale = fitScale(win.Size[1], win.Size[2])
+	layoutWindow(win)
+	ensureBuilt(win)
 	win.Holder.Visible = true
 	if not wasShown then
 		win.Pop.Scale = 0.86
@@ -568,6 +988,19 @@ function openWindow(id, args)
 	end
 	refreshWindow(win)
 	updateMenuActive()
+	if not wasShown then
+		MenuController.WindowOpened:Fire(id)
+		if id == "Shop" then
+			-- sculpt the likely roulette pools ahead of the spin (the last one spun, then the cheapest)
+			if Spin.Last then
+				Warm.Roulette(Spin.Last)
+			end
+			local first = type(Config.Roulettes) == "table" and Config.Roulettes[1] or nil
+			if type(first) == "table" then
+				Warm.Roulette(first.Id)
+			end
+		end
+	end
 end
 
 function closeWindow(id, instant)
@@ -589,6 +1022,7 @@ function closeWindow(id, instant)
 		closeOdds()
 	end
 	if instant then
+		-- another window takes over right away (it keeps the backdrop; see hideBackdropNow)
 		win.Holder.Visible = false
 	else
 		tween(win.Pop, 0.12, { Scale = 0.9 }, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
@@ -627,9 +1061,11 @@ local function closeEverything()
 	if openId then
 		closeWindow(openId)
 	end
+	closeIndex()
 end
 
 -- Esc / gamepad B: close the topmost thing. Returns true when something was closed.
+-- (The Pet Index handles Esc / B itself.)
 function handleBack()
 	if Spin.Stage then
 		if Spin.Stage.Phase == "reveal" then
@@ -655,8 +1091,8 @@ end
 -- High priority, but only while something closable is open: the press then closes it and is sunk, so
 -- the character does not dash (or spend stamina / start the cooldown) on the same press. With nothing open
 -- the binding is gone and B dashes as usual. Esc stays on the plain InputBegan path (onInput).
-local function onBackAction(_name, state)
-	if state == Enum.UserInputState.Begin then
+local function onBackAction(_name, inputState)
+	if inputState == Enum.UserInputState.Begin then
 		Back.Busy = true
 		local ok, handled = pcall(handleBack)
 		Back.Busy = false
@@ -690,7 +1126,7 @@ function syncBackBinding()
 		Back.Bound = true
 		local ok, err = pcall(function()
 			ContextActionService:BindActionAtPriority(
-				BACK_ACTION,
+				K.BACK_ACTION,
 				onBackAction,
 				false,
 				Enum.ContextActionPriority.High.Value,
@@ -706,22 +1142,45 @@ function syncBackBinding()
 	else
 		Back.Bound = false
 		pcall(function()
-			ContextActionService:UnbindAction(BACK_ACTION)
+			ContextActionService:UnbindAction(K.BACK_ACTION)
 		end)
 	end
 end
 
 ----------------------------------------------------------------------
--- Menu column (left-centre)
+-- Menu tiles (left-centre column; a 2 x 3 grid on short screens)
 ----------------------------------------------------------------------
-local Entries = {} -- { Id, Root, Icon, Caption, Active }
-
 local function menuActionInventory()
 	toggleWindow("Inventory", { Tab = "Items" })
 end
 
 local function menuActionPets()
 	toggleWindow("Inventory", { Tab = "Pets" })
+end
+
+local function openIndex(groupId)
+	local index = getIndex()
+	if not index or type(index.Open) ~= "function" then
+		showHint("The Pet Index is getting ready. Try again soon!", "info")
+		return
+	end
+	if Spin.Stage then
+		return
+	end
+	closeOdds()
+	if openId then
+		closeWindow(openId, true)
+	end
+	hideBackdropNow()
+	safe("Index.Open", index.Open, groupId)
+end
+
+local function menuActionIndex()
+	if indexOpen() then
+		closeIndex()
+	else
+		openIndex(nil)
+	end
 end
 
 local function menuActionShop()
@@ -753,130 +1212,414 @@ end
 local MENU = {
 	{ Id = "Inventory", Label = "Inventory", Glyph = G.Backpack, Color = BUTTONS.Blue, Action = menuActionInventory },
 	{ Id = "Pets", Label = "Pets", Glyph = G.Paw, Color = BUTTONS.Pink, Action = menuActionPets },
+	{ Id = "Index", Label = "Index", Glyph = G.Book, Color = TEAL, Action = menuActionIndex },
 	{ Id = "Shop", Label = "Shop", Glyph = G.Money, Color = BUTTONS.Gold, Action = menuActionShop },
 	{ Id = "Spot", Label = "My Spot", Glyph = G.House, Color = BUTTONS.Green, Action = menuActionSpot },
 	{ Id = "Stats", Label = "Stats", Glyph = G.Chart, Color = PURPLE, Action = menuActionStats },
 }
 
+-- Glossy chunky face: light top, the colour, then a hard darker lip at the bottom.
+local function tileSequence(c)
+	return ColorSequence.new({
+		ColorSequenceKeypoint.new(0, Theme.Lighten(c, 0.34)),
+		ColorSequenceKeypoint.new(0.5, Theme.Lighten(c, 0.05)),
+		ColorSequenceKeypoint.new(0.78, Theme.Darken(c, 0.08)),
+		ColorSequenceKeypoint.new(0.8, Theme.Darken(c, 0.32)),
+		ColorSequenceKeypoint.new(1, Theme.Darken(c, 0.4)),
+	})
+end
+
+local function paintTile(entry)
+	local color = entry.Color
+	if entry.Disabled then
+		color = BUTTONS.Gray or MUTED
+	end
+	local face = color
+	if not entry.Disabled then
+		if entry.Pressing then
+			face = Theme.Darken(color, 0.08)
+		elseif entry.Hovering then
+			face = Theme.Lighten(color, 0.1)
+		end
+	end
+	entry.Gradient.Color = tileSequence(face)
+	entry.Stroke.Color = entry.Active and GOLD or NAVY
+	entry.Glow.Visible = entry.Active == true
+	entry.Label.TextColor3 = entry.Active and Theme.Lighten(GOLD, 0.45) or WHITE
+end
+
+local function setTileFx(entry, target, seconds)
+	if entry.FxTween then
+		entry.FxTween:Cancel()
+	end
+	entry.FxTween = tween(entry.Fx, seconds, { Scale = target })
+end
+
+local function buildTile(column, spec, index)
+	local entry = { Id = spec.Id, Color = spec.Color or BUTTONS.Blue or PURPLE }
+	entry.Root = makeFrame(column, "Entry_" .. spec.Id, {
+		Size = UDim2.fromOffset(K.ENTRY_W, K.ENTRY_H),
+		LayoutOrder = index,
+		ZIndex = 2,
+	})
+	-- the square tile (the tutorial rings the MenuButton_<Id> button)
+	local button = Util.Create("TextButton", {
+		Name = "MenuButton_" .. spec.Id,
+		AutoButtonColor = false,
+		BorderSizePixel = 0,
+		Text = "",
+		BackgroundColor3 = WHITE,
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 0),
+		Size = UDim2.fromOffset(K.TILE, K.TILE),
+		ZIndex = 3,
+		Parent = entry.Root,
+	})
+	entry.Button = button
+	-- soft gold glow behind the tile of the open window (a sibling: children always draw above a parent)
+	entry.Glow = makeFrame(entry.Root, "ActiveGlow", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.new(0.5, 0, 0, K.TILE / 2),
+		Size = UDim2.fromOffset(K.TILE + 14, K.TILE + 14),
+		BackgroundTransparency = 0.3,
+		BackgroundColor3 = GOLD,
+		Visible = false,
+		ZIndex = 2,
+	})
+	corner(entry.Glow, 24)
+	corner(button, 18)
+	entry.Stroke = stroke(button, NAVY, 4, 0)
+	entry.Gradient = Util.Create("UIGradient", { Rotation = 90, Parent = button })
+	local gloss = makeFrame(button, "Gloss", {
+		BackgroundColor3 = WHITE,
+		BackgroundTransparency = 0.72,
+		Position = UDim2.fromOffset(8, 6),
+		Size = UDim2.new(1, -16, 0.3, 0),
+		ZIndex = 3,
+	})
+	corner(gloss, 10)
+	-- two tiny pixel glints: a nod to the voxel world
+	for i, glint in ipairs({ { 10, 9, 6 }, { 18, 9, 4 } }) do
+		local pixel = makeFrame(button, "Glint" .. i, {
+			BackgroundColor3 = WHITE,
+			BackgroundTransparency = 0.15,
+			Position = UDim2.fromOffset(glint[1], glint[2]),
+			Size = UDim2.fromOffset(glint[3], glint[3]),
+			ZIndex = 4,
+		})
+		pixel.BorderSizePixel = 0
+	end
+	local disc = makeFrame(button, "GlyphDisc", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.new(0.5, 0, 0.44, 0),
+		Size = UDim2.new(0.66, 0, 0.66, 0),
+		BackgroundColor3 = WHITE,
+		BackgroundTransparency = 0.8,
+		ZIndex = 3,
+	})
+	round(disc)
+	entry.Glyph = Theme.Label(spec.Glyph, "Title", {
+		Scaled = true,
+		Stroke = 1,
+		Props = {
+			Name = "Glyph",
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.new(0.5, 0, 0.43, 0),
+			Size = UDim2.new(0.6, 0, 0.6, 0),
+			ZIndex = 5,
+		},
+	})
+	Util.Create("UITextSizeConstraint", { MaxTextSize = 48, MinTextSize = 14, Parent = entry.Glyph })
+	entry.Glyph.Parent = button
+	-- bold label sitting on the bottom edge of the tile
+	entry.Label = Theme.Label(spec.Label, "Button", {
+		Size = K.LABEL_TEXT,
+		Stroke = 0.1,
+		StrokeColor = INK,
+		Outline = 2.5,
+		OutlineColor = INK,
+		Props = {
+			Name = "Label",
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.new(0.5, 0, 1, 2),
+			Size = UDim2.fromOffset(K.ENTRY_W + 4, 26),
+			TextScaled = true,
+			ZIndex = 6,
+		},
+	})
+	Util.Create("UITextSizeConstraint", { MaxTextSize = K.LABEL_TEXT, MinTextSize = 14, Parent = entry.Label })
+	entry.Label.Parent = button
+	-- little red "!" dot
+	entry.Badge = makeFrame(button, "Badge", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.new(1, -6, 0, 6),
+		Size = UDim2.fromOffset(28, 28),
+		BackgroundTransparency = 0,
+		BackgroundColor3 = BUTTONS.Red or BAD,
+		Visible = false,
+		ZIndex = 7,
+	})
+	round(entry.Badge)
+	stroke(entry.Badge, NAVY, 2.5, 0)
+	makeText(entry.Badge, "Mark", "!", "Button", 19, WHITE, { Size = UDim2.new(1, 0, 1, 0), ZIndex = 8 })
+
+	entry.Fx = Util.Create("UIScale", { Name = "FxScale", Scale = 1, Parent = button })
+	button.MouseEnter:Connect(function()
+		entry.Hovering = true
+		setTileFx(entry, 1.07, 0.12)
+		entry.Glyph.Rotation = -10
+		tween(entry.Glyph, 0.35, { Rotation = 0 }, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+		paintTile(entry)
+	end)
+	button.MouseLeave:Connect(function()
+		entry.Hovering = false
+		entry.Pressing = false
+		setTileFx(entry, 1, 0.14)
+		paintTile(entry)
+	end)
+	button.MouseButton1Down:Connect(function()
+		entry.Pressing = true
+		setTileFx(entry, 0.93, 0.07)
+		paintTile(entry)
+	end)
+	button.MouseButton1Up:Connect(function()
+		entry.Pressing = false
+		setTileFx(entry, entry.Hovering and 1.07 or 1, 0.12)
+		paintTile(entry)
+	end)
+	button.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.Touch then
+			entry.Hovering = false
+			entry.Pressing = false
+			setTileFx(entry, 1, 0.12)
+			paintTile(entry)
+		end
+	end)
+	button.Activated:Connect(function()
+		safe("menu " .. spec.Id, spec.Action)
+	end)
+	-- compact (icon-only) tiles name themselves on hover / long-press
+	CloudUI.Tooltip(button, function()
+		if entry.Label.Visible then
+			return nil
+		end
+		return spec.Label
+	end)
+	function entry.SetBadge(on)
+		entry.Badge.Visible = on and true or false
+	end
+	paintTile(entry)
+	Entries[spec.Id] = entry
+	return entry
+end
+
 local function buildColumn()
 	local column = makeFrame(gui, "MenuColumn", {
 		AnchorPoint = Vector2.new(0, 0.5),
-		Position = UDim2.new(0, EDGE, 0.5, 0),
-		Size = UDim2.fromOffset(COL_W, 0),
-		AutomaticSize = Enum.AutomaticSize.Y,
+		Position = UDim2.new(0, K.EDGE, 0.5, 0),
+		Size = UDim2.fromOffset(K.ENTRY_W, #MENU * K.ENTRY_H + (#MENU - 1) * K.GAP),
 		ZIndex = 2,
 	})
-	listLayout(column, Enum.FillDirection.Vertical, 6, Enum.HorizontalAlignment.Center)
 	U.Column = column
 	U.ColumnScale = Util.Create("UIScale", { Name = "ViewportScale", Scale = 1, Parent = column })
-
 	for index, spec in ipairs(MENU) do
-		local entry = { Id = spec.Id }
-		entry.Root = makeFrame(column, "Entry_" .. spec.Id, {
-			Size = UDim2.fromOffset(COL_W, BTN + CAPTION_H),
-			LayoutOrder = index,
-		})
-		entry.Icon = CloudUI.IconButton({
-			Name = "Menu_" .. spec.Id,
-			Glyph = spec.Glyph,
-			Color = spec.Color,
-			Size = UDim2.fromOffset(BTN, BTN),
-			Position = UDim2.new(0.5, 0, 0, 0),
-			AnchorPoint = Vector2.new(0.5, 0),
-			Callback = function()
-				safe("menu " .. spec.Id, spec.Action)
-			end,
-			Parent = entry.Root,
-		})
-		entry.Caption = makeText(entry.Root, "Caption", spec.Label, "Heading", 13, WHITE, {
-			AnchorPoint = Vector2.new(0.5, 1),
-			Position = UDim2.new(0.5, 0, 1, 0),
-			Size = UDim2.new(1, 30, 0, CAPTION_H),
-			TextTruncate = Enum.TextTruncate.AtEnd,
-			TextStrokeTransparency = 0.1,
-		})
-		entry.Active = makeFrame(entry.Root, "ActiveTab", {
-			AnchorPoint = Vector2.new(0, 0.5),
-			Position = UDim2.new(0, -7, 0, BTN / 2),
-			Size = UDim2.fromOffset(6, 32),
-			BackgroundTransparency = 0,
-			BackgroundColor3 = GOLD,
-			Visible = false,
-		})
-		round(entry.Active)
-		stroke(entry.Active, NAVY, 2, 0)
-		Entries[spec.Id] = entry
+		buildTile(column, spec, index)
 	end
 end
 
--- Compact screens drop the captions; the whole column is scaled with the screen like the HUD.
-local function relayoutMenu()
+-- Column layouts: "Column" (labelled tiles, one column), "Grid" (labelled tiles, 2 x 3, short landscape
+-- screens; the labels sit on the tiles' bottom edge so the rows pack tighter), "Compact" (icon-only tiles in one
+-- column, narrow portrait screens: a second column would reach the middle of the screen there, and a labelled
+-- column would collide with the HUD corners) or "CompactGrid" (icon-only tiles, 2 x 3: short touch screens where
+-- the band above Roblox's thumbstick cannot hold labelled tiles at a readable size).
+local function setColumnLayout(mode)
+	if U.ColumnMode == mode and U.ColumnLayout and U.ColumnLayout.Parent then
+		return
+	end
+	if U.ColumnLayout then
+		U.ColumnLayout:Destroy()
+	end
+	U.ColumnMode = mode
+	local iconOnly = mode == "Compact" or mode == "CompactGrid"
+	local entryH = K.ENTRY_H
+	if iconOnly then
+		entryH = K.TILE
+	elseif mode == "Grid" then
+		entryH = K.GRID_ENTRY_H
+	end
+	for _, entry in pairs(Entries) do
+		entry.Root.Size = UDim2.fromOffset(K.ENTRY_W, entryH)
+		entry.Label.Visible = not iconOnly
+		entry.Label.Position = UDim2.new(0.5, 0, 1, (mode == "Grid") and K.GRID_LABEL_Y or 2)
+	end
+	if mode == "Grid" or mode == "CompactGrid" then
+		U.ColumnLayout = Util.Create("UIGridLayout", {
+			CellSize = UDim2.fromOffset(K.ENTRY_W, entryH),
+			CellPadding = UDim2.fromOffset(K.GAP, K.GAP),
+			FillDirection = Enum.FillDirection.Horizontal,
+			FillDirectionMaxCells = 2,
+			SortOrder = Enum.SortOrder.LayoutOrder,
+			HorizontalAlignment = Enum.HorizontalAlignment.Left,
+			VerticalAlignment = Enum.VerticalAlignment.Top,
+			Parent = U.Column,
+		})
+	else
+		U.ColumnLayout = listLayout(U.Column, Enum.FillDirection.Vertical, K.GAP, Enum.HorizontalAlignment.Center)
+	end
+end
+
+-- Top of the HUD's bottom-left block (vitals + currency pill) in gui px; on touch screens it is raised over
+-- the thumbstick. Mirrors HudController's EDGE, TOUCH_RAISE_SMALL / LARGE, VITALS_H, STACK_GAP and CUR_H.
+local function bottomBlockTop(area, factor)
+	local raise = 12
+	if touchDevice then
+		local camera = workspace.CurrentCamera
+		local vp = camera and camera.ViewportSize or area
+		raise = (math.min(vp.X, vp.Y) <= 500) and 150 or 220
+	end
+	return area.Y - raise - (70 + 10 + 46 + 8) * factor
+end
+
+function relayoutMenu()
 	if not gui or not U.Column then
 		return
 	end
-	local size = guiSize()
-	local compact = size.Y < COMPACT_BELOW
-	local scale = Util.Clamp(math.min(size.X / REF_W, size.Y / REF_H), 0.72, 1.2)
-	U.ColumnScale.Scale = scale
+	local area = guiSize()
+	local factor = screenFactor()
 	local margin = screenMargin()
-	U.Column.Position = UDim2.new(0, margin, 0.5, 0)
-	for _, entry in pairs(Entries) do
-		entry.Caption.Visible = not compact
-		entry.Root.Size = UDim2.fromOffset(COL_W, compact and BTN or (BTN + CAPTION_H))
+	local n = #MENU
+	local mode, cols = "Column", 1
+	local scale = factor
+	local entryH = K.ENTRY_H
+	local columnTop = nil -- gui px of the column's top edge; nil = vertically centred on the screen
+	local gridRows = math.ceil(n / 2)
+	local gridH = gridRows * K.GRID_ENTRY_H + (gridRows - 1) * K.GAP
+	local columnH = n * K.ENTRY_H + (n - 1) * K.GAP
+	if area.X >= area.Y and touchDevice then
+		-- touch landscape: Roblox's thumbstick owns the bottom-left corner, and a tile on top of it would take the
+		-- thumb's touch (My Spot would teleport the player home). The column lives in the band between the top
+		-- margin and the stick: one labelled column when it fits at the screen factor, else the 2 x 3 grid while
+		-- its labels stay >= MIN_LABEL_PX, else icon-only tiles in a 2 x 3 grid.
+		local camera = workspace.CurrentCamera
+		local vp = camera and camera.ViewportSize or area
+		local stickTop = area.Y - ((math.min(vp.X, vp.Y) <= 500) and K.STICK_TOP_SMALL or K.STICK_TOP_LARGE)
+		local top = K.EDGE
+		local avail = stickTop - K.STICK_GAP - top
+		local labelScale = K.MIN_LABEL_PX / K.LABEL_TEXT
+		local h
+		if columnH * factor <= avail then
+			h = columnH
+		elseif math.min(factor, avail / gridH) >= labelScale then
+			mode, cols, entryH = "Grid", 2, K.GRID_ENTRY_H
+			h = gridH
+			scale = math.min(factor, avail / gridH)
+		else
+			mode, cols, entryH = "CompactGrid", 2, K.TILE
+			h = gridRows * K.TILE + (gridRows - 1) * K.GAP
+			scale = Util.Clamp(avail / h, 0.4, factor)
+		end
+		columnTop = top + math.max(0, (avail - h * scale) / 2)
+	elseif area.X >= area.Y then
+		-- landscape: the HUD has room to step aside, the column only has to fit on the screen
+		local avail = area.Y - 2 * margin
+		if columnH * factor > avail then
+			mode, cols, entryH = "Grid", 2, K.GRID_ENTRY_H
+			if gridH * scale > avail then
+				scale = math.max(0.4, avail / gridH)
+			end
+		end
+	else
+		-- portrait: stay between the HUD's top-left panel (the tallest is ~216 design px) and its
+		-- bottom-left block, vertically centred
+		local centre = area.Y / 2
+		local top = margin + 222 * factor
+		local half = math.min(centre - top, bottomBlockTop(area, factor) - 6 - centre)
+		if columnH * factor > 2 * half then
+			mode, entryH = "Compact", K.TILE
+			local compactH = n * K.TILE + (n - 1) * K.GAP
+			scale = Util.Clamp(2 * half / compactH, 0.4, factor)
+		end
+	end
+	local rows = math.ceil(n / cols)
+	local w = cols * K.ENTRY_W + (cols - 1) * K.GAP
+	local h = rows * entryH + (rows - 1) * K.GAP
+	setColumnLayout(mode)
+	U.Column.Size = UDim2.fromOffset(w, h)
+	U.ColumnScale.Scale = scale
+	local hintY = UDim2.new(0, 0, 0.5, 0)
+	if columnTop then
+		U.Column.AnchorPoint = Vector2.new(0, 0)
+		U.Column.Position = UDim2.new(0, margin, 0, math.floor(columnTop + 0.5))
+		hintY = UDim2.new(0, 0, 0, math.floor(columnTop + h * scale / 2 + 0.5))
+	else
+		U.Column.AnchorPoint = Vector2.new(0, 0.5)
+		U.Column.Position = UDim2.new(0, margin, 0.5, 0)
 	end
 	if Hint.Frame then
-		Hint.Frame.Position = UDim2.new(0, margin + (COL_W + 6) * scale, 0.5, 0)
+		-- next to the column, and never wide enough to reach the middle of the screen
+		local hintLeft = margin + w * scale + 10
+		local room = math.max(120, area.X * 0.34 - hintLeft - 28 * factor)
+		Hint.Scale.Scale = factor
+		Hint.Frame.Position = UDim2.new(0, hintLeft, hintY.Y.Scale, hintY.Y.Offset)
+		Hint.Limit.MaxSize = Vector2.new(math.min(300, math.floor(room / factor)), 260)
 	end
 	for _, win in pairs(windows) do
 		if win.Shown then
-			win.Fit.Scale = fitScale(win.Size[1], win.Size[2])
+			layoutWindow(win)
 		end
+	end
+	if Odds.Holder and Odds.Fit then
+		local box = fitBox(K.WIN.Odds[1], K.WIN.Odds[2], K.WIN.Odds[3], K.WIN.Odds[4])
+		Odds.Holder.Size = UDim2.fromOffset(box.w, box.h)
+		Odds.Holder.Position = UDim2.fromOffset(box.x, box.y)
+		Odds.Fit.Scale = box.scale
 	end
 	if Spin.Stage and Spin.Stage.Relayout then
 		Spin.Stage.Relayout()
 	end
 end
 
-function updateMenuActive()
-	local invWin = windows.Inventory
-	local invTab = invWin and invWin.Shown and invWin.Tab or nil
-	local function mark(id, on)
-		local entry = Entries[id]
-		if entry then
-			entry.Active.Visible = on and true or false
-		end
-	end
-	mark("Inventory", invTab == "Items")
-	mark("Pets", invTab == "Pets")
-	mark("Shop", windows.Shop ~= nil and windows.Shop.Shown)
-	mark("Stats", windows.Stats ~= nil and windows.Stats.Shown)
-	if invWin and invWin.Shown and Entries.Pets then
-		Entries.Pets.Icon.SetBadge(false)
-	end
-	-- the Spot button is greyed out in matches
-	local spotEntry = Entries.Spot
-	if spotEntry then
-		spotEntry.Icon.SetColor(inMatch() and BUTTONS.Gray or BUTTONS.Green)
-	end
-	local shopEntry = Entries.Shop
-	if shopEntry then
-		shopEntry.Icon.SetColor(inMatch() and BUTTONS.Gray or BUTTONS.Gold)
+local function setActive(id, on)
+	local entry = Entries[id]
+	if entry and entry.Active ~= (on and true or false) then
+		entry.Active = on and true or false
+		paintTile(entry)
 	end
 end
 
-----------------------------------------------------------------------
--- Shared card look for the dark inset panels used inside the windows
-----------------------------------------------------------------------
-local INSET_COLOR = Color3.fromRGB(20, 30, 70)
+local function setDisabled(id, on)
+	local entry = Entries[id]
+	if entry and entry.Disabled ~= (on and true or false) then
+		entry.Disabled = on and true or false
+		paintTile(entry)
+	end
+end
 
-local function makeInset(parent, name, props)
-	local p = props or {}
-	p.BackgroundColor3 = INSET_COLOR
-	p.BackgroundTransparency = 0.45
-	local inset = makeFrame(parent, name, p)
-	corner(inset, 12)
-	stroke(inset, WELL_EDGE, 3, 0.2)
-	return inset
+function updateMenuActive()
+	local invWin = windows.Inventory
+	local invTab = invWin and invWin.Shown and invWin.Tab or nil
+	setActive("Inventory", invTab == "Items")
+	setActive("Pets", invTab == "Pets")
+	setActive("Index", indexOpen())
+	setActive("Shop", windows.Shop ~= nil and windows.Shop.Shown)
+	setActive("Stats", windows.Stats ~= nil and windows.Stats.Shown)
+	if invWin and invWin.Shown and Entries.Pets then
+		Entries.Pets.SetBadge(false)
+	end
+	-- the Spot and Shop tiles are greyed out in matches
+	setDisabled("Spot", inMatch())
+	setDisabled("Shop", inMatch())
+end
+
+-- Red dot on the Index tile while a completed group's reward waits.
+local function refreshIndexBadge()
+	local entry = Entries.Index
+	local index = Index.Module
+	if not entry or not index or type(index.ClaimableCount) ~= "function" then
+		return
+	end
+	local ok, count = pcall(index.ClaimableCount)
+	entry.SetBadge(ok and type(count) == "number" and count > 0)
 end
 
 local function gotoShopItems()
@@ -900,8 +1643,8 @@ local function buildInventory(win)
 		Selected = nil,
 		DetailPet = nil,
 		DetailViewport = nil,
-		PillRarity = nil,
-		Pill = nil,
+		Pills = {},
+		PillKey = nil,
 		Order = {}, -- owned pet ids in grid order (rarest first)
 		Ready = {}, -- petId -> true once the grid slot got its pet viewport
 		Filling = false, -- true while the staggered viewport builder is running
@@ -913,8 +1656,10 @@ local function buildInventory(win)
 	local tabs = CloudUI.Tabs({
 		Name = "InventoryTabs",
 		Parent = content,
-		Position = UDim2.fromOffset(10, 8),
-		Size = UDim2.new(1, -20, 1, -16),
+		Position = UDim2.fromOffset(12, 10),
+		Size = UDim2.new(1, -24, 1, -20),
+		BarHeight = 50,
+		TextSize = 22,
 		OnSelect = function(name)
 			win.Tab = name
 			updateMenuActive()
@@ -925,33 +1670,145 @@ local function buildInventory(win)
 	------------------------------------------------------------------
 	-- Pets page
 	------------------------------------------------------------------
-	local function buildPetsPage(page)
-		local left = makeFrame(page, "Left", { Size = UDim2.new(0, 468, 1, 0) })
+	local function buildDetailCard(page)
+		local card = makeInset(page, "Detail", {
+			AnchorPoint = Vector2.new(1, 0),
+			Position = UDim2.new(1, 0, 0, 0),
+			Size = UDim2.new(0, K.DETAIL_W, 1, 0),
+		})
+		W.Detail = card
+		W.DetailEmpty = makeText(card, "Hint", "Pick a pet to see its details.", "Body", 19, MUTED, {
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.new(0.5, 0, 0.5, 0),
+			Size = UDim2.new(1, -40, 0, 60),
+			TextWrapped = true,
+		})
+		local body = makeFrame(card, "Body", { Size = UDim2.new(1, 0, 1, 0), Visible = false })
+		W.DetailBody = body
+		local scroll = scroller(body, "Info", {
+			Position = UDim2.fromOffset(4, 4),
+			Size = UDim2.new(1, -8, 1, -98),
+		})
+		W.InfoScroll = scroll
+		pad(scroll, 10, 6, 14, 8)
+		listLayout(scroll, Enum.FillDirection.Vertical, 6, Enum.HorizontalAlignment.Center)
+		local view = makeFrame(scroll, "View", { Size = UDim2.new(1, 0, 0, 196), LayoutOrder = 1 })
+		W.View = view
+		W.Glow = makeFrame(view, "Glow", {
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.new(0.5, 0, 0.5, 0),
+			Size = UDim2.fromOffset(170, 170),
+			BackgroundColor3 = GOLD,
+			BackgroundTransparency = 0.78,
+		})
+		round(W.Glow)
+		W.ViewportHolder = makeFrame(view, "ViewportHolder", { Size = UDim2.new(1, 0, 1, 0), ZIndex = 2 })
+		W.Name = makeText(scroll, "Name", "", "Title", 30, WHITE, {
+			Size = UDim2.new(1, 0, 0, 36),
+			TextScaled = true,
+			LayoutOrder = 2,
+		})
+		Util.Create("UITextSizeConstraint", { MaxTextSize = 30, MinTextSize = 18, Parent = W.Name })
+		W.MetaRow = makeFrame(scroll, "Meta", { Size = UDim2.new(1, 0, 0, 30), LayoutOrder = 3 })
+		listLayout(W.MetaRow, Enum.FillDirection.Horizontal, 6, Enum.HorizontalAlignment.Center, Enum.VerticalAlignment.Center)
+		W.OwnedLabel = makeText(scroll, "Owned", "", "Heading", 19, MUTED, {
+			Size = UDim2.new(1, 0, 0, 24),
+			LayoutOrder = 4,
+		})
+		W.RoleRow = makeFrame(scroll, "Role", { Size = UDim2.new(1, 0, 0, 30), LayoutOrder = 5 })
+		listLayout(W.RoleRow, Enum.FillDirection.Horizontal, 8, Enum.HorizontalAlignment.Center, Enum.VerticalAlignment.Center)
+		W.Special = makeText(W.RoleRow, "Special", "", "Heading", 18, GOLD, {
+			AutomaticSize = Enum.AutomaticSize.X,
+			Size = UDim2.fromOffset(0, 26),
+			LayoutOrder = 2,
+		})
+		W.Blurb = makeText(scroll, "Blurb", "", "Body", 18, WHITE, {
+			Size = UDim2.new(1, 0, 0, 0),
+			AutomaticSize = Enum.AutomaticSize.Y,
+			TextWrapped = true,
+			LayoutOrder = 6,
+		})
+		W.Perks = makeText(scroll, "Perks", "", "Heading", 19, Theme.Lighten(GOOD, 0.3), {
+			Size = UDim2.new(1, 0, 0, 0),
+			AutomaticSize = Enum.AutomaticSize.Y,
+			TextWrapped = true,
+			LayoutOrder = 7,
+		})
+		-- buttons pinned to the bottom of the card
+		local buttons = makeFrame(body, "Buttons", {
+			AnchorPoint = Vector2.new(0, 1),
+			Position = UDim2.new(0, 10, 1, -36),
+			Size = UDim2.new(1, -20, 0, 54),
+		})
+		W.Buttons = buttons
+		W.EquipBtn = CloudUI.Button({
+			Name = "Equip",
+			Text = "Equip",
+			Style = "Green",
+			Size = UDim2.new(0.5, -6, 1, 0),
+			TextSize = 22,
+			Callback = function()
+				if pets.Selected then
+					fire("EquipPet", pets.Selected)
+				end
+			end,
+			Parent = buttons,
+		})
+		W.UnequipBtn = CloudUI.Button({
+			Name = "Unequip",
+			Text = "Unequip",
+			Style = "Pink",
+			Size = UDim2.new(0.5, -6, 1, 0),
+			AnchorPoint = Vector2.new(1, 0),
+			Position = UDim2.new(1, 0, 0, 0),
+			TextSize = 22,
+			Callback = function()
+				if pets.Selected then
+					fire("UnequipPet", pets.Selected)
+				end
+			end,
+			Parent = buttons,
+		})
+		W.Status = makeText(body, "Status", "", "Label", 18, MUTED, {
+			AnchorPoint = Vector2.new(0, 1),
+			Position = UDim2.new(0, 10, 1, -6),
+			Size = UDim2.new(1, -20, 0, 26),
+			TextScaled = true,
+		})
+		Util.Create("UITextSizeConstraint", { MaxTextSize = 18, MinTextSize = 14, Parent = W.Status })
+	end
 
-		local equipWidth = maxEquipped * 48 + (maxEquipped - 1) * 6
-		local header = makeFrame(left, "Header", { Size = UDim2.new(1, 0, 0, 62) })
-		W.EquippedLabel = makeText(header, "EquippedLabel", "Equipped", "Heading", 20, WHITE, {
+	local function buildPetsPage(page)
+		local left = makeFrame(page, "Left", { Size = UDim2.new(1, -(K.DETAIL_W + 12), 1, 0) })
+		W.Left = left
+
+		local slotSize = 64
+		local equipWidth = maxEquipped * slotSize + (maxEquipped - 1) * 8
+		local header = makeFrame(left, "Header", { Size = UDim2.new(1, 0, 0, 76) })
+		W.EquippedLabel = makeText(header, "EquippedLabel", "Equipped", "Heading", 24, WHITE, {
 			Position = UDim2.fromOffset(4, 0),
-			Size = UDim2.new(1, -(equipWidth + 12), 0, 26),
+			Size = UDim2.new(1, -(equipWidth + 12), 0, 30),
 			TextXAlignment = Enum.TextXAlignment.Left,
 		})
-		W.PerksLabel = makeText(header, "TeamPerks", "", "Body", 13, MUTED, {
-			Position = UDim2.fromOffset(4, 27),
-			Size = UDim2.new(1, -(equipWidth + 12), 0, 34),
+		W.PerksLabel = makeText(header, "TeamPerks", "", "Body", 18, MUTED, {
+			Position = UDim2.fromOffset(4, 32),
+			Size = UDim2.new(1, -(equipWidth + 12), 0, 44),
 			TextWrapped = true,
+			TextScaled = true,
 			TextXAlignment = Enum.TextXAlignment.Left,
 			TextYAlignment = Enum.TextYAlignment.Top,
 		})
+		Util.Create("UITextSizeConstraint", { MaxTextSize = 18, MinTextSize = 16, Parent = W.PerksLabel })
 		local equipRow = makeFrame(header, "EquippedSlots", {
 			AnchorPoint = Vector2.new(1, 0),
-			Position = UDim2.new(1, 0, 0, 0),
-			Size = UDim2.fromOffset(equipWidth, 52),
+			Position = UDim2.new(1, 0, 0, 2),
+			Size = UDim2.fromOffset(equipWidth, slotSize + 4),
 		})
-		listLayout(equipRow, Enum.FillDirection.Horizontal, 6, Enum.HorizontalAlignment.Right, Enum.VerticalAlignment.Center)
+		listLayout(equipRow, Enum.FillDirection.Horizontal, 8, Enum.HorizontalAlignment.Right, Enum.VerticalAlignment.Center)
 		for i = 1, maxEquipped do
-			pets.EquipSlots[i] = CloudUI.Slot({
+			pets.EquipSlots[i] = readableSlot(CloudUI.Slot({
 				Name = "Equipped" .. i,
-				Size = UDim2.fromOffset(48, 48),
+				Size = UDim2.fromOffset(slotSize, slotSize),
 				LayoutOrder = i,
 				Parent = equipRow,
 				Callback = function()
@@ -961,23 +1818,23 @@ local function buildInventory(win)
 						refreshInventory()
 					end
 				end,
-			})
+			}))
 		end
 
 		local well = makeInset(left, "GridWell", {
-			Position = UDim2.fromOffset(0, 68),
-			Size = UDim2.new(1, 0, 1, -68),
+			Position = UDim2.fromOffset(0, 84),
+			Size = UDim2.new(1, 0, 1, -84),
 		})
-		W.Grid = CloudUI.Grid(well, UDim2.fromOffset(80, 80), 8)
+		W.Grid = CloudUI.Grid(well, UDim2.fromOffset(104, 104), 10)
 
 		W.Empty = makeFrame(well, "Empty", { Size = UDim2.new(1, 0, 1, 0), Visible = false, ZIndex = 5 })
-		listLayout(W.Empty, Enum.FillDirection.Vertical, 10, Enum.HorizontalAlignment.Center, Enum.VerticalAlignment.Center)
-		W.EmptyTitle = makeText(W.Empty, "Title", "No pets yet!", "Title", 28, WHITE, {
-			Size = UDim2.new(1, -30, 0, 36),
+		listLayout(W.Empty, Enum.FillDirection.Vertical, 12, Enum.HorizontalAlignment.Center, Enum.VerticalAlignment.Center)
+		W.EmptyTitle = makeText(W.Empty, "Title", "No pets yet!", "Title", 32, WHITE, {
+			Size = UDim2.new(1, -30, 0, 40),
 			LayoutOrder = 1,
 		})
-		W.EmptyBody = makeText(W.Empty, "Body", "Spin a roulette in the Shop to hatch your first winged friend.", "Body", 16, MUTED, {
-			Size = UDim2.new(1, -60, 0, 52),
+		W.EmptyBody = makeText(W.Empty, "Body", "Spin a roulette in the Shop to hatch your first winged friend.", "Body", 20, MUTED, {
+			Size = UDim2.new(1, -60, 0, 56),
 			TextWrapped = true,
 			LayoutOrder = 2,
 		})
@@ -985,7 +1842,8 @@ local function buildInventory(win)
 			Name = "OpenShop",
 			Text = "Open Shop",
 			Style = "Gold",
-			Size = UDim2.fromOffset(180, 46),
+			Size = UDim2.fromOffset(220, 56),
+			TextSize = 24,
 			LayoutOrder = 3,
 			Callback = function()
 				menuActionShop()
@@ -993,91 +1851,7 @@ local function buildInventory(win)
 			Parent = W.Empty,
 		})
 
-		-- detail card
-		local card = makeInset(page, "Detail", {
-			AnchorPoint = Vector2.new(1, 0),
-			Position = UDim2.new(1, 0, 0, 0),
-			Size = UDim2.new(0, 272, 1, 0),
-		})
-		W.DetailEmpty = makeText(card, "Hint", "Pick a pet to see its details.", "Body", 16, MUTED, {
-			AnchorPoint = Vector2.new(0.5, 0.5),
-			Position = UDim2.new(0.5, 0, 0.5, 0),
-			Size = UDim2.new(1, -40, 0, 60),
-			TextWrapped = true,
-		})
-		local body = makeFrame(card, "Body", { Size = UDim2.new(1, 0, 1, 0), Visible = false })
-		W.DetailBody = body
-		W.Glow = makeFrame(body, "Glow", {
-			AnchorPoint = Vector2.new(0.5, 0),
-			Position = UDim2.new(0.5, 0, 0, 16),
-			Size = UDim2.fromOffset(150, 150),
-			BackgroundColor3 = GOLD,
-			BackgroundTransparency = 0.78,
-		})
-		round(W.Glow)
-		W.ViewportHolder = makeFrame(body, "ViewportHolder", {
-			AnchorPoint = Vector2.new(0.5, 0),
-			Position = UDim2.new(0.5, 0, 0, 6),
-			Size = UDim2.fromOffset(240, 170),
-		})
-		W.Name = makeText(body, "Name", "", "Title", 25, WHITE, {
-			Position = UDim2.fromOffset(0, 180),
-			Size = UDim2.new(1, 0, 0, 30),
-		})
-		W.MetaRow = makeFrame(body, "Meta", {
-			Position = UDim2.fromOffset(0, 212),
-			Size = UDim2.new(1, 0, 0, 26),
-		})
-		listLayout(W.MetaRow, Enum.FillDirection.Horizontal, 8, Enum.HorizontalAlignment.Center, Enum.VerticalAlignment.Center)
-		W.OwnedLabel = makeText(W.MetaRow, "Owned", "", "Heading", 14, MUTED, {
-			Size = UDim2.fromOffset(120, 24),
-			LayoutOrder = 2,
-		})
-		W.Blurb = makeText(body, "Blurb", "", "Body", 14, WHITE, {
-			Position = UDim2.fromOffset(14, 242),
-			Size = UDim2.new(1, -28, 0, 58),
-			TextWrapped = true,
-			TextYAlignment = Enum.TextYAlignment.Top,
-		})
-		W.Perks = makeText(body, "Perks", "", "Heading", 15, Theme.Lighten(GOOD, 0.2), {
-			Position = UDim2.fromOffset(14, 302),
-			Size = UDim2.new(1, -28, 0, 44),
-			TextWrapped = true,
-			TextYAlignment = Enum.TextYAlignment.Top,
-		})
-		W.EquipBtn = CloudUI.Button({
-			Name = "Equip",
-			Text = "Equip",
-			Style = "Green",
-			Size = UDim2.fromOffset(122, 42),
-			Position = UDim2.new(0, 10, 0, 354),
-			TextSize = 20,
-			Callback = function()
-				if pets.Selected then
-					fire("EquipPet", pets.Selected)
-				end
-			end,
-			Parent = body,
-		})
-		W.UnequipBtn = CloudUI.Button({
-			Name = "Unequip",
-			Text = "Unequip",
-			Style = "Pink",
-			Size = UDim2.fromOffset(122, 42),
-			AnchorPoint = Vector2.new(1, 0),
-			Position = UDim2.new(1, -10, 0, 354),
-			TextSize = 20,
-			Callback = function()
-				if pets.Selected then
-					fire("UnequipPet", pets.Selected)
-				end
-			end,
-			Parent = body,
-		})
-		W.Status = makeText(body, "Status", "", "Label", 12, MUTED, {
-			Position = UDim2.fromOffset(10, 402),
-			Size = UDim2.new(1, -20, 0, 18),
-		})
+		buildDetailCard(page)
 	end
 
 	local function renderDetail()
@@ -1110,20 +1884,38 @@ local function buildInventory(win)
 		end
 		W.Glow.BackgroundColor3 = color
 		W.Name.Text = def.Name
-		W.Name.TextColor3 = Theme.Lighten(color, 0.3)
-		if pets.PillRarity ~= def.Rarity then
-			if pets.Pill then
-				pets.Pill:Destroy()
+		W.Name.TextColor3 = rarityText(def)
+
+		-- rarity + element pills (rebuilt only when they change)
+		local elements = elementsOf(def)
+		local pillKey = tostring(def.Rarity) .. "|" .. table.concat(elements, ",") .. "|" .. tostring(def.Role)
+		if pets.PillKey ~= pillKey then
+			for _, pill in ipairs(pets.Pills) do
+				pill:Destroy()
 			end
-			pets.Pill = CloudUI.Pill(def.Rarity, def.Rarity, W.MetaRow)
-			pets.Pill.LayoutOrder = 1
-			pets.PillRarity = def.Rarity
+			pets.Pills = {}
+			local rarityPill = readablePill(def.Rarity, color, W.MetaRow)
+			rarityPill.LayoutOrder = 1
+			table.insert(pets.Pills, rarityPill)
+			for i, element in ipairs(elements) do
+				table.insert(pets.Pills, elementPill(W.MetaRow, element, 18, 1 + i))
+			end
+			if type(def.Role) == "string" then
+				local rolePill = readablePill(def.Role, ROLE_COLORS[def.Role] or BUTTONS.Blue, W.RoleRow)
+				rolePill.LayoutOrder = 1
+				table.insert(pets.Pills, rolePill)
+			end
+			pets.PillKey = pillKey
 		end
+		local special = type(def.Special) == "table" and def.Special or nil
+		W.Special.Text = special and (G.Sparkle .. " " .. tostring(special.Name or "Special")) or ""
+		W.Special.Visible = special ~= nil
+		W.RoleRow.Visible = special ~= nil or type(def.Role) == "string"
 
 		local equipped = State.EquippedCount(id)
 		local text = "Owned x" .. owned
 		if equipped > 0 then
-			text = text .. "  " .. G.Star .. equipped
+			text = text .. "   " .. G.Star .. " " .. equipped .. " equipped"
 		end
 		W.OwnedLabel.Text = text
 		W.Blurb.Text = def.Blurb or ""
@@ -1139,7 +1931,9 @@ local function buildInventory(win)
 		CloudUI.SetDisabled(W.EquipBtn, not canEquip)
 		CloudUI.SetDisabled(W.UnequipBtn, equipped <= 0)
 		local status = ""
-		if equipped >= owned then
+		if inMatch() then
+			status = "Pets are locked during a match."
+		elseif equipped >= owned then
 			status = "All your copies are equipped."
 		elseif totalEquipped >= maxEquipped then
 			status = "Your team is full. Unequip a pet first."
@@ -1147,9 +1941,9 @@ local function buildInventory(win)
 		W.Status.Text = status
 	end
 
-	-- Content of a grid slot. The pet viewport (a PetBuilder model of 35-66 parts, a ViewportFrame and a
-	-- Camera) is attached by fillPetSlots, a few per frame, so a big collection never builds ~30 models in
-	-- the frame the Inventory opens (same idea as the odds popup). Until then a slot is its rarity tile.
+	-- Content of a grid slot. The pet viewport (a PetBuilder model, a ViewportFrame and a Camera) is
+	-- attached by fillPetSlots, a few per frame, so a big collection never builds ~30 models in the frame
+	-- the Inventory opens (same idea as the odds popup). Until then a slot is its rarity tile.
 	local function gridInfo(def, withPet)
 		local info = {
 			RarityColor = rarityOf(def),
@@ -1166,33 +1960,36 @@ local function buildInventory(win)
 		if pets.Filling then
 			return
 		end
+		-- one frame's share (time budget); returns true when slots are still waiting for their pet
 		local function buildBatch()
-			local built = 0
+			local budget = Warm.Budget()
 			for _, id in ipairs(pets.Order) do
 				local slot = pets.Slots[id]
 				local def = PetCatalog.Get(id)
 				if slot and def and not pets.Ready[id] then
+					if not Warm.Allows(budget) then
+						return true
+					end
 					pets.Ready[id] = true
 					slot.SetContent(gridInfo(def, true))
 					slot.SetCount(State.OwnedCount(id)) -- pet slots hide "x1": needs the Pet content to be set first
-					built = built + 1
-					if built >= PETS_PER_FRAME then
-						break
-					end
+					budget.Count = budget.Count + 1
 				end
 			end
-			return built
+			return false
 		end
 		pets.Filling = true
 		task.spawn(function()
-			-- stops when the window closes; the next open refreshes it and resumes with what is still missing
+			-- the frame that opens the window already builds it (and the detail card's pet): start on the next one.
+			-- Stops when the window closes; the next open refreshes it and resumes with what is still missing.
+			task.wait()
 			while win.Shown do
-				local ok, built = pcall(buildBatch)
+				local ok, more = pcall(buildBatch)
 				if not ok then
-					warnOnce("fill pets", built)
+					warnOnce("fill pets", more)
 					break
 				end
-				if built < PETS_PER_FRAME then
+				if not more then
 					break
 				end
 				task.wait()
@@ -1236,15 +2033,15 @@ local function buildInventory(win)
 			local def = PetCatalog.Get(id)
 			local slot = pets.Slots[id]
 			if not slot then
-				slot = CloudUI.Slot({
+				slot = readableSlot(CloudUI.Slot({
 					Name = "Pet_" .. id,
-					Size = UDim2.fromOffset(80, 80),
+					Size = UDim2.fromOffset(104, 104),
 					Parent = W.Grid,
 					Callback = function()
 						pets.Selected = id
 						refreshInventory()
 					end,
-				})
+				}))
 				pets.Slots[id] = slot
 			end
 			slot.Root.LayoutOrder = index
@@ -1317,19 +2114,21 @@ local function buildInventory(win)
 	-- Items page
 	------------------------------------------------------------------
 	local function buildItemsPage(page)
-		listLayout(page, Enum.FillDirection.Vertical, 8)
+		local list = scroller(page, "ItemList", { Size = UDim2.new(1, 0, 1, 0) })
+		pad(list, 2, 2, 14, 8)
+		listLayout(list, Enum.FillDirection.Vertical, 10)
 		for index, def in ipairs(itemList()) do
-			local row = makeInset(page, "Row_" .. def.Id, {
-				Size = UDim2.new(1, 0, 0, 92),
+			local row = makeInset(list, "Row_" .. def.Id, {
+				Size = UDim2.new(1, 0, 0, 124),
 				LayoutOrder = index,
 			})
-			local slot = CloudUI.Slot({
+			local slot = readableSlot(CloudUI.Slot({
 				Name = "Item_" .. def.Id,
-				Size = UDim2.fromOffset(72, 72),
-				Position = UDim2.fromOffset(10, 10),
+				Size = UDim2.fromOffset(96, 96),
+				Position = UDim2.fromOffset(14, 14),
 				Hotkey = tostring(index),
 				Parent = row,
-			})
+			}))
 			slot.SetContent({
 				Glyph = def.Glyph,
 				Color = def.Color,
@@ -1337,25 +2136,25 @@ local function buildInventory(win)
 				Name = def.Name,
 				Blurb = def.Blurb,
 			})
-			makeText(row, "Name", def.Name, "Title", 22, Theme.Lighten(def.Color, 0.35), {
-				Position = UDim2.fromOffset(96, 8),
-				Size = UDim2.new(1, -330, 0, 28),
+			makeText(row, "Name", def.Name, "Title", 26, Theme.Lighten(def.Color, 0.35), {
+				Position = UDim2.fromOffset(126, 10),
+				Size = UDim2.new(1, -350, 0, 32),
 				TextXAlignment = Enum.TextXAlignment.Left,
 			})
-			makeText(row, "Price", cloudAmount(def.Price) .. " each", "Heading", 16, Colors.Token, {
+			makeText(row, "Price", cloudAmount(def.Price) .. " each", "Heading", 20, Colors.Token, {
 				AnchorPoint = Vector2.new(1, 0),
-				Position = UDim2.new(1, -180, 0, 10),
-				Size = UDim2.fromOffset(130, 24),
+				Position = UDim2.new(1, -206, 0, 12),
+				Size = UDim2.fromOffset(150, 28),
 				TextXAlignment = Enum.TextXAlignment.Right,
 			})
-			local owned = makeText(row, "Owned", "", "Heading", 15, WHITE, {
-				Position = UDim2.fromOffset(96, 37),
-				Size = UDim2.new(1, -290, 0, 20),
+			local owned = makeText(row, "Owned", "", "Heading", 19, WHITE, {
+				Position = UDim2.fromOffset(126, 44),
+				Size = UDim2.new(1, -330, 0, 24),
 				TextXAlignment = Enum.TextXAlignment.Left,
 			})
-			makeText(row, "Blurb", def.Blurb or "", "Body", 13, MUTED, {
-				Position = UDim2.fromOffset(96, 58),
-				Size = UDim2.new(1, -290, 0, 30),
+			makeText(row, "Blurb", def.Blurb or "", "Body", 18, MUTED, {
+				Position = UDim2.fromOffset(126, 70),
+				Size = UDim2.new(1, -330, 0, 48),
 				TextWrapped = true,
 				TextXAlignment = Enum.TextXAlignment.Left,
 				TextYAlignment = Enum.TextYAlignment.Top,
@@ -1364,10 +2163,10 @@ local function buildInventory(win)
 				Name = "GetMore",
 				Text = "Get more",
 				Style = "Blue",
-				Size = UDim2.fromOffset(150, 44),
+				Size = UDim2.fromOffset(176, 56),
 				AnchorPoint = Vector2.new(1, 0.5),
-				Position = UDim2.new(1, -12, 0.5, 0),
-				TextSize = 20,
+				Position = UDim2.new(1, -14, 0.5, 0),
+				TextSize = 22,
 				Callback = gotoShopItems,
 				Parent = row,
 			})
@@ -1375,17 +2174,17 @@ local function buildInventory(win)
 		end
 
 		-- the fourth hotbar key is reserved for later
-		local locked = makeInset(page, "LockedRow", {
-			Size = UDim2.new(1, 0, 0, 52),
+		local locked = makeInset(list, "LockedRow", {
+			Size = UDim2.new(1, 0, 0, 58),
 			LayoutOrder = 50,
 		})
-		makeText(locked, "Text", G.Lock .. "  Slot " .. (#itemList() + 1) .. "   More items are coming soon.", "Heading", 16, MUTED, {
+		makeText(locked, "Text", G.Lock .. "  Slot " .. (#itemList() + 1) .. "   More items are coming soon.", "Heading", 19, MUTED, {
 			Position = UDim2.fromOffset(16, 0),
 			Size = UDim2.new(1, -32, 1, 0),
 			TextXAlignment = Enum.TextXAlignment.Left,
 		})
-		makeText(page, "Tip", "Items only work during a match: press 1-" .. #itemList() .. " or tap the hotbar.", "Body", 14, MUTED, {
-			Size = UDim2.new(1, 0, 0, 24),
+		makeText(list, "Tip", "Items only work during a match: press 1-" .. #itemList() .. " or tap the hotbar.", "Body", 18, MUTED, {
+			Size = UDim2.new(1, 0, 0, 28),
 			LayoutOrder = 60,
 		})
 	end
@@ -1416,6 +2215,25 @@ local function buildInventory(win)
 			tabs.Select(tab)
 		end
 	end
+	win.OnLayout = function(_w, _h, narrow, short)
+		local detailW = narrow and K.DETAIL_W_NARROW or K.DETAIL_W
+		if W.Detail then
+			W.Detail.Size = UDim2.new(0, detailW, 1, 0)
+		end
+		if W.Left then
+			W.Left.Size = UDim2.new(1, -(detailW + 12), 1, 0)
+		end
+		if W.View then
+			-- compact cards (landscape phones): a smaller pet, slimmer buttons and no status line, so the
+			-- name stays in view above the pinned buttons
+			W.View.Size = UDim2.new(1, 0, 0, short and 96 or 196)
+			W.Glow.Size = short and UDim2.fromOffset(86, 86) or UDim2.fromOffset(170, 170)
+			W.Buttons.Size = UDim2.new(1, -20, 0, short and 46 or 54)
+			W.Buttons.Position = UDim2.new(0, 10, 1, short and -8 or -36)
+			W.Status.Visible = not short
+			W.InfoScroll.Size = UDim2.new(1, -8, 1, short and -62 or -98)
+		end
+	end
 end
 
 ----------------------------------------------------------------------
@@ -1431,6 +2249,8 @@ function closeOdds()
 		Odds.Gui:Destroy()
 		Odds.Gui = nil
 	end
+	Odds.Holder = nil
+	Odds.Fit = nil
 	syncBackBinding()
 end
 
@@ -1460,14 +2280,15 @@ function openOdds(rouletteId)
 		closeOdds()
 	end)
 
-	local width, height = 620, 500
+	local box = fitBox(K.WIN.Odds[1], K.WIN.Odds[2], K.WIN.Odds[3], K.WIN.Odds[4])
 	local holder = makeFrame(root, "Holder", {
 		AnchorPoint = Vector2.new(0.5, 0.5),
-		Position = UDim2.new(0.5, 0, 0.5, 14),
-		Size = UDim2.fromOffset(width, height),
+		Position = UDim2.fromOffset(box.x, box.y),
+		Size = UDim2.fromOffset(box.w, box.h),
 		ZIndex = 2,
 	})
-	Util.Create("UIScale", { Name = "Fit", Scale = fitScale(width, height), Parent = holder })
+	Odds.Holder = holder
+	Odds.Fit = Util.Create("UIScale", { Name = "Fit", Scale = box.scale, Parent = holder })
 	local panel = CloudUI.Panel({
 		Name = "OddsPanel",
 		Title = roulette.DisplayName .. " Odds",
@@ -1484,23 +2305,15 @@ function openOdds(rouletteId)
 	local pop = Util.Create("UIScale", { Name = "Pop", Scale = 0.88, Parent = panel.Root })
 	tween(pop, 0.2, { Scale = 1 }, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
 
-	local scroll = Util.Create("ScrollingFrame", {
-		Name = "OddsList",
-		BackgroundTransparency = 1,
-		BorderSizePixel = 0,
+	local scroll = scroller(panel.Content, "OddsList", {
 		Position = UDim2.fromOffset(8, 8),
 		Size = UDim2.new(1, -16, 1, -16),
-		CanvasSize = UDim2.new(0, 0, 0, 0),
-		AutomaticCanvasSize = Enum.AutomaticSize.Y,
-		ScrollingDirection = Enum.ScrollingDirection.Y,
-		ScrollBarThickness = 8,
-		ScrollBarImageColor3 = Colors.FrameTop or Colors.Cloud,
-		Parent = panel.Content,
 	})
-	pad(scroll, 4, 2, 6, 6)
+	pad(scroll, 6, 4, 14, 8)
 	listLayout(scroll, Enum.FillDirection.Vertical, 10)
-	makeText(scroll, "Note", "Chance per spin. Pets of the same rarity share that rarity's chance equally.", "Body", 14, MUTED, {
-		Size = UDim2.new(1, -8, 0, 36),
+	makeText(scroll, "Note", "Chance per spin. Pets of the same rarity share that rarity's chance equally.", "Body", 18, MUTED, {
+		Size = UDim2.new(1, -8, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
 		TextWrapped = true,
 		LayoutOrder = 0,
 	})
@@ -1521,31 +2334,39 @@ function openOdds(rouletteId)
 	table.sort(groups, function(a, b)
 		return rarityOrder(a.Rarity) > rarityOrder(b.Rarity)
 	end)
+	local hasElements = false
+	for _, def in ipairs(PetCatalog.Pets or {}) do
+		if #elementsOf(def) > 0 then
+			hasElements = true
+			break
+		end
+	end
+	local cellH = hasElements and 156 or 128
 
-	-- built a few pets per frame so opening the popup never hitches
+	-- built under the per-frame time budget (Low detail tiles) so opening the popup never hitches
 	task.spawn(function()
-		local built = 0
+		local budget = Warm.Budget()
 		for index, group in ipairs(groups) do
 			if Odds.Token ~= mine then
 				return
 			end
 			local color = CloudUI.RarityColor(group.Rarity)
 			local header = makeFrame(scroll, "Header_" .. group.Rarity, {
-				Size = UDim2.new(1, -8, 0, 36),
+				Size = UDim2.new(1, -8, 0, 44),
 				BackgroundTransparency = 0,
 				BackgroundColor3 = Theme.Darken(color, 0.35),
 				LayoutOrder = index * 2 - 1,
 			})
 			corner(header, 10)
 			stroke(header, NAVY, 3, 0)
-			makeText(header, "Rarity", group.Rarity, "Title", 21, Theme.Lighten(color, 0.4), {
-				Position = UDim2.fromOffset(12, 0),
+			makeText(header, "Rarity", group.Rarity, "Title", 24, rarityText({ Rarity = group.Rarity }), {
+				Position = UDim2.fromOffset(14, 0),
 				Size = UDim2.new(0.5, 0, 1, 0),
 				TextXAlignment = Enum.TextXAlignment.Left,
 			})
-			makeText(header, "Chance", percentText(group.Total) .. "  total", "Heading", 16, WHITE, {
+			makeText(header, "Chance", percentText(group.Total) .. "  total", "Heading", 19, WHITE, {
 				AnchorPoint = Vector2.new(1, 0),
-				Position = UDim2.new(1, -12, 0, 0),
+				Position = UDim2.new(1, -14, 0, 0),
 				Size = UDim2.new(0.5, 0, 1, 0),
 				TextXAlignment = Enum.TextXAlignment.Right,
 			})
@@ -1556,8 +2377,8 @@ function openOdds(rouletteId)
 				LayoutOrder = index * 2,
 			})
 			Util.Create("UIGridLayout", {
-				CellSize = UDim2.fromOffset(84, 100),
-				CellPadding = UDim2.fromOffset(6, 6),
+				CellSize = UDim2.fromOffset(110, cellH),
+				CellPadding = UDim2.fromOffset(8, 8),
 				SortOrder = Enum.SortOrder.LayoutOrder,
 				Parent = cells,
 			})
@@ -1565,28 +2386,44 @@ function openOdds(rouletteId)
 				if Odds.Token ~= mine then
 					return
 				end
+				if not Warm.Allows(budget) then
+					task.wait()
+					if Odds.Token ~= mine then
+						return
+					end
+					budget = Warm.Budget()
+				end
 				local def = PetCatalog.Get(entry.PetId)
 				local cell = makeFrame(cells, "Cell_" .. tostring(entry.PetId), { LayoutOrder = cellIndex })
 				if def then
-					local slot = CloudUI.Slot({
+					local slot = readableSlot(CloudUI.Slot({
 						Name = "OddsPet",
-						Size = UDim2.fromOffset(66, 66),
+						Size = UDim2.fromOffset(88, 88),
 						AnchorPoint = Vector2.new(0.5, 0),
 						Position = UDim2.new(0.5, 0, 0, 2),
 						Parent = cell,
-					})
-					slot.SetContent({ Pet = def, RarityColor = color, Name = def.Name, Blurb = def.Blurb })
+					}))
+					slot.SetContent({ Pet = def, Detail = K.ODDS_DETAIL, RarityColor = color, Name = def.Name, Blurb = def.Blurb })
 					table.insert(Odds.Slots, slot)
+					local elements = elementsOf(def)
+					if #elements > 0 then
+						local row = makeFrame(cell, "Elements", {
+							AnchorPoint = Vector2.new(0.5, 1),
+							Position = UDim2.new(0.5, 0, 1, -30),
+							Size = UDim2.new(1, 0, 0, 24),
+						})
+						listLayout(row, Enum.FillDirection.Horizontal, 3, Enum.HorizontalAlignment.Center, Enum.VerticalAlignment.Center)
+						for i, element in ipairs(elements) do
+							elementPill(row, element, 18, i)
+						end
+					end
 				end
-				makeText(cell, "Percent", percentText(entry.Chance), "Heading", 14, WHITE, {
+				makeText(cell, "Percent", percentText(entry.Chance), "Heading", 19, WHITE, {
 					AnchorPoint = Vector2.new(0.5, 1),
 					Position = UDim2.new(0.5, 0, 1, -2),
-					Size = UDim2.new(1, 0, 0, 20),
+					Size = UDim2.new(1, 0, 0, 24),
 				})
-				built = built + 1
-				if built % 3 == 0 then
-					task.wait()
-				end
+				budget.Count = budget.Count + 1
 			end
 		end
 	end)
@@ -1606,6 +2443,317 @@ local function bestRarityOf(roulette)
 	return bestId
 end
 
+local function buildRouletteCard(shop, parent, roulette, index)
+	local color = roulette.Color
+	local card = makeFrame(parent, "Roulette_" .. roulette.Id, {
+		Size = UDim2.new(0.25, -9, 1, 0),
+		BackgroundColor3 = WHITE,
+		BackgroundTransparency = 0,
+		LayoutOrder = index,
+	})
+	corner(card, 16)
+	local cardStroke = stroke(card, NAVY, 4, 0)
+	Theme.Gradient(card, Theme.Darken(color, 0.28), Theme.Darken(color, 0.7), 90)
+
+	-- name banner
+	local banner = makeFrame(card, "Banner", {
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 10),
+		Size = UDim2.new(1, -18, 0, 54),
+		BackgroundTransparency = 0,
+		BackgroundColor3 = Theme.Lighten(color, 0.1),
+	})
+	corner(banner, 12)
+	stroke(banner, NAVY, 3, 0)
+	local bannerText = makeText(banner, "Name", roulette.DisplayName, "Title", 24, WHITE, {
+		Position = UDim2.fromOffset(8, 0),
+		Size = UDim2.new(1, -16, 1, 0),
+		TextScaled = true,
+		TextWrapped = true,
+		TextStrokeColor3 = Theme.Darken(color, 0.65),
+	})
+	Util.Create("UITextSizeConstraint", { MaxTextSize = 24, MinTextSize = 16, Parent = bannerText })
+
+	-- the roulette "machine": glossy dome on a base
+	local base = makeFrame(card, "Base", {
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 176),
+		Size = UDim2.fromOffset(150, 18),
+		BackgroundTransparency = 0,
+		BackgroundColor3 = Theme.Darken(color, 0.55),
+	})
+	corner(base, 9)
+	stroke(base, NAVY, 3, 0)
+	local dome = makeFrame(card, "Dome", {
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 72),
+		Size = UDim2.fromOffset(120, 120),
+		BackgroundTransparency = 0,
+		BackgroundColor3 = WHITE,
+	})
+	round(dome)
+	stroke(dome, NAVY, 4, 0)
+	Theme.Gradient(dome, Theme.Lighten(color, 0.5), Theme.Darken(color, 0.08), 90)
+	local shine = makeFrame(dome, "Shine", {
+		Position = UDim2.fromScale(0.16, 0.1),
+		Size = UDim2.fromScale(0.36, 0.2),
+		BackgroundTransparency = 0.6,
+		BackgroundColor3 = WHITE,
+		Rotation = -28,
+	})
+	round(shine)
+	local mark = makeText(dome, "Mark", "?", "Title", 64, WHITE, {
+		Size = UDim2.new(1, 0, 1, 0),
+		ZIndex = 3,
+		TextStrokeTransparency = 0,
+		TextStrokeColor3 = Theme.Darken(color, 0.65),
+	})
+	table.insert(
+		shop.Bobs,
+		TweenService:Create(
+			mark,
+			TweenInfo.new(1.3, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
+			{ Position = UDim2.new(0, 0, 0, -7) }
+		)
+	)
+
+	local price = makeText(card, "Price", cloudAmount(roulette.Price), "Display", 34, Colors.Token, {
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 200),
+		Size = UDim2.new(1, -12, 0, 40),
+	})
+	local best = bestRarityOf(roulette)
+	local bestLabel = nil
+	if best then
+		bestLabel = makeText(card, "Best", "Up to " .. best, "Heading", 19, rarityText({ Rarity = best }), {
+			AnchorPoint = Vector2.new(0.5, 0),
+			Position = UDim2.new(0.5, 0, 0, 242),
+			Size = UDim2.new(1, -12, 0, 24),
+			TextScaled = true,
+		})
+		Util.Create("UITextSizeConstraint", { MaxTextSize = 19, MinTextSize = 15, Parent = bestLabel })
+	end
+	local dots = makeFrame(card, "RarityDots", {
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 272),
+		Size = UDim2.new(1, -12, 0, 18),
+	})
+	listLayout(dots, Enum.FillDirection.Horizontal, 6, Enum.HorizontalAlignment.Center, Enum.VerticalAlignment.Center)
+	for _, r in ipairs(Config.Rarities) do
+		local weight = roulette.Odds[r.Id]
+		if type(weight) == "number" and weight > 0 then
+			local dot = makeFrame(dots, "Dot_" .. r.Id, {
+				Size = UDim2.fromOffset(16, 16),
+				BackgroundTransparency = 0,
+				BackgroundColor3 = r.Color,
+				LayoutOrder = r.Order,
+			})
+			round(dot)
+			stroke(dot, NAVY, 2, 0)
+		end
+	end
+
+	local oddsButton = CloudUI.Button({
+		Name = "Odds",
+		Text = "Odds",
+		Style = "Blue",
+		Size = UDim2.fromOffset(136, 46),
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 298),
+		TextSize = 21,
+		Callback = function()
+			openOdds(roulette.Id)
+		end,
+		Parent = card,
+	})
+	local spinButton = CloudUI.Button({
+		Name = "Spin",
+		Text = "Spin",
+		Style = "Green",
+		Size = UDim2.new(1, -36, 0, 62),
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 352),
+		TextSize = 30,
+		Callback = function()
+			requestSpin(roulette.Id)
+		end,
+		Parent = card,
+	})
+	Util.Create("UISizeConstraint", { MaxSize = Vector2.new(190, 62), Parent = spinButton })
+	local hint = makeText(card, "Hint", "", "Heading", 18, MUTED, {
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 420),
+		Size = UDim2.new(1, -20, 0, 48),
+		TextWrapped = true,
+		TextYAlignment = Enum.TextYAlignment.Top,
+	})
+	Util.Create("UITextSizeConstraint", { MaxTextSize = 18, MinTextSize = 15, Parent = hint })
+	return {
+		Roulette = roulette,
+		Root = card,
+		Stroke = cardStroke,
+		Spin = spinButton,
+		Hint = hint,
+		Parts = {
+			Banner = banner,
+			Base = base,
+			Dome = dome,
+			Mark = mark,
+			Price = price,
+			Best = bestLabel,
+			Dots = dots,
+			Odds = oddsButton,
+			Spin = spinButton,
+			Hint = hint,
+		},
+	}
+end
+
+-- Sets AnchorPoint / Position / Size (and the optional text alignment) of one card part.
+local function place(inst, anchorX, anchorY, position, size, align)
+	if not inst then
+		return
+	end
+	inst.AnchorPoint = Vector2.new(anchorX, anchorY)
+	inst.Position = position
+	inst.Size = size
+	if align and (inst:IsA("TextLabel") or inst:IsA("TextButton")) then
+		inst.TextXAlignment = align
+	end
+end
+
+-- Roulette card: the tall machine card, or a compact one (short windows: landscape phones) that keeps the
+-- Spin button in view without scrolling.
+local function layoutRouletteCard(card, compact)
+	local P = card.Parts
+	local left, centre = Enum.TextXAlignment.Left, Enum.TextXAlignment.Center
+	if compact then
+		place(P.Banner, 0.5, 0, UDim2.new(0.5, 0, 0, 8), UDim2.new(1, -16, 0, 42))
+		place(P.Dome, 0, 0, UDim2.fromOffset(12, 54), UDim2.fromOffset(66, 66))
+		place(P.Base, 0, 0, UDim2.fromOffset(6, 110), UDim2.fromOffset(78, 12))
+		place(P.Price, 0, 0, UDim2.fromOffset(88, 56), UDim2.new(1, -96, 0, 36), left)
+		place(P.Best, 0, 0, UDim2.fromOffset(88, 94), UDim2.new(1, -96, 0, 22), left)
+		place(P.Odds, 0, 0, UDim2.fromOffset(10, 130), UDim2.fromOffset(92, 48))
+		place(P.Spin, 1, 0, UDim2.new(1, -10, 0, 130), UDim2.new(1, -122, 0, 48))
+		place(P.Hint, 0.5, 0, UDim2.new(0.5, 0, 0, 182), UDim2.new(1, -16, 0, 30))
+		P.Hint.TextScaled = true -- one or two short lines must fit the compact card
+		P.Mark.TextSize = 40
+	else
+		place(P.Banner, 0.5, 0, UDim2.new(0.5, 0, 0, 10), UDim2.new(1, -18, 0, 54))
+		place(P.Dome, 0.5, 0, UDim2.new(0.5, 0, 0, 72), UDim2.fromOffset(120, 120))
+		place(P.Base, 0.5, 0, UDim2.new(0.5, 0, 0, 176), UDim2.fromOffset(150, 18))
+		place(P.Price, 0.5, 0, UDim2.new(0.5, 0, 0, 200), UDim2.new(1, -12, 0, 40), centre)
+		place(P.Best, 0.5, 0, UDim2.new(0.5, 0, 0, 242), UDim2.new(1, -12, 0, 24), centre)
+		place(P.Odds, 0.5, 0, UDim2.new(0.5, 0, 0, 298), UDim2.fromOffset(136, 46))
+		place(P.Spin, 0.5, 0, UDim2.new(0.5, 0, 0, 352), UDim2.new(1, -36, 0, 62))
+		place(P.Hint, 0.5, 0, UDim2.new(0.5, 0, 0, 420), UDim2.new(1, -20, 0, 48))
+		P.Hint.TextScaled = false
+		P.Mark.TextSize = 64
+	end
+	P.Dots.Visible = not compact
+end
+
+local function buildItemCard(parent, def, index, count)
+	local card = makeFrame(parent, "Item_" .. def.Id, {
+		Size = UDim2.new(1 / count, -8, 1, 0),
+		BackgroundColor3 = WHITE,
+		BackgroundTransparency = 0,
+		LayoutOrder = index,
+	})
+	corner(card, 16)
+	stroke(card, NAVY, 4, 0)
+	Theme.Gradient(card, Theme.Darken(def.Color, 0.28), Theme.Darken(def.Color, 0.7), 90)
+
+	local slot = readableSlot(CloudUI.Slot({
+		Name = "ItemSlot",
+		Size = UDim2.fromOffset(104, 104),
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 16),
+		Hotkey = tostring(index),
+		Parent = card,
+	}))
+	slot.SetContent({
+		Glyph = def.Glyph,
+		Color = def.Color,
+		RarityColor = CloudUI.RarityColor(def.Rarity),
+		Name = def.Name,
+		Blurb = def.Blurb,
+	})
+	local nameLabel = makeText(card, "Name", def.Name, "Title", 26, Theme.Lighten(def.Color, 0.4), {
+		Position = UDim2.fromOffset(0, 128),
+		Size = UDim2.new(1, 0, 0, 32),
+	})
+	local blurb = makeText(card, "Blurb", def.Blurb or "", "Body", 18, WHITE, {
+		Position = UDim2.fromOffset(16, 164),
+		Size = UDim2.new(1, -32, 0, 70),
+		TextWrapped = true,
+		TextYAlignment = Enum.TextYAlignment.Top,
+	})
+	local owned = makeText(card, "Owned", "", "Heading", 19, MUTED, {
+		Position = UDim2.fromOffset(0, 238),
+		Size = UDim2.new(1, 0, 0, 24),
+	})
+	local price = makeText(card, "Price", cloudAmount(def.Price), "Display", 32, Colors.Token, {
+		Position = UDim2.fromOffset(0, 264),
+		Size = UDim2.new(1, 0, 0, 38),
+	})
+	local buy = CloudUI.Button({
+		Name = "Buy",
+		Text = "Buy +1",
+		Style = "Green",
+		Size = UDim2.new(1, -40, 0, 58),
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 310),
+		TextSize = 26,
+		Callback = function()
+			if inMatch() then
+				showHint("The shop is closed during a match.", "info")
+				return
+			end
+			fire("BuyItem", def.Id, 1)
+		end,
+		Parent = card,
+	})
+	Util.Create("UISizeConstraint", { MaxSize = Vector2.new(210, 58), Parent = buy })
+	local hint = makeText(card, "Hint", "", "Heading", 18, MUTED, {
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 376),
+		Size = UDim2.new(1, -20, 0, 48),
+		TextWrapped = true,
+		TextYAlignment = Enum.TextYAlignment.Top,
+	})
+	return {
+		Def = def,
+		Slot = slot,
+		Owned = owned,
+		Buy = buy,
+		Hint = hint,
+		Parts = { Slot = slot.Root, Name = nameLabel, Blurb = blurb, Owned = owned, Price = price, Buy = buy, Hint = hint },
+	}
+end
+
+-- Item card: tall, or compact for short windows (the Buy button stays in view).
+local function layoutItemCard(card, compact)
+	local P = card.Parts
+	local left, centre = Enum.TextXAlignment.Left, Enum.TextXAlignment.Center
+	if compact then
+		place(P.Slot, 0, 0, UDim2.fromOffset(12, 12), UDim2.fromOffset(78, 78))
+		place(P.Name, 0, 0, UDim2.fromOffset(100, 10), UDim2.new(1, -108, 0, 30), left)
+		place(P.Owned, 0, 0, UDim2.fromOffset(100, 42), UDim2.new(1, -108, 0, 22), left)
+		place(P.Price, 0, 0, UDim2.fromOffset(100, 64), UDim2.new(1, -108, 0, 30), left)
+		place(P.Buy, 0.5, 0, UDim2.new(0.5, 0, 0, 102), UDim2.new(1, -24, 0, 50))
+		place(P.Hint, 0.5, 0, UDim2.new(0.5, 0, 0, 158), UDim2.new(1, -16, 0, 48))
+	else
+		place(P.Slot, 0.5, 0, UDim2.new(0.5, 0, 0, 16), UDim2.fromOffset(104, 104))
+		place(P.Name, 0, 0, UDim2.fromOffset(0, 128), UDim2.new(1, 0, 0, 32), centre)
+		place(P.Owned, 0, 0, UDim2.fromOffset(0, 238), UDim2.new(1, 0, 0, 24), centre)
+		place(P.Price, 0, 0, UDim2.fromOffset(0, 264), UDim2.new(1, 0, 0, 38), centre)
+		place(P.Buy, 0.5, 0, UDim2.new(0.5, 0, 0, 310), UDim2.new(1, -40, 0, 58))
+		place(P.Hint, 0.5, 0, UDim2.new(0.5, 0, 0, 376), UDim2.new(1, -20, 0, 48))
+	end
+	P.Blurb.Visible = not compact
+end
+
 local function buildShop(win)
 	local content = win.Panel.Content
 	local shop = { Cards = {}, ItemCards = {}, Bobs = {} }
@@ -1614,8 +2762,10 @@ local function buildShop(win)
 	local tabs = CloudUI.Tabs({
 		Name = "ShopTabs",
 		Parent = content,
-		Position = UDim2.fromOffset(10, 8),
-		Size = UDim2.new(1, -20, 1, -16),
+		Position = UDim2.fromOffset(12, 10),
+		Size = UDim2.new(1, -24, 1, -20),
+		BarHeight = 50,
+		TextSize = 22,
 		OnSelect = function(name)
 			win.Tab = name
 			updateMenuActive()
@@ -1626,174 +2776,30 @@ local function buildShop(win)
 	-- token balance, right of the tab strip
 	local balance = makeFrame(content, "Balance", {
 		AnchorPoint = Vector2.new(1, 0),
-		Position = UDim2.new(1, -14, 0, 11),
-		Size = UDim2.fromOffset(190, 34),
+		Position = UDim2.new(1, -16, 0, 12),
+		Size = UDim2.fromOffset(230, 44),
 		BackgroundColor3 = Colors.Panel,
-		BackgroundTransparency = 0.08,
+		BackgroundTransparency = 0.05,
 		ZIndex = 8,
 	})
 	round(balance)
 	stroke(balance, NAVY, 3, 0)
-	W.Balance = makeText(balance, "Amount", "", "Display", 22, Colors.Token, {
-		Position = UDim2.fromOffset(6, 0),
-		Size = UDim2.new(1, -12, 1, 0),
+	W.Balance = makeText(balance, "Amount", "", "Display", 26, Colors.Token, {
+		Position = UDim2.fromOffset(8, 0),
+		Size = UDim2.new(1, -16, 1, 0),
+		TextScaled = true,
 		ZIndex = 9,
 	})
-
-	------------------------------------------------------------------
-	-- Roulette cards
-	------------------------------------------------------------------
-	local function buildRouletteCard(parent, roulette, index)
-		local color = roulette.Color
-		local card = makeFrame(parent, "Roulette_" .. roulette.Id, {
-			Size = UDim2.fromOffset(186, 424),
-			BackgroundColor3 = WHITE,
-			BackgroundTransparency = 0,
-			LayoutOrder = index,
-		})
-		corner(card, 14)
-		local cardStroke = stroke(card, NAVY, 4, 0)
-		Theme.Gradient(card, Theme.Darken(color, 0.3), Theme.Darken(color, 0.7), 90)
-
-		-- name banner
-		local banner = makeFrame(card, "Banner", {
-			AnchorPoint = Vector2.new(0.5, 0),
-			Position = UDim2.new(0.5, 0, 0, 8),
-			Size = UDim2.new(1, -16, 0, 46),
-			BackgroundTransparency = 0,
-			BackgroundColor3 = Theme.Lighten(color, 0.1),
-		})
-		corner(banner, 10)
-		stroke(banner, NAVY, 3, 0)
-		local bannerText = makeText(banner, "Name", roulette.DisplayName, "Title", 20, WHITE, {
-			Position = UDim2.fromOffset(6, 0),
-			Size = UDim2.new(1, -12, 1, 0),
-			TextScaled = true,
-			TextWrapped = true,
-			TextStrokeTransparency = 0.1,
-			TextStrokeColor3 = Theme.Darken(color, 0.65),
-		})
-		Util.Create("UITextSizeConstraint", { MaxTextSize = 22, MinTextSize = 10, Parent = bannerText })
-
-		-- the roulette "machine": glossy dome on a base
-		local base = makeFrame(card, "Base", {
-			AnchorPoint = Vector2.new(0.5, 0),
-			Position = UDim2.new(0.5, 0, 0, 142),
-			Size = UDim2.fromOffset(124, 16),
-			BackgroundTransparency = 0,
-			BackgroundColor3 = Theme.Darken(color, 0.55),
-		})
-		corner(base, 8)
-		stroke(base, NAVY, 3, 0)
-		local dome = makeFrame(card, "Dome", {
-			AnchorPoint = Vector2.new(0.5, 0),
-			Position = UDim2.new(0.5, 0, 0, 58),
-			Size = UDim2.fromOffset(100, 100),
-			BackgroundTransparency = 0,
-			BackgroundColor3 = WHITE,
-		})
-		round(dome)
-		stroke(dome, NAVY, 4, 0)
-		Theme.Gradient(dome, Theme.Lighten(color, 0.5), Theme.Darken(color, 0.08), 90)
-		local shine = makeFrame(dome, "Shine", {
-			Position = UDim2.fromScale(0.16, 0.1),
-			Size = UDim2.fromScale(0.36, 0.2),
-			BackgroundTransparency = 0.6,
-			BackgroundColor3 = WHITE,
-			Rotation = -28,
-		})
-		round(shine)
-		local mark = makeText(dome, "Mark", "?", "Title", 54, WHITE, {
-			Size = UDim2.new(1, 0, 1, 0),
-			ZIndex = 3,
-			TextStrokeTransparency = 0,
-			TextStrokeColor3 = Theme.Darken(color, 0.65),
-		})
-		table.insert(
-			shop.Bobs,
-			TweenService:Create(
-				mark,
-				TweenInfo.new(1.3, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
-				{ Position = UDim2.new(0, 0, 0, -6) }
-			)
-		)
-
-		makeText(card, "Price", cloudAmount(roulette.Price), "Display", 28, Colors.Token, {
-			AnchorPoint = Vector2.new(0.5, 0),
-			Position = UDim2.new(0.5, 0, 0, 168),
-			Size = UDim2.new(1, -12, 0, 34),
-			TextStrokeTransparency = 0.1,
-		})
-
-		local best = bestRarityOf(roulette)
-		if best then
-			makeText(card, "Best", "Up to " .. best, "Heading", 15, Theme.Lighten(CloudUI.RarityColor(best), 0.35), {
-				AnchorPoint = Vector2.new(0.5, 0),
-				Position = UDim2.new(0.5, 0, 0, 204),
-				Size = UDim2.new(1, -12, 0, 22),
-			})
-		end
-		local dots = makeFrame(card, "RarityDots", {
-			AnchorPoint = Vector2.new(0.5, 0),
-			Position = UDim2.new(0.5, 0, 0, 230),
-			Size = UDim2.new(1, -12, 0, 14),
-		})
-		listLayout(dots, Enum.FillDirection.Horizontal, 5, Enum.HorizontalAlignment.Center, Enum.VerticalAlignment.Center)
-		for _, r in ipairs(Config.Rarities) do
-			local weight = roulette.Odds[r.Id]
-			if type(weight) == "number" and weight > 0 then
-				local dot = makeFrame(dots, "Dot_" .. r.Id, {
-					Size = UDim2.fromOffset(14, 14),
-					BackgroundTransparency = 0,
-					BackgroundColor3 = r.Color,
-					LayoutOrder = r.Order,
-				})
-				round(dot)
-				stroke(dot, NAVY, 2, 0)
-			end
-		end
-
-		CloudUI.Button({
-			Name = "Odds",
-			Text = "Odds",
-			Style = "Blue",
-			Size = UDim2.fromOffset(110, 34),
-			AnchorPoint = Vector2.new(0.5, 0),
-			Position = UDim2.new(0.5, 0, 0, 254),
-			TextSize = 18,
-			Callback = function()
-				openOdds(roulette.Id)
-			end,
-			Parent = card,
-		})
-		local spinButton = CloudUI.Button({
-			Name = "Spin",
-			Text = "Spin",
-			Style = "Green",
-			Size = UDim2.fromOffset(150, 54),
-			AnchorPoint = Vector2.new(0.5, 0),
-			Position = UDim2.new(0.5, 0, 0, 298),
-			TextSize = 28,
-			Callback = function()
-				requestSpin(roulette.Id)
-			end,
-			Parent = card,
-		})
-		local hint = makeText(card, "Hint", "", "Heading", 13, MUTED, {
-			AnchorPoint = Vector2.new(0.5, 0),
-			Position = UDim2.new(0.5, 0, 0, 360),
-			Size = UDim2.new(1, -20, 0, 50),
-			TextWrapped = true,
-			TextYAlignment = Enum.TextYAlignment.Top,
-		})
-		return { Roulette = roulette, Root = card, Stroke = cardStroke, Spin = spinButton, Hint = hint }
-	end
+	Util.Create("UITextSizeConstraint", { MaxTextSize = 26, MinTextSize = 16, Parent = W.Balance })
 
 	local function buildRoulettePage(page)
-		local row = makeFrame(page, "Row", { Size = UDim2.new(1, 0, 1, 0) })
+		local scroll = scroller(page, "Cards", { Size = UDim2.new(1, 0, 1, 0) })
+		pad(scroll, 2, 2, 12, 6)
+		local row = makeFrame(scroll, "Row", { Size = UDim2.new(1, 0, 0, K.CARD_H) })
+		W.RouletteRow = row
 		listLayout(row, Enum.FillDirection.Horizontal, 12, Enum.HorizontalAlignment.Center, Enum.VerticalAlignment.Top)
 		for index, roulette in ipairs(Config.Roulettes) do
-			shop.Cards[roulette.Id] = buildRouletteCard(row, roulette, index)
+			shop.Cards[roulette.Id] = buildRouletteCard(shop, row, roulette, index)
 		end
 	end
 
@@ -1817,7 +2823,7 @@ local function buildShop(win)
 			elseif short > 0 then
 				disabled = true
 				hint = "Need " .. commas(short) .. " " .. G.Cloud .. " more"
-				hintColor = Theme.Lighten(BAD, 0.3)
+				hintColor = Theme.Lighten(BAD, 0.35)
 			end
 			card.Spin.Text = label
 			CloudUI.SetDisabled(card.Spin, disabled)
@@ -1826,91 +2832,22 @@ local function buildShop(win)
 		end
 	end
 
-	------------------------------------------------------------------
-	-- Item cards
-	------------------------------------------------------------------
-	local function buildItemCard(parent, def, index)
-		local card = makeFrame(parent, "Item_" .. def.Id, {
-			Size = UDim2.fromOffset(254, 392),
-			BackgroundColor3 = WHITE,
-			BackgroundTransparency = 0,
-			LayoutOrder = index,
-		})
-		corner(card, 14)
-		stroke(card, NAVY, 4, 0)
-		Theme.Gradient(card, Theme.Darken(def.Color, 0.3), Theme.Darken(def.Color, 0.7), 90)
-
-		local slot = CloudUI.Slot({
-			Name = "ItemSlot",
-			Size = UDim2.fromOffset(96, 96),
-			AnchorPoint = Vector2.new(0.5, 0),
-			Position = UDim2.new(0.5, 0, 0, 16),
-			Hotkey = tostring(index),
-			Parent = card,
-		})
-		slot.SetContent({
-			Glyph = def.Glyph,
-			Color = def.Color,
-			RarityColor = CloudUI.RarityColor(def.Rarity),
-			Name = def.Name,
-			Blurb = def.Blurb,
-		})
-		makeText(card, "Name", def.Name, "Title", 24, Theme.Lighten(def.Color, 0.4), {
-			Position = UDim2.fromOffset(0, 122),
-			Size = UDim2.new(1, 0, 0, 32),
-			TextStrokeTransparency = 0.1,
-		})
-		makeText(card, "Blurb", def.Blurb or "", "Body", 14, WHITE, {
-			Position = UDim2.fromOffset(16, 156),
-			Size = UDim2.new(1, -32, 0, 66),
-			TextWrapped = true,
-			TextYAlignment = Enum.TextYAlignment.Top,
-		})
-		local owned = makeText(card, "Owned", "", "Heading", 16, MUTED, {
-			Position = UDim2.fromOffset(0, 226),
-			Size = UDim2.new(1, 0, 0, 22),
-		})
-		makeText(card, "Price", cloudAmount(def.Price), "Display", 28, Colors.Token, {
-			Position = UDim2.fromOffset(0, 250),
-			Size = UDim2.new(1, 0, 0, 34),
-			TextStrokeTransparency = 0.1,
-		})
-		local buy = CloudUI.Button({
-			Name = "Buy",
-			Text = "Buy +1",
-			Style = "Green",
-			Size = UDim2.fromOffset(170, 52),
-			AnchorPoint = Vector2.new(0.5, 0),
-			Position = UDim2.new(0.5, 0, 0, 294),
-			TextSize = 24,
-			Callback = function()
-				if inMatch() then
-					showHint("The shop is closed during a match.", "info")
-					return
-				end
-				fire("BuyItem", def.Id, 1)
-			end,
-			Parent = card,
-		})
-		local hint = makeText(card, "Hint", "", "Heading", 13, MUTED, {
-			AnchorPoint = Vector2.new(0.5, 0),
-			Position = UDim2.new(0.5, 0, 0, 350),
-			Size = UDim2.new(1, -20, 0, 36),
-			TextWrapped = true,
-			TextYAlignment = Enum.TextYAlignment.Top,
-		})
-		return { Def = def, Slot = slot, Owned = owned, Buy = buy, Hint = hint }
-	end
-
 	local function buildItemsPage(page)
-		local row = makeFrame(page, "Row", { Size = UDim2.new(1, 0, 0, 392) })
+		local scroll = scroller(page, "Cards", { Size = UDim2.new(1, 0, 1, 0) })
+		pad(scroll, 2, 2, 12, 6)
+		listLayout(scroll, Enum.FillDirection.Vertical, 10)
+		local list = itemList()
+		local row = makeFrame(scroll, "Row", { Size = UDim2.new(1, 0, 0, K.ITEM_CARD_H), LayoutOrder = 1 })
+		W.ItemRow = row
 		listLayout(row, Enum.FillDirection.Horizontal, 12, Enum.HorizontalAlignment.Center, Enum.VerticalAlignment.Top)
-		for index, def in ipairs(itemList()) do
-			shop.ItemCards[def.Id] = buildItemCard(row, def, index)
+		for index, def in ipairs(list) do
+			shop.ItemCards[def.Id] = buildItemCard(row, def, index, math.max(3, #list))
 		end
-		makeText(page, "Tip", "Items only work during a match. Use them from the hotbar with keys 1-" .. #itemList() .. " or by tapping.", "Body", 14, MUTED, {
-			Position = UDim2.fromOffset(0, 398),
-			Size = UDim2.new(1, 0, 0, 26),
+		makeText(scroll, "Tip", "Items only work during a match. Use them from the hotbar with keys 1-" .. #list .. " or by tapping.", "Body", 18, MUTED, {
+			Size = UDim2.new(1, 0, 0, 0),
+			AutomaticSize = Enum.AutomaticSize.Y,
+			TextWrapped = true,
+			LayoutOrder = 2,
 		})
 	end
 
@@ -1935,7 +2872,7 @@ local function buildShop(win)
 			elseif tokens < card.Def.Price then
 				disabled = true
 				hint = "Need " .. commas(card.Def.Price - tokens) .. " " .. G.Cloud .. " more"
-				hintColor = Theme.Lighten(BAD, 0.3)
+				hintColor = Theme.Lighten(BAD, 0.35)
 			end
 			card.Buy.Text = label
 			CloudUI.SetDisabled(card.Buy, disabled)
@@ -1968,6 +2905,22 @@ local function buildShop(win)
 		refreshRouletteCards()
 		refreshItemCards()
 	end
+	-- compact cards when the tall ones would not fit the page (landscape phones)
+	win.OnLayout = function(_w, h)
+		local compact = h < K.SHOP_COMPACT
+		for _, card in pairs(shop.Cards) do
+			layoutRouletteCard(card, compact)
+		end
+		for _, card in pairs(shop.ItemCards) do
+			layoutItemCard(card, compact)
+		end
+		if W.RouletteRow then
+			W.RouletteRow.Size = UDim2.new(1, 0, 0, compact and K.CARD_H_SHORT or K.CARD_H)
+		end
+		if W.ItemRow then
+			W.ItemRow.Size = UDim2.new(1, 0, 0, compact and K.ITEM_CARD_H_SHORT or K.ITEM_CARD_H)
+		end
+	end
 	win.OnOpen = function(args)
 		local tab = normalizeTab("Shop", args.Tab)
 		if not tab and type(args.RouletteId) == "string" then
@@ -1997,110 +2950,117 @@ local function buildStats(win)
 	local content = win.Panel.Content
 	local tiles = {} -- key -> value label
 	local rows = {} -- difficulty id -> time label
-	local perksLabel
 
 	-- left: stat tiles + pet perks
-	local left = makeFrame(content, "Left", {
+	local left = scroller(content, "Left", {
 		Position = UDim2.fromOffset(14, 14),
-		Size = UDim2.new(0, 360, 1, -28),
+		Size = UDim2.new(0.55, -21, 1, -28),
 	})
-	local grid = makeFrame(left, "Tiles", { Size = UDim2.new(1, 0, 0, 320) })
+	pad(left, 2, 2, 12, 6)
+	listLayout(left, Enum.FillDirection.Vertical, 10)
+	local grid = makeFrame(left, "Tiles", {
+		Size = UDim2.new(1, 0, 0, 4 * 94 + 3 * 10),
+		LayoutOrder = 1,
+	})
 	Util.Create("UIGridLayout", {
-		CellSize = UDim2.fromOffset(176, 74),
-		CellPadding = UDim2.fromOffset(8, 8),
+		CellSize = UDim2.new(0.5, -5, 0, 94),
+		CellPadding = UDim2.fromOffset(10, 10),
 		SortOrder = Enum.SortOrder.LayoutOrder,
 		Parent = grid,
 	})
 	local TILES = {
 		{ "Matches", "Matches played", WHITE },
-		{ "Wins", "Victories", Theme.Lighten(GOOD, 0.2) },
+		{ "Wins", "Victories", Theme.Lighten(GOOD, 0.25) },
 		{ "WinRate", "Win rate", WHITE },
 		{ "Tokens", "Cloud tokens", Colors.Token },
 		{ "Earned", "Tokens earned", Colors.Token },
 		{ "Spins", "Roulette spins", WHITE },
-		{ "Found", "Pets discovered", Theme.Lighten(PURPLE, 0.3) },
+		{ "Found", "Pets discovered", Theme.Lighten(PURPLE, 0.35) },
 		{ "Owned", "Pets owned", WHITE },
 	}
 	for index, spec in ipairs(TILES) do
 		local tile = makeInset(grid, "Tile_" .. spec[1], { LayoutOrder = index })
-		local value = makeText(tile, "Value", "0", "Display", 28, spec[3], {
-			Position = UDim2.fromOffset(10, 6),
-			Size = UDim2.new(1, -20, 0, 38),
+		local value = makeText(tile, "Value", "0", "Display", 34, spec[3], {
+			Position = UDim2.fromOffset(14, 8),
+			Size = UDim2.new(1, -28, 0, 42),
 			TextXAlignment = Enum.TextXAlignment.Left,
 			TextScaled = true,
-			TextStrokeTransparency = 0.15,
 		})
-		Util.Create("UITextSizeConstraint", { MaxTextSize = 28, MinTextSize = 12, Parent = value })
-		makeText(tile, "Caption", spec[2], "Heading", 14, MUTED, {
-			Position = UDim2.fromOffset(10, 46),
-			Size = UDim2.new(1, -20, 0, 20),
+		Util.Create("UITextSizeConstraint", { MaxTextSize = 34, MinTextSize = 18, Parent = value })
+		makeText(tile, "Caption", spec[2], "Heading", 18, MUTED, {
+			Position = UDim2.fromOffset(14, 56),
+			Size = UDim2.new(1, -28, 0, 24),
 			TextXAlignment = Enum.TextXAlignment.Left,
 		})
 		tiles[spec[1]] = value
 	end
 
 	local perks = makeInset(left, "Perks", {
-		Position = UDim2.fromOffset(0, 330),
-		Size = UDim2.new(1, 0, 1, -330),
+		Size = UDim2.new(1, 0, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		LayoutOrder = 2,
 	})
-	makeText(perks, "Title", "Pet perks", "Heading", 16, WHITE, {
-		Position = UDim2.fromOffset(12, 6),
-		Size = UDim2.new(1, -24, 0, 22),
+	pad(perks, 14, 10, 14, 12)
+	listLayout(perks, Enum.FillDirection.Vertical, 4)
+	makeText(perks, "Title", "Pet perks", "Heading", 22, WHITE, {
+		Size = UDim2.new(1, 0, 0, 28),
 		TextXAlignment = Enum.TextXAlignment.Left,
+		LayoutOrder = 1,
 	})
-	perksLabel = makeText(perks, "Lines", "", "Body", 14, Theme.Lighten(GOOD, 0.2), {
-		Position = UDim2.fromOffset(12, 30),
-		Size = UDim2.new(1, -24, 1, -34),
+	local perksLabel = makeText(perks, "Lines", "", "Body", 19, Theme.Lighten(GOOD, 0.25), {
+		Size = UDim2.new(1, 0, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
 		TextWrapped = true,
 		TextXAlignment = Enum.TextXAlignment.Left,
-		TextYAlignment = Enum.TextYAlignment.Top,
+		LayoutOrder = 2,
 	})
 
 	-- right: best time per difficulty
 	local right = makeInset(content, "BestTimes", {
 		AnchorPoint = Vector2.new(1, 0),
 		Position = UDim2.new(1, -14, 0, 14),
-		Size = UDim2.new(0, 316, 1, -28),
+		Size = UDim2.new(0.45, -21, 1, -28),
 	})
-	makeText(right, "Title", "Best times", "Title", 24, WHITE, {
-		Position = UDim2.fromOffset(0, 8),
-		Size = UDim2.new(1, 0, 0, 32),
+	local list = scroller(right, "List", {
+		Position = UDim2.fromOffset(6, 6),
+		Size = UDim2.new(1, -12, 1, -12),
 	})
-	local list = makeFrame(right, "List", {
-		Position = UDim2.fromOffset(12, 48),
-		Size = UDim2.new(1, -24, 1, -58),
-	})
+	pad(list, 8, 4, 14, 8)
 	listLayout(list, Enum.FillDirection.Vertical, 8)
+	makeText(list, "Title", "Best times", "Title", 28, WHITE, {
+		Size = UDim2.new(1, 0, 0, 36),
+		LayoutOrder = 0,
+	})
 	for index, difficulty in ipairs(Config.Difficulties) do
 		local row = makeFrame(list, "Row_" .. difficulty.Id, {
-			Size = UDim2.new(1, 0, 0, 56),
+			Size = UDim2.new(1, 0, 0, 66),
 			BackgroundTransparency = 0,
 			BackgroundColor3 = Theme.Darken(difficulty.Color, 0.55),
 			LayoutOrder = index,
 		})
-		corner(row, 10)
+		corner(row, 12)
 		stroke(row, NAVY, 3, 0)
 		local bar = makeFrame(row, "Bar", {
-			Position = UDim2.fromOffset(5, 6),
-			Size = UDim2.new(0, 6, 1, -12),
+			Position = UDim2.fromOffset(6, 8),
+			Size = UDim2.new(0, 7, 1, -16),
 			BackgroundTransparency = 0,
 			BackgroundColor3 = difficulty.Color,
 		})
 		round(bar)
-		makeText(row, "Name", difficulty.DisplayName, "Title", 21, Theme.Lighten(difficulty.Color, 0.45), {
-			Position = UDim2.fromOffset(20, 4),
-			Size = UDim2.new(0.5, -20, 0, 26),
+		makeText(row, "Name", difficulty.DisplayName, "Title", 24, Theme.Lighten(difficulty.Color, 0.45), {
+			Position = UDim2.fromOffset(22, 5),
+			Size = UDim2.new(0.55, -22, 0, 30),
 			TextXAlignment = Enum.TextXAlignment.Left,
 		})
-		makeText(row, "Stars", starText(difficulty.Stars), "Heading", 14, GOLD, {
-			Position = UDim2.fromOffset(20, 30),
-			Size = UDim2.new(0.5, -20, 0, 20),
+		makeText(row, "Stars", starText(difficulty.Stars), "Heading", 18, GOLD, {
+			Position = UDim2.fromOffset(22, 36),
+			Size = UDim2.new(0.55, -22, 0, 24),
 			TextXAlignment = Enum.TextXAlignment.Left,
 		})
-		rows[difficulty.Id] = makeText(row, "Time", "--:--", "Display", 26, WHITE, {
+		rows[difficulty.Id] = makeText(row, "Time", "--:--", "Display", 30, WHITE, {
 			AnchorPoint = Vector2.new(1, 0),
-			Position = UDim2.new(1, -12, 0, 0),
-			Size = UDim2.new(0.5, 0, 1, 0),
+			Position = UDim2.new(1, -14, 0, 0),
+			Size = UDim2.new(0.45, 0, 1, 0),
 			TextXAlignment = Enum.TextXAlignment.Right,
 		})
 	end
@@ -2120,8 +3080,8 @@ local function buildStats(win)
 		tiles.Tokens.Text = cloudAmount(State.Tokens())
 		tiles.Earned.Text = cloudAmount(stats.TokensEarned or 0)
 		tiles.Spins.Text = commas(stats.Spins or 0)
-		local distinct, total = petTotals()
-		tiles.Found.Text = string.format("%d / %d", distinct, #(PetCatalog.Pets or {}))
+		local _, total = petTotals()
+		tiles.Found.Text = string.format("%d / %d", discoveredCount(), catalogTotal())
 		tiles.Owned.Text = commas(total)
 
 		for id, label in pairs(rows) do
@@ -2145,7 +3105,7 @@ local function buildStats(win)
 		end
 		if #lines > 0 then
 			perksLabel.Text = table.concat(lines, "     ")
-			perksLabel.TextColor3 = Theme.Lighten(GOOD, 0.2)
+			perksLabel.TextColor3 = Theme.Lighten(GOOD, 0.25)
 		else
 			perksLabel.Text = "No perks yet. Equip a pet in your inventory!"
 			perksLabel.TextColor3 = MUTED
@@ -2179,11 +3139,14 @@ function requestSpin(rouletteId)
 	if not fire("BuyRoulette", rouletteId) then
 		return
 	end
+	-- the answer takes a round trip: use it to sculpt this pool first
+	Spin.Last = rouletteId
+	Warm.Roulette(rouletteId, true)
 	Spin.Waiting = true
 	Spin.WaitToken = Spin.WaitToken + 1
 	local mine = Spin.WaitToken
 	refreshShopWindow()
-	task.delay(WAIT_TIMEOUT, function()
+	task.delay(K.WAIT_TIMEOUT, function()
 		if Spin.Waiting and Spin.WaitToken == mine then
 			Spin.Waiting = false
 			refreshShopWindow()
@@ -2196,7 +3159,7 @@ end
 local function burst(parent, color, amount, centre)
 	local rng = Random.new()
 	for i = 1, amount do
-		local size = rng:NextInteger(7, 13)
+		local size = rng:NextInteger(8, 15)
 		local pick = i % 3
 		local pieceColor = Theme.Lighten(color, 0.5)
 		if pick == 0 then
@@ -2219,7 +3182,7 @@ local function burst(parent, color, amount, centre)
 			corner(piece, 2)
 		end
 		local angle = rng:NextNumber(0, math.pi * 2)
-		local distance = rng:NextNumber(70, 200)
+		local distance = rng:NextNumber(80, 230)
 		local target = UDim2.new(
 			centre.X.Scale,
 			centre.X.Offset + math.cos(angle) * distance,
@@ -2247,7 +3210,9 @@ function closeStage()
 		stage.Conn = nil
 	end
 	for _, cell in pairs(stage.Cells) do
-		pcall(cell.Viewport.Destroy)
+		if cell.Viewport then
+			pcall(cell.Viewport.Destroy)
+		end
 	end
 	stage.Cells = {}
 	if stage.RevealViewport then
@@ -2276,6 +3241,43 @@ function skipSpin()
 	end
 end
 
+-- Reveal card layout: tall (portrait card) when the screen has the height, else a landscape card.
+local function revealLayout()
+	local factor = screenFactor()
+	local area = guiSize()
+	local tall = (area.Y - 2 * K.MARGIN) / factor >= K.REVEAL.TallH + K.BUMPS
+	if tall then
+		return {
+			Wide = false,
+			W = K.REVEAL.TallW,
+			H = K.REVEAL.TallH,
+			View = UDim2.new(0.5, 0, 0, 150),
+			ViewSize = 260,
+			Name = { UDim2.fromOffset(0, 292), UDim2.new(1, 0, 0, 40), Enum.TextXAlignment.Center },
+			Meta = { UDim2.fromOffset(0, 338), UDim2.new(1, 0, 0, 30), Enum.HorizontalAlignment.Center },
+			Perks = { UDim2.fromOffset(16, 378), UDim2.new(1, -32, 0, 72), Enum.TextXAlignment.Center },
+			Buttons = { UDim2.fromOffset(0, 462), UDim2.new(1, 0, 0, 60), Enum.HorizontalAlignment.Center },
+		}
+	end
+	return {
+		Wide = true,
+		W = K.REVEAL.WideW,
+		H = K.REVEAL.WideH,
+		View = UDim2.new(0, 170, 0.5, 0),
+		ViewSize = 240,
+		Name = { UDim2.fromOffset(340, 14), UDim2.new(1, -356, 0, 42), Enum.TextXAlignment.Left },
+		Meta = { UDim2.fromOffset(340, 62), UDim2.new(1, -356, 0, 30), Enum.HorizontalAlignment.Left },
+		Perks = { UDim2.fromOffset(340, 100), UDim2.new(1, -356, 0, 84), Enum.TextXAlignment.Left },
+		Buttons = { UDim2.fromOffset(340, 196), UDim2.new(1, -356, 0, 60), Enum.HorizontalAlignment.Left },
+	}
+end
+
+local function fitStage(w, h)
+	local area = guiSize()
+	local factor = screenFactor()
+	return Util.Clamp(math.min(factor, (area.X - 2 * K.MARGIN) / w, (area.Y - 2 * K.MARGIN) / h), 0.3, 1.25)
+end
+
 function beginStage(result)
 	local def = PetCatalog.Get(result.PetId)
 	if not def or not gui then
@@ -2289,6 +3291,7 @@ function beginStage(result)
 	Spin.Stage = stage
 	syncBackBinding()
 	closeOdds()
+	closeIndex()
 	refreshShopWindow()
 
 	local root = makeFrame(gui, "RouletteStage", { Size = UDim2.new(1, 0, 1, 0), ZIndex = 20 })
@@ -2307,15 +3310,15 @@ function beginStage(result)
 
 	stage.Relayout = function()
 		if stage.StripFit then
-			stage.StripFit.Scale = fitScale(STAGE_W, STAGE_H)
+			stage.StripFit.Scale = fitStage(K.STAGE.W, K.STAGE.H)
 		end
-		if stage.RevealFit then
-			stage.RevealFit.Scale = fitScale(REVEAL_W, REVEAL_H)
+		if stage.RevealFit and stage.RevealSize then
+			stage.RevealFit.Scale = fitStage(stage.RevealSize[1], stage.RevealSize[2])
 		end
 	end
 
 	------------------------------------------------------------------
-	-- the strip: server-provided list, repaired where it is invalid, with the winner at STRIP.Target
+	-- the strip: server-provided list, repaired where it is invalid, with the winner at K.STRIP.Target
 	------------------------------------------------------------------
 	local pool = {}
 	if roulette and PetCatalog.PossiblePets then
@@ -2333,26 +3336,26 @@ function beginStage(result)
 	end
 	local raw = type(result.Strip) == "table" and result.Strip or {}
 	local strip = {}
-	for i = 1, math.max(#raw, STRIP.MinCells) do
+	for i = 1, math.max(#raw, K.STRIP.MinCells) do
 		local id = raw[i]
 		if type(id) ~= "string" or not PetCatalog.Get(id) then
 			id = randomPetId()
 		end
 		strip[i] = id
 	end
-	local target = STRIP.Target
+	local target = K.STRIP.Target
 	strip[target] = def.Id
-	local cellW = STRIP.Cell
+	local cellW = K.STRIP.Cell
 	local startX = 0
-	local endX = (target - 1) * cellW + cellW / 2 - STRIP.W / 2 + rng:NextNumber(-cellW * 0.26, cellW * 0.26)
+	local endX = (target - 1) * cellW + cellW / 2 - K.STRIP.W / 2 + rng:NextNumber(-cellW * 0.26, cellW * 0.26)
 
 	local stripHolder = makeFrame(root, "StripHolder", {
 		AnchorPoint = Vector2.new(0.5, 0.5),
-		Position = UDim2.new(0.5, 0, 0.5, 14),
-		Size = UDim2.fromOffset(STAGE_W, STAGE_H),
+		Position = UDim2.new(0.5, 0, 0.5, 6),
+		Size = UDim2.fromOffset(K.STAGE.W, K.STAGE.H),
 		ZIndex = 2,
 	})
-	stage.StripFit = Util.Create("UIScale", { Name = "Fit", Scale = fitScale(STAGE_W, STAGE_H), Parent = stripHolder })
+	stage.StripFit = Util.Create("UIScale", { Name = "Fit", Scale = fitStage(K.STAGE.W, K.STAGE.H), Parent = stripHolder })
 	local stripPanel = CloudUI.Panel({
 		Name = "StripPanel",
 		Title = roulette and roulette.DisplayName or "Roulette",
@@ -2367,33 +3370,32 @@ function beginStage(result)
 	tween(stripPop, 0.32, { Scale = 1 }, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
 	local sc = stripPanel.Content
 
-	local pointer = makeText(sc, "Pointer", G.Down, "Title", 30, GOLD, {
+	local pointer = makeText(sc, "Pointer", G.Down, "Title", 36, GOLD, {
 		AnchorPoint = Vector2.new(0.5, 0),
 		Position = UDim2.new(0.5, 0, 0, 0),
-		Size = UDim2.fromOffset(44, 36),
+		Size = UDim2.fromOffset(50, 40),
 		ZIndex = 7,
-		TextStrokeTransparency = 0,
 	})
 	local clip = makeFrame(sc, "StripClip", {
 		AnchorPoint = Vector2.new(0.5, 0),
-		Position = UDim2.new(0.5, 0, 0, 36),
-		Size = UDim2.fromOffset(STRIP.W, STRIP.H),
+		Position = UDim2.new(0.5, 0, 0, 40),
+		Size = UDim2.fromOffset(K.STRIP.W, K.STRIP.H),
 		BackgroundTransparency = 0.35,
 		BackgroundColor3 = Color3.fromRGB(14, 22, 58),
 		ClipsDescendants = true,
 		ZIndex = 2,
 	})
-	corner(clip, 12)
+	corner(clip, 14)
 	stroke(clip, WELL_EDGE, 3, 0)
 	local band = makeFrame(clip, "Band", {
 		AnchorPoint = Vector2.new(0.5, 0.5),
 		Position = UDim2.new(0.5, 0, 0.5, 0),
-		Size = UDim2.fromOffset(cellW, STRIP.H - 6),
+		Size = UDim2.fromOffset(cellW, K.STRIP.H - 6),
 		BackgroundTransparency = 0.88,
 		BackgroundColor3 = GOLD,
 		ZIndex = 5,
 	})
-	corner(band, 12)
+	corner(band, 14)
 	stroke(band, GOLD, 3, 0)
 	for i = 1, 2 do
 		local name = "FadeRight"
@@ -2405,84 +3407,113 @@ function beginStage(result)
 		local fade = makeFrame(clip, name, {
 			AnchorPoint = Vector2.new(i - 1, 0),
 			Position = UDim2.new(i - 1, 0, 0, 0),
-			Size = UDim2.new(0, 90, 1, 0),
+			Size = UDim2.new(0, 110, 1, 0),
 			BackgroundTransparency = 0,
 			BackgroundColor3 = Color3.fromRGB(14, 22, 58),
 			ZIndex = 6,
 		})
 		Util.Create("UIGradient", { Transparency = sequence, Parent = fade })
 	end
-	local status = makeText(sc, "Status", "Spinning...", "Heading", 18, MUTED, {
-		Position = UDim2.fromOffset(14, 198),
-		Size = UDim2.new(1, -140, 0, 30),
+	local status = makeText(sc, "Status", "Spinning...", "Heading", 22, MUTED, {
+		Position = UDim2.fromOffset(18, 242),
+		Size = UDim2.new(1, -170, 0, 40),
 		TextXAlignment = Enum.TextXAlignment.Left,
 	})
 	CloudUI.Button({
 		Name = "Skip",
 		Text = "Skip",
 		Style = "Blue",
-		Size = UDim2.fromOffset(96, 32),
+		Size = UDim2.fromOffset(126, 46),
 		AnchorPoint = Vector2.new(1, 0),
-		Position = UDim2.new(1, -10, 0, 196),
-		TextSize = 18,
+		Position = UDim2.new(1, -12, 0, 240),
+		TextSize = 21,
 		Callback = function()
 			skipSpin()
 		end,
 		Parent = sc,
 	})
 
-	-- cells are created only while they are near the window (one viewport per visible pet)
+	-- cells are created only while they are near the window (one viewport per visible pet). A cell's frame
+	-- (rarity colours) appears at once; its pet viewport (PetBuilder Low: small, static, moving fast) is attached
+	-- under the per-frame time budget, so a pet that was never sculpted on this client cannot stall the strip.
 	local cells = stage.Cells
 	local function destroyCell(index)
 		local cell = cells[index]
 		if cell then
 			cells[index] = nil
-			pcall(cell.Viewport.Destroy)
+			if cell.Viewport then
+				pcall(cell.Viewport.Destroy)
+			end
 			cell.Frame:Destroy()
 		end
+	end
+	local function attachViewport(cell)
+		if cell.Viewport then
+			return
+		end
+		cell.Viewport = CloudUI.PetViewport(cell.Frame, cell.Def, UDim2.new(1, -8, 1, -24), {
+			Position = UDim2.new(0.5, 0, 0, 4),
+			AnchorPoint = Vector2.new(0.5, 0),
+			Animate = false,
+			Spin = "sway",
+			Detail = K.STRIP_DETAIL,
+			ZIndex = 2,
+		})
 	end
 	local function makeCell(index)
 		local cellDef = PetCatalog.Get(strip[index])
 		local color = rarityOf(cellDef)
 		local frame = makeFrame(clip, "Cell" .. index, {
-			Size = UDim2.fromOffset(cellW - 8, STRIP.H - 16),
+			Size = UDim2.fromOffset(cellW - 10, K.STRIP.H - 18),
 			BackgroundTransparency = 0,
 			BackgroundColor3 = WHITE,
 			ZIndex = 2,
 		})
-		corner(frame, 12)
+		corner(frame, 14)
 		local frameStroke = stroke(frame, color, 3, 0)
 		Theme.Gradient(frame, Colors.Mist, Colors.MistDeep:Lerp(color, 0.5), 90)
-		local viewport = CloudUI.PetViewport(frame, cellDef, UDim2.new(1, -6, 1, -20), {
-			Position = UDim2.new(0.5, 0, 0, 3),
-			AnchorPoint = Vector2.new(0.5, 0),
-			Animate = false,
-			Spin = "sway",
-			ZIndex = 2,
-		})
 		local tag = makeFrame(frame, "RarityBar", {
 			AnchorPoint = Vector2.new(0.5, 1),
-			Position = UDim2.new(0.5, 0, 1, -5),
-			Size = UDim2.new(1, -20, 0, 8),
+			Position = UDim2.new(0.5, 0, 1, -6),
+			Size = UDim2.new(1, -24, 0, 10),
 			BackgroundTransparency = 0,
 			BackgroundColor3 = color,
 		})
 		round(tag)
-		local cell = { Frame = frame, Viewport = viewport, Stroke = frameStroke }
+		local cell = { Frame = frame, Viewport = nil, Stroke = frameStroke, Def = cellDef }
 		cells[index] = cell
 		return cell
 	end
 	local function layoutCells(x)
 		local first = math.max(1, math.floor(x / cellW))
-		local last = math.min(#strip, math.floor((x + STRIP.W) / cellW) + 2)
+		local last = math.min(#strip, math.floor((x + K.STRIP.W) / cellW) + 2)
 		for index = first, last do
 			local cell = cells[index] or makeCell(index)
-			cell.Frame.Position = UDim2.fromOffset(math.floor((index - 1) * cellW - x + 4 + 0.5), 8)
+			cell.Frame.Position = UDim2.fromOffset(math.floor((index - 1) * cellW - x + 5 + 0.5), 9)
 		end
 		for index in pairs(cells) do
 			if index < first or index > last then
 				destroyCell(index)
 			end
+		end
+		-- pet viewports, nearest to the pointer first, under the frame's build budget
+		local budget = Warm.Budget()
+		local centre = (x + K.STRIP.W / 2) / cellW + 0.5
+		while Warm.Allows(budget) do
+			local best, bestD = nil, math.huge
+			for index, cell in pairs(cells) do
+				if not cell.Viewport then
+					local d = math.abs(index - centre)
+					if d < bestD then
+						best, bestD = cell, d
+					end
+				end
+			end
+			if not best then
+				break
+			end
+			attachViewport(best)
+			budget.Count = budget.Count + 1
 		end
 	end
 	layoutCells(startX)
@@ -2531,18 +3562,20 @@ function beginStage(result)
 		tween(flash, 0.55, { BackgroundTransparency = 1 })
 		Debris:AddItem(flash, 0.7)
 
+		local L = revealLayout()
+		stage.RevealSize = { L.W, L.H }
 		local holder = makeFrame(root, "RevealHolder", {
 			AnchorPoint = Vector2.new(0.5, 0.5),
-			Position = UDim2.new(0.5, 0, 0.5, 14),
-			Size = UDim2.fromOffset(REVEAL_W, REVEAL_H),
+			Position = UDim2.new(0.5, 0, 0.5, 6),
+			Size = UDim2.fromOffset(L.W, L.H),
 			ZIndex = 2,
 		})
-		stage.RevealFit = Util.Create("UIScale", { Name = "Fit", Scale = fitScale(REVEAL_W, REVEAL_H), Parent = holder })
+		stage.RevealFit = Util.Create("UIScale", { Name = "Fit", Scale = fitStage(L.W, L.H), Parent = holder })
 		local panel = CloudUI.Panel({
 			Name = "RevealPanel",
 			Title = string.upper(def.Rarity),
 			Closable = true,
-			Accent = rarityColor,
+			Accent = def.Rarity == "Secret" and PURPLE or rarityColor,
 			Size = UDim2.new(1, 0, 1, 0),
 			Position = UDim2.new(0.5, 0, 0.5, 0),
 			AnchorPoint = Vector2.new(0.5, 0.5),
@@ -2555,12 +3588,19 @@ function beginStage(result)
 		tween(pop, 0.5, { Scale = 1 }, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
 		local c = panel.Content
 		local order = rarityOrder(def.Rarity)
+		local glowColor = def.Rarity == "Secret" and PURPLE or rarityColor
 
-		-- slowly turning rays + soft glow discs behind the pet (stronger for rarer pets)
-		local rays = makeFrame(c, "Rays", {
+		-- slowly turning rays + soft glow discs behind the pet (stronger for rarer pets), clipped to the card
+		local fxLayer = makeFrame(c, "RevealFx", {
+			Size = UDim2.new(1, 0, 1, 0),
+			ClipsDescendants = true,
+			ZIndex = 1,
+		})
+		local raySize = L.ViewSize + 80
+		local rays = makeFrame(fxLayer, "Rays", {
 			AnchorPoint = Vector2.new(0.5, 0.5),
-			Position = UDim2.new(0.5, 0, 0, 128),
-			Size = UDim2.fromOffset(330, 330),
+			Position = L.View,
+			Size = UDim2.fromOffset(raySize, raySize),
 			ZIndex = 1,
 		})
 		stage.Rays = rays
@@ -2569,10 +3609,10 @@ function beginStage(result)
 			local ray = makeFrame(rays, "Ray" .. i, {
 				AnchorPoint = Vector2.new(0.5, 0.5),
 				Position = UDim2.new(0.5, 0, 0.5, 0),
-				Size = UDim2.fromOffset(18, 330),
+				Size = UDim2.new(0, 22, 1, 0),
 				Rotation = (i - 1) * 180 / rayCount,
 				BackgroundTransparency = 0.78 - order * 0.015,
-				BackgroundColor3 = Theme.Lighten(rarityColor, 0.4),
+				BackgroundColor3 = Theme.Lighten(glowColor, 0.4),
 				ZIndex = 1,
 			})
 			Util.Create("UIGradient", {
@@ -2585,21 +3625,20 @@ function beginStage(result)
 				Parent = ray,
 			})
 		end
-		local discs = { { 260, 0.86 }, { 204, 0.8 }, { 150, 0.72 } }
-		for i, disc in ipairs(discs) do
-			local glow = makeFrame(c, "Glow" .. i, {
+		for i, disc in ipairs({ { 1.0, 0.86 }, { 0.78, 0.8 }, { 0.58, 0.72 } }) do
+			local glow = makeFrame(fxLayer, "Glow" .. i, {
 				AnchorPoint = Vector2.new(0.5, 0.5),
-				Position = UDim2.new(0.5, 0, 0, 128),
-				Size = UDim2.fromOffset(disc[1], disc[1]),
+				Position = L.View,
+				Size = UDim2.fromOffset(L.ViewSize * disc[1], L.ViewSize * disc[1]),
 				BackgroundTransparency = disc[2],
-				BackgroundColor3 = Theme.Lighten(rarityColor, 0.3),
+				BackgroundColor3 = Theme.Lighten(glowColor, 0.3),
 				ZIndex = 1,
 			})
 			round(glow)
 		end
 
-		stage.RevealViewport = CloudUI.PetViewport(c, def, UDim2.fromOffset(230, 230), {
-			Position = UDim2.new(0.5, 0, 0, 128),
+		stage.RevealViewport = CloudUI.PetViewport(c, def, UDim2.fromOffset(L.ViewSize, L.ViewSize), {
+			Position = L.View,
 			AnchorPoint = Vector2.new(0.5, 0.5),
 			Spin = "spin",
 			Excited = 1,
@@ -2610,39 +3649,44 @@ function beginStage(result)
 		-- NEW! flag (or the stack size for a duplicate)
 		local isNew = result.IsNew == true
 		local flag = makeFrame(c, "Flag", {
-			Position = UDim2.fromOffset(8, 12),
-			Size = UDim2.fromOffset(88, 32),
+			Position = UDim2.fromOffset(10, 14),
+			Size = UDim2.fromOffset(104, 40),
 			Rotation = -10,
 			BackgroundTransparency = 0,
 			BackgroundColor3 = isNew and GOLD or BUTTONS.Blue,
 			ZIndex = 6,
 		})
-		corner(flag, 9)
+		corner(flag, 10)
 		stroke(flag, NAVY, 3, 0)
 		local flagText = "NEW!"
 		if not isNew then
 			flagText = "x" .. tostring(math.floor(tonumber(result.Count) or State.OwnedCount(def.Id)))
 		end
-		makeText(flag, "Text", flagText, "Accent", 20, WHITE, {
+		makeText(flag, "Text", flagText, "Accent", 26, WHITE, {
 			Size = UDim2.new(1, 0, 1, 0),
 			ZIndex = 7,
-			TextStrokeTransparency = 0.1,
 			TextStrokeColor3 = Theme.Darken(isNew and GOLD or BUTTONS.Blue, 0.65),
 		})
 
-		makeText(c, "Name", def.Name, "Title", 30, Theme.Lighten(rarityColor, 0.3), {
-			Position = UDim2.fromOffset(0, 252),
-			Size = UDim2.new(1, 0, 0, 38),
+		local nameLabel = makeText(c, "Name", def.Name, "Title", 34, rarityText(def), {
+			Position = L.Name[1],
+			Size = L.Name[2],
+			TextXAlignment = L.Name[3],
+			TextScaled = true,
 			ZIndex = 4,
-			TextStrokeTransparency = 0.1,
 		})
-		local meta = makeFrame(c, "Meta", { Position = UDim2.fromOffset(0, 294), Size = UDim2.new(1, 0, 0, 26), ZIndex = 4 })
-		listLayout(meta, Enum.FillDirection.Horizontal, 8, Enum.HorizontalAlignment.Center, Enum.VerticalAlignment.Center)
-		local pill = CloudUI.Pill(def.Rarity, def.Rarity, meta)
+		Util.Create("UITextSizeConstraint", { MaxTextSize = 34, MinTextSize = 20, Parent = nameLabel })
+		local meta = makeFrame(c, "Meta", { Position = L.Meta[1], Size = L.Meta[2], ZIndex = 4 })
+		listLayout(meta, Enum.FillDirection.Horizontal, 8, L.Meta[3], Enum.VerticalAlignment.Center)
+		local pill = readablePill(def.Rarity, rarityColor, meta)
 		pill.LayoutOrder = 1
-		makeText(meta, "Owned", "You own x" .. tostring(math.floor(tonumber(result.Count) or State.OwnedCount(def.Id))), "Heading", 14, MUTED, {
-			Size = UDim2.fromOffset(120, 24),
-			LayoutOrder = 2,
+		for i, element in ipairs(elementsOf(def)) do
+			elementPill(meta, element, 18, 1 + i)
+		end
+		makeText(meta, "Owned", "You own x" .. tostring(math.floor(tonumber(result.Count) or State.OwnedCount(def.Id))), "Heading", 19, MUTED, {
+			AutomaticSize = Enum.AutomaticSize.X,
+			Size = UDim2.fromOffset(0, 26),
+			LayoutOrder = 10,
 			ZIndex = 4,
 		})
 		local lines = perkLines(def)
@@ -2650,26 +3694,23 @@ function beginStage(result)
 		if #lines > 0 then
 			perkText = table.concat(lines, "\n")
 		end
-		makeText(c, "Perks", perkText, "Heading", 15, Theme.Lighten(GOOD, 0.2), {
-			Position = UDim2.fromOffset(14, 326),
-			Size = UDim2.new(1, -28, 0, 44),
+		makeText(c, "Perks", perkText, "Heading", 19, Theme.Lighten(GOOD, 0.3), {
+			Position = L.Perks[1],
+			Size = L.Perks[2],
+			TextXAlignment = L.Perks[3],
 			TextWrapped = true,
 			TextYAlignment = Enum.TextYAlignment.Top,
 			ZIndex = 4,
 		})
 
-		local buttons = makeFrame(c, "Buttons", {
-			Position = UDim2.fromOffset(0, 378),
-			Size = UDim2.new(1, 0, 0, 48),
-			ZIndex = 4,
-		})
-		listLayout(buttons, Enum.FillDirection.Horizontal, 12, Enum.HorizontalAlignment.Center, Enum.VerticalAlignment.Center)
+		local buttons = makeFrame(c, "Buttons", { Position = L.Buttons[1], Size = L.Buttons[2], ZIndex = 4 })
+		listLayout(buttons, Enum.FillDirection.Horizontal, 12, L.Buttons[3], Enum.VerticalAlignment.Center)
 		stage.EquipBtn = CloudUI.Button({
 			Name = "Equip",
 			Text = "Equip",
 			Style = "Green",
-			Size = UDim2.fromOffset(150, 46),
-			TextSize = 22,
+			Size = UDim2.fromOffset(172, 58),
+			TextSize = 26,
 			LayoutOrder = 1,
 			Callback = function()
 				fire("EquipPet", def.Id)
@@ -2681,8 +3722,8 @@ function beginStage(result)
 				Name = "Again",
 				Text = "Again",
 				Style = "Gold",
-				Size = UDim2.fromOffset(170, 46),
-				TextSize = 20,
+				Size = UDim2.fromOffset(204, 58),
+				TextSize = 22,
 				LayoutOrder = 2,
 				Callback = function()
 					local rouletteId = roulette.Id
@@ -2695,40 +3736,43 @@ function beginStage(result)
 		updateReveal()
 
 		-- confetti: more for rarer pets
-		local amounts = { 8, 12, 18, 26, 34, 44 }
+		local amounts = { 10, 14, 20, 28, 36, 46, 56 }
 		local amount = amounts[Util.Clamp(order, 1, #amounts)]
 		task.delay(0.2, function()
 			if Spin.Stage == stage and stage.Phase == "reveal" then
-				burst(c, rarityColor, amount, UDim2.new(0.5, 0, 0, 128))
+				burst(c, glowColor, amount, L.View)
 			end
 		end)
 		if order >= 5 then
 			task.delay(0.65, function()
 				if Spin.Stage == stage and stage.Phase == "reveal" then
-					burst(c, rarityColor, amount, UDim2.new(0.5, 0, 0, 128))
+					burst(c, glowColor, amount, L.View)
 				end
 			end)
 		end
 	end
 
 	------------------------------------------------------------------
-	-- animation loop
+	-- animation loop (client-only UI motion)
 	------------------------------------------------------------------
 	local function land()
 		stage.Phase = "land"
 		stage.LandedAt = os.clock()
 		local winner = cells[target]
 		if winner then
+			attachViewport(winner) -- (normally attached long before it lands)
 			winner.Stroke.Color = GOLD
 			winner.Stroke.Thickness = 5
 			winner.Frame.ZIndex = 4
 			local grow = Util.Create("UIScale", { Scale = 1, Parent = winner.Frame })
 			tween(grow, 0.35, { Scale = 1.1 }, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
-			winner.Viewport.SetAnimated(true)
-			winner.Viewport.SetExcited(1)
+			if winner.Viewport then
+				winner.Viewport.SetAnimated(true)
+				winner.Viewport.SetExcited(1)
+			end
 		end
 		status.Text = def.Rarity .. "!"
-		status.TextColor3 = Theme.Lighten(rarityColor, 0.35)
+		status.TextColor3 = rarityText(def)
 		band.BackgroundTransparency = 0.7
 		pointer.Rotation = 0
 	end
@@ -2736,14 +3780,14 @@ function beginStage(result)
 	local function step(dt)
 		if stage.Phase == "spin" then
 			if stage.Skip then
-				stage.Elapsed = STRIP.Seconds
+				stage.Elapsed = K.STRIP.Seconds
 			end
 			stage.Elapsed = stage.Elapsed + dt
-			local t = Util.Clamp(stage.Elapsed / STRIP.Seconds, 0, 1)
-			local p = 1 - (1 - t) ^ STRIP.Curve
+			local t = Util.Clamp(stage.Elapsed / K.STRIP.Seconds, 0, 1)
+			local p = 1 - (1 - t) ^ K.STRIP.Curve
 			stage.X = startX + (endX - startX) * p
 			layoutCells(stage.X)
-			local tick = math.floor((stage.X + STRIP.W / 2) / cellW)
+			local tick = math.floor((stage.X + K.STRIP.W / 2) / cellW)
 			if tick ~= stage.Tick then
 				stage.Tick = tick
 				pointer.Rotation = 16
@@ -2808,7 +3852,7 @@ end
 ----------------------------------------------------------------------
 -- Wiring
 ----------------------------------------------------------------------
--- OpenPanel(panelId, args): the server opens windows (roulette / item shop prompts).
+-- OpenPanel(panelId, args): the server opens windows (roulette / item shop prompts, the tutorial).
 local function onOpenPanel(panelId, args)
 	if type(panelId) ~= "string" then
 		return
@@ -2824,6 +3868,9 @@ local function onOpenPanel(panelId, args)
 		openWindow("Inventory", args)
 	elseif key == "pets" then
 		openWindow("Inventory", { Tab = "Pets" })
+	elseif key == "index" then
+		local groupId = args.GroupId or args.Group or args.Rarity
+		openIndex(type(groupId) == "string" and groupId or nil)
 	elseif key == "stats" then
 		openWindow("Stats", args)
 	elseif key == "close" then
@@ -2832,15 +3879,16 @@ local function onOpenPanel(panelId, args)
 end
 
 local function onStateChanged()
-	-- red dot on the Pets button when the collection grew while the inventory was closed
+	-- red dot on the Pets tile when the collection grew while the inventory was closed
 	local _, total = petTotals()
 	local inventory = windows.Inventory
 	if Badge.LastPetTotal ~= nil and total > Badge.LastPetTotal and not (inventory and inventory.Shown) then
 		if Entries.Pets then
-			Entries.Pets.Icon.SetBadge(true)
+			Entries.Pets.SetBadge(true)
 		end
 	end
 	Badge.LastPetTotal = total
+	refreshIndexBadge()
 
 	for _, win in pairs(windows) do
 		refreshWindow(win)
@@ -2892,6 +3940,32 @@ local function connectRemotes()
 	end
 end
 
+-- The Pet Index lives in IndexController: keep one window at a time, light the Index tile and relay
+-- its opening as WindowOpened("Index").
+local function connectIndex()
+	local index = getIndex()
+	if not index then
+		return
+	end
+	if type(index.Opened) == "table" and type(index.Opened.Connect) == "function" then
+		index.Opened:Connect(function()
+			if openId then
+				closeWindow(openId, true)
+			end
+			hideBackdropNow()
+			closeOdds()
+			updateMenuActive()
+			MenuController.WindowOpened:Fire("Index")
+		end)
+	end
+	if type(index.Closed) == "table" and type(index.Closed.Connect) == "function" then
+		index.Closed:Connect(function()
+			updateMenuActive()
+		end)
+	end
+	refreshIndexBadge()
+end
+
 ----------------------------------------------------------------------
 -- Public API
 ----------------------------------------------------------------------
@@ -2907,6 +3981,22 @@ function MenuController.Close()
 	end
 end
 
+function MenuController.GetButton(id)
+	local entry = Entries[id]
+	return entry and entry.Button or nil
+end
+
+-- true while a window, the odds popup or the roulette stage covers the screen (the tutorial folds its card and
+-- hides its menu pointer meanwhile)
+function MenuController.IsOpen()
+	return openId ~= nil or Odds.Gui ~= nil or Spin.Stage ~= nil
+end
+
+-- Debug helper (smoke tests): true once `petId` was pre-sculpted at the roulette strip's detail.
+function MenuController.IsPrewarmed(petId)
+	return Warm.Done[petId] == true
+end
+
 function MenuController.Init()
 	if initialized then
 		return
@@ -2918,7 +4008,7 @@ function MenuController.Init()
 
 	gui = CloudUI.NewScreenGui("NimbusMenu", 20)
 
-	-- click-outside layer behind the windows
+	-- click-outside layer behind the windows (the menu column stays above it)
 	U.Backdrop = Util.Create("TextButton", {
 		Name = "Backdrop",
 		AutoButtonColor = false,
@@ -2945,7 +4035,9 @@ function MenuController.Init()
 	relayoutMenu()
 	updateMenuActive()
 
-	gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(relayoutMenu)
+	gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+		safe("relayout", relayoutMenu)
+	end)
 	State.Changed:Connect(function()
 		safe("State.Changed", onStateChanged)
 	end)
@@ -2965,6 +4057,7 @@ function MenuController.Init()
 		Badge.LastPetTotal = total
 	end
 
+	safe("connect index", connectIndex)
 	task.spawn(connectRemotes)
 end
 

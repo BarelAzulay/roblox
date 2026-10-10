@@ -1,12 +1,14 @@
--- NotifyController (client, v2): the game's side-of-screen voice. Nothing here is ever centred.
+-- NotifyController (client, v3): the game's side-of-screen voice. Nothing here is ever centred.
 --
 --   NotifyController.Init()
 --
 -- Remotes handled
---   Notify(text, kind, duration)  -> compact toast stack on the RIGHT edge, just under the HUD token pill.
---                                    Max 4, 250 px wide, newest on top, slide in from the right, `Toast` role
---                                    font, coloured by kind (info|good|bad|token). Identical toasts that are
---                                    still showing are merged into "text x2".
+--   Notify(text, kind, duration)  -> compact toast stack on the RIGHT edge, from the top (below the HUD currency
+--                                    stack when that sits top-right on a short screen, and below the top-left
+--                                    panel on a narrow one). Max 4, 250 design px wide, newest on top, slide in
+--                                    from the right, `Toast` role font at the readable 18 px, a coloured accent
+--                                    bar + icon by kind (info|good|bad|token). Identical toasts that are still
+--                                    showing are merged into "text x2".
 --   MatchResult(result)           -> compact result card on the right edge (about 45% down): VICTORY!/DEFEAT in
 --                                    the Title font with a gradient, difficulty + stars, time, tokens, bonus,
 --                                    a small member list and a "Back to lobby in Ns" line. It closes when the
@@ -16,9 +18,10 @@
 --   DashFx(userId)                -> a cheap puff + trail on that player's character (own dashes are ignored,
 --                                    MovementController already shows those).
 --
--- The GUI is "NimbusNotify" (display order 30, IgnoreGuiInset = false). Panels carry a UIScale driven by
--- the viewport (same formula as HudController) and sit inside full-screen holder frames whose UIPadding is
--- the screen margin, so scaling never detaches them from the edge.
+-- The GUI is "NimbusNotify" (display order 30, IgnoreGuiInset = false). Sizes follow the v3 readability rule:
+-- panels are designed in 1080p pixels and carry a UIScale of Theme.ScreenFactor() (same as the HUD), inside
+-- full-screen holder frames whose UIPadding is the screen margin, so scaling never detaches them from the edge.
+-- Where the HUD sits is read from the attributes HudController publishes on the NimbusHud gui.
 -- Plain Lua 5.1-compatible syntax only. All fonts come from Theme roles.
 
 local Players = game:GetService("Players")
@@ -40,36 +43,34 @@ local NotifyController = {}
 local LocalPlayer = Players.LocalPlayer
 
 ----------------------------------------------------------------------
--- Tuning
+-- Tuning (design px of a 1080p screen)
 ----------------------------------------------------------------------
 -- toasts
 local MAX_TOASTS = 4
 local TOAST_W = 250
-local TOAST_GAP = 6
-local TOAST_TEXT_SIZE = 15
-local TOAST_BG = 0.1
+local TOAST_GAP = 8
+local TOAST_TEXT_SIZE = 18
+local TOAST_ICON = 30
+local TOAST_BG = 0.06
 local DEFAULT_DURATION = 3
 local MIN_DURATION = 1.5
 local MAX_DURATION = 8
 local MAX_TOAST_CHARS = 90
+local MIN_TOAST_H = 52 -- a one-line toast (design px)
 
--- KEEP IN SYNC with HudController.lua: REF_W/REF_H/MIN_SCALE/MAX_SCALE, EDGE, TOUCH_EDGE and PILL_H.
--- The toast stack starts directly below the HUD token pill (top-right).
-local REF_W, REF_H = 1280, 720
-local MIN_SCALE, MAX_SCALE = 0.7, 1.25
-local EDGE = 10
+-- KEEP IN SYNC with HudController.lua: EDGE and TOUCH_EDGE.
+local EDGE = 12
 local TOUCH_EDGE = 20
-local PILL_H = 44
-local PILL_GAP = 8
+local HUD_GAP = 10 -- kept below the HUD pieces the stack has to clear
 
 -- result card
-local RESULT_W = 264
+local RESULT_W = 290
 local RESULT_Y = 0.47 -- vertical position (fraction of the screen), right edge
 -- On narrow (portrait) screens the scaled card reaches into the middle of the screen. The game must never say
 -- anything there, so the card moves up until it sits above this central band (fractions of the screen size).
 local CENTRE_BAND = 0.15
 local CENTRE_MARGIN = 6
-local CONFETTI_PIECES = 18
+local CONFETTI_PIECES = 22
 
 -- dash puffs of other players
 local FX_MAX_DISTANCE = 140
@@ -82,6 +83,7 @@ local WHITE = Colors.White
 local NAVY = Colors.Navy or Colors.Ink
 local MUTED = Colors.Muted or Colors.CloudShade
 local GOLD = Colors.Gold or Colors.Token
+local INK = Colors.TextStroke or Colors.Ink
 
 local FALLBACK_KINDS = {
 	info = Color3.fromRGB(90, 158, 234),
@@ -107,12 +109,13 @@ local REASON_TEXT = {
 ----------------------------------------------------------------------
 local initialized = false
 local rng = Random.new()
-local UI = {} -- Gui, Stack, StackScale, ToastPad, ResultPad
+local UI = {} -- Gui, Stack, StackScale, ToastPad, ResultPad, ResultHolder
 local scalers = {}
 local toasts = {} -- live toasts, oldest first
 local toastSerial = 0
 local result = { Panel = nil, Serial = 0, Height = 0 } -- the open result card (Height: design px)
 local lastDashFx = {}
+local hud = { Gui = nil, Conn = nil } -- the NimbusHud gui whose layout attributes we follow
 
 ----------------------------------------------------------------------
 -- Helpers
@@ -125,16 +128,21 @@ end
 
 local function viewportSize()
 	local camera = workspace.CurrentCamera
-	local vp = camera and camera.ViewportSize or Vector2.new(REF_W, REF_H)
+	local vp = camera and camera.ViewportSize or Vector2.new(1920, 1080)
 	if vp.X < 2 or vp.Y < 2 then
-		return Vector2.new(REF_W, REF_H)
+		return Vector2.new(1920, 1080)
 	end
 	return vp
 end
 
+-- The readability factor: clamp(viewportY / 1080, 0.8, 1.25) (the HUD uses the same).
 local function currentScale()
-	local vp = viewportSize()
-	return Util.Clamp(math.min(vp.X / REF_W, vp.Y / REF_H), MIN_SCALE, MAX_SCALE)
+	return Theme.ScreenFactor(viewportSize().Y)
+end
+
+local function topInset()
+	local okInset, inset = pcall(GuiService.GetGuiInset, GuiService)
+	return (okInset and inset and inset.Y) or 0
 end
 
 local function hex(color)
@@ -157,7 +165,8 @@ local function newFrame(parent, name, props)
 	return Util.Create("Frame", p)
 end
 
--- Themed TextLabel. props may include Stroke (text outline transparency) plus any label property.
+-- Themed TextLabel. props may include Stroke (classic text stroke transparency), StrokeColor and Outline
+-- (thickness of a glyph outline, Theme.TextOutline) plus any label property.
 local function newText(parent, name, text, role, size, color, props)
 	local extra = {
 		Name = name,
@@ -167,16 +176,30 @@ local function newText(parent, name, text, role, size, color, props)
 		TextYAlignment = Enum.TextYAlignment.Center,
 	}
 	local stroke = 0.3
+	local strokeColor = nil
+	local outline = nil
 	if props then
 		for key, value in pairs(props) do
 			if key == "Stroke" then
 				stroke = value
+			elseif key == "StrokeColor" then
+				strokeColor = value
+			elseif key == "Outline" then
+				outline = value
 			else
 				extra[key] = value
 			end
 		end
 	end
-	local label = Theme.Label(text, role, { Size = size, Color = color, Stroke = stroke, Props = extra })
+	local label = Theme.Label(text, role, {
+		Size = size,
+		Color = color,
+		Stroke = stroke,
+		StrokeColor = strokeColor,
+		Outline = outline,
+		OutlineColor = strokeColor or INK,
+		Props = extra,
+	})
 	label.Parent = parent
 	return label
 end
@@ -187,6 +210,7 @@ end
 
 local function addViewportScale(root)
 	local s = Instance.new("UIScale")
+	s.Name = "ViewportScale"
 	s.Scale = currentScale()
 	s.Parent = root
 	table.insert(scalers, s)
@@ -229,12 +253,131 @@ local function newHolder(name)
 	return holder, pad
 end
 
-local function applyMargins()
+-- One layout attribute HudController publishes on NimbusHud (gui-area pixels, 0 = nothing there).
+local function hudValue(name)
+	local gui = hud.Gui
+	if not gui or not gui.Parent then
+		return 0
+	end
+	local value = gui:GetAttribute(name)
+	if type(value) == "number" then
+		return value
+	end
+	return 0
+end
+
+-- Lowest gui y a toast column whose left edge is at `toastLeft` (right edge `toastRight`) may reach: above the
+-- centre band when the column reaches into it sideways (portrait phones), above the touch RUN / DASH buttons
+-- under the column, and never into the lower quarter of the screen.
+local function bottomLimitFor(toastLeft, toastRight)
+	local vp = viewportSize()
+	local inset = topInset()
+	local limit = (vp.Y - inset) * 0.72
+	if toastLeft < vp.X * (0.5 + CENTRE_BAND) and toastRight > vp.X * (0.5 - CENTRE_BAND) then
+		limit = math.min(limit, vp.Y * (0.5 - CENTRE_BAND) - CENTRE_MARGIN - inset)
+	end
+	local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+	local mobile = playerGui and playerGui:FindFirstChild("MobileControls")
+	if mobile and mobile:IsA("ScreenGui") and mobile.Enabled then
+		local dy = mobile.IgnoreGuiInset and -inset or 0
+		for _, d in ipairs(mobile:GetDescendants()) do
+			if (d:IsA("TextButton") or d:IsA("ImageButton")) and d.Visible and d.AbsoluteSize.X > 0 then
+				local x0 = d.AbsolutePosition.X
+				local x1 = x0 + d.AbsoluteSize.X
+				if x1 > toastLeft and x0 < toastRight then
+					limit = math.min(limit, d.AbsolutePosition.Y + dy - TOAST_GAP)
+				end
+			end
+		end
+	end
+	return limit
+end
+
+-- Where the toast column goes: { Top, Right (padding from the right edge), Bottom (lowest y) } in gui px.
+-- Normally the top-right corner (below the HUD's currency stack when that sits there). On a short screen
+-- where not even one toast fits between that stack and the touch buttons, the column moves to the left of
+-- the stack instead; on a narrow screen it also stays below the top-left panel when the two would overlap.
+local function toastPlacement()
 	local side = isTouchDevice() and TOUCH_EDGE or EDGE
 	local k = currentScale()
+	local vp = viewportSize()
+	local width = TOAST_W * k
+	local right = side
+	local top = EDGE
+	local rightBottom = hudValue("TopRightBottom")
+	if rightBottom > 0 then
+		top = rightBottom + HUD_GAP
+		local left = vp.X - right - width
+		local room = (bottomLimitFor(left, vp.X - right) - top) / math.max(0.01, k)
+		local stackLeft = hudValue("TopRightLeft")
+		if room < MIN_TOAST_H and stackLeft > 0 then
+			right = math.max(side, vp.X - stackLeft + HUD_GAP)
+			top = EDGE
+		end
+	end
+	local toastLeft = vp.X - right - width
+	local leftRight = hudValue("TopLeftRight")
+	if leftRight > 0 and leftRight > toastLeft - 4 then
+		top = math.max(top, hudValue("TopLeftBottom") + HUD_GAP)
+	end
+	return {
+		Top = math.floor(top),
+		Right = math.floor(right),
+		Bottom = bottomLimitFor(toastLeft, vp.X - right),
+	}
+end
+
+-- Conservative height of a toast in design px (wide glyphs, word wrap slack).
+local function estimateToastHeight(text)
+	local width = TOAST_W - 24 - (TOAST_ICON + 10)
+	local perLine = math.max(1, math.floor(width / (TOAST_TEXT_SIZE * 0.62)))
+	local okLen, len = pcall(utf8.len, tostring(text or ""))
+	if not okLen or type(len) ~= "number" then
+		len = #tostring(text or "")
+	end
+	local lines = math.max(1, math.ceil(len / perLine))
+	return math.max(44, lines * math.ceil(TOAST_TEXT_SIZE * 1.15) + 16)
+end
+
+local dismissToast -- defined below
+
+-- Keeps the newest toasts that fit above the column's lowest allowed y (always at least the newest one).
+local function trimToasts()
+	if #toasts == 0 then
+		return
+	end
+	local k = currentScale()
+	local place = toastPlacement()
+	local budget = (place.Bottom - place.Top) / math.max(0.01, k)
+	local used = 0
+	local kept = 0
+	local drop = {}
+	for i = #toasts, 1, -1 do -- newest first
+		local toast = toasts[i]
+		local h = estimateToastHeight(toast.Label.Text)
+		if kept > 0 then
+			h = h + TOAST_GAP
+		end
+		if kept >= 1 and used + h > budget then
+			for j = i, 1, -1 do
+				table.insert(drop, toasts[j])
+			end
+			break
+		end
+		used = used + h
+		kept = kept + 1
+	end
+	for _, toast in ipairs(drop) do
+		dismissToast(toast)
+	end
+end
+
+local function applyMargins()
+	local side = isTouchDevice() and TOUCH_EDGE or EDGE
 	if UI.ToastPad then
-		UI.ToastPad.PaddingRight = UDim.new(0, side)
-		UI.ToastPad.PaddingTop = UDim.new(0, math.floor(EDGE + (PILL_H + PILL_GAP) * k))
+		local place = toastPlacement()
+		UI.ToastPad.PaddingRight = UDim.new(0, place.Right)
+		UI.ToastPad.PaddingTop = UDim.new(0, place.Top)
 	end
 	if UI.ResultPad then
 		UI.ResultPad.PaddingRight = UDim.new(0, side)
@@ -249,16 +392,36 @@ local function resultPosition(xScale, panelHeight)
 	local k = currentScale()
 	local side = isTouchDevice() and TOUCH_EDGE or EDGE
 	local cardLeft = vp.X - side - RESULT_W * k
+	local half = (panelHeight or result.Height) * k / 2
 	if cardLeft >= vp.X * (0.5 + CENTRE_BAND) then
-		return UDim2.new(xScale, 0, RESULT_Y, 0)
+		-- keep clear of a top-right currency stack on short screens
+		local floorY = hudValue("TopRightBottom") + HUD_GAP + half
+		local y = (vp.Y - topInset()) * RESULT_Y
+		if y >= floorY then
+			return UDim2.new(xScale, 0, RESULT_Y, 0)
+		end
+		return UDim2.new(xScale, 0, 0, math.floor(floorY))
 	end
 	-- the ScreenGui area starts below the top bar (IgnoreGuiInset = false), so gui y = screen y - inset
-	local okInset, inset = pcall(GuiService.GetGuiInset, GuiService)
-	local top = (okInset and inset and inset.Y) or 0
-	local half = (panelHeight or result.Height) * k / 2
-	local ceiling = vp.Y * (0.5 - CENTRE_BAND) - CENTRE_MARGIN - half - top
-	local floorY = (EDGE + PILL_H + PILL_GAP) * k + half -- keep clear of the token pill
+	local ceiling = vp.Y * (0.5 - CENTRE_BAND) - CENTRE_MARGIN - half - topInset()
+	local floorY = math.max(EDGE, hudValue("TopRightBottom") + HUD_GAP) + half
 	return UDim2.new(xScale, 0, 0, math.floor(math.max(ceiling, floorY)))
+end
+
+-- Tells the HUD where the open result card starts (gui x of its left edge; 0 = no card), so on a narrow
+-- screen it can tuck the match panel away instead of drawing both on top of each other.
+local function publishResultCard()
+	if not UI.Gui then
+		return
+	end
+	local value = 0
+	if result.Panel and result.Panel.Root and result.Panel.Root.Parent then
+		local side = isTouchDevice() and TOUCH_EDGE or EDGE
+		value = math.floor(viewportSize().X - side - RESULT_W * currentScale())
+	end
+	if UI.Gui:GetAttribute("ResultCardLeft") ~= value then
+		UI.Gui:SetAttribute("ResultCardLeft", value)
+	end
 end
 
 local function relayout()
@@ -272,10 +435,46 @@ local function relayout()
 		end
 	end
 	applyMargins()
+	trimToasts()
 	local panel = result.Panel
 	if panel and panel.Root and panel.Root.Parent then
 		panel.Root.Position = resultPosition(1)
 	end
+	publishResultCard()
+end
+
+-- Follow the HUD's layout attributes (the HUD may be built before or after us, and rebuilt).
+local function bindHud(gui)
+	if hud.Gui == gui then
+		return
+	end
+	if hud.Conn then
+		hud.Conn:Disconnect()
+		hud.Conn = nil
+	end
+	hud.Gui = gui
+	if gui then
+		hud.Conn = gui.AttributeChanged:Connect(function()
+			pcall(relayout)
+		end)
+	end
+	pcall(relayout)
+end
+
+local function watchHud()
+	local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui") or LocalPlayer:WaitForChild("PlayerGui", 10)
+	if not playerGui then
+		return
+	end
+	local existing = playerGui:FindFirstChild("NimbusHud")
+	if existing and existing:IsA("ScreenGui") then
+		bindHud(existing)
+	end
+	playerGui.ChildAdded:Connect(function(child)
+		if child.Name == "NimbusHud" and child:IsA("ScreenGui") then
+			bindHud(child)
+		end
+	end)
 end
 
 ----------------------------------------------------------------------
@@ -286,22 +485,26 @@ local function setToastAlpha(toast, a, seconds)
 	local goals = {
 		{ toast.Card, { BackgroundTransparency = TOAST_BG + (1 - TOAST_BG) * a } },
 		{ toast.Stroke, { Transparency = a } },
-		{ toast.Label, { TextTransparency = a, TextStrokeTransparency = 0.35 + 0.65 * a } },
+		{ toast.Accent, { BackgroundTransparency = a } },
+		{ toast.Label, { TextTransparency = a, TextStrokeTransparency = 0.3 + 0.7 * a } },
 		{ toast.Icon, { BackgroundTransparency = a } },
-		{ toast.IconGlyph, { TextTransparency = a, TextStrokeTransparency = 0.35 + 0.65 * a } },
+		{ toast.IconStroke, { Transparency = a } },
+		{ toast.IconGlyph, { TextTransparency = a, TextStrokeTransparency = 0.2 + 0.8 * a } },
 	}
 	for _, entry in ipairs(goals) do
-		if seconds and seconds > 0 then
-			tween(entry[1], seconds, entry[2], Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-		else
-			for key, value in pairs(entry[2]) do
-				entry[1][key] = value
+		if entry[1] then
+			if seconds and seconds > 0 then
+				tween(entry[1], seconds, entry[2], Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+			else
+				for key, value in pairs(entry[2]) do
+					entry[1][key] = value
+				end
 			end
 		end
 	end
 end
 
-local function dismissToast(toast)
+function dismissToast(toast)
 	if toast.Dead then
 		return
 	end
@@ -350,6 +553,10 @@ local function refreshToastText(toast)
 	toast.Label.Text = text
 end
 
+local function toastTextColor(color)
+	return Theme.Lighten(color, 0.55)
+end
+
 local function buildToast(text, kind)
 	local color, kindName = kindColor(kind)
 	toastSerial = toastSerial + 1
@@ -368,42 +575,55 @@ local function buildToast(text, kind)
 		BackgroundColor3 = Colors.Panel,
 	})
 	Theme.Corner(card, UDim.new(0, 12))
-	local stroke = Theme.Stroke(card, Theme.Lighten(color, 0.1), 2, 1)
-	Util.Create("UISizeConstraint", { MinSize = Vector2.new(0, 34), Parent = card })
+	local stroke = Theme.Stroke(card, Theme.Darken(color, 0.25), 2.5, 1)
+	Util.Create("UISizeConstraint", { MinSize = Vector2.new(0, 44), Parent = card })
 	local pad = Instance.new("UIPadding")
-	pad.PaddingTop = UDim.new(0, 6)
-	pad.PaddingBottom = UDim.new(0, 6)
-	pad.PaddingLeft = UDim.new(0, 8)
+	pad.PaddingTop = UDim.new(0, 8)
+	pad.PaddingBottom = UDim.new(0, 8)
+	pad.PaddingLeft = UDim.new(0, 14)
 	pad.PaddingRight = UDim.new(0, 10)
 	pad.Parent = card
+
+	-- coloured accent bar at the left edge (inside the padding box, pulled out towards the card edge)
+	local accent = newFrame(card, "Accent", {
+		AnchorPoint = Vector2.new(0, 0.5),
+		Position = UDim2.new(0, -10, 0.5, 0),
+		Size = UDim2.fromOffset(5, TOAST_ICON),
+		BackgroundTransparency = 1,
+		BackgroundColor3 = color,
+	})
+	round(accent)
 
 	local icon = newFrame(card, "Icon", {
 		AnchorPoint = Vector2.new(0, 0.5),
 		Position = UDim2.new(0, 0, 0.5, 0),
-		Size = UDim2.fromOffset(24, 24),
+		Size = UDim2.fromOffset(TOAST_ICON, TOAST_ICON),
 		BackgroundTransparency = 1,
-		BackgroundColor3 = Theme.Darken(color, 0.15),
+		BackgroundColor3 = Theme.Darken(color, 0.1),
 	})
 	round(icon)
-	local glyph = newText(icon, "Glyph", KIND_GLYPH[kindName] or "i", "Heading", 15, WHITE, {
+	local iconStroke = Theme.Stroke(icon, Theme.Darken(color, 0.55), 2, 1)
+	local glyph = newText(icon, "Glyph", KIND_GLYPH[kindName] or "i", "Heading", 18, WHITE, {
 		TextXAlignment = Enum.TextXAlignment.Center,
 		TextTransparency = 1,
-		TextStrokeTransparency = 1,
+		StrokeColor = Theme.Darken(color, 0.6),
+		Stroke = 1,
 	})
 
-	local label = newText(card, "Text", text, "Toast", TOAST_TEXT_SIZE, Theme.Lighten(color, 0.4), {
-		Position = UDim2.new(0, 32, 0, 0),
-		Size = UDim2.new(1, -32, 0, 0),
+	local label = newText(card, "Text", text, "Toast", TOAST_TEXT_SIZE, toastTextColor(color), {
+		Position = UDim2.new(0, TOAST_ICON + 10, 0, 0),
+		Size = UDim2.new(1, -(TOAST_ICON + 10), 0, 0),
 		AutomaticSize = Enum.AutomaticSize.Y,
 		TextWrapped = true,
 		TextTransparency = 1,
-		TextStrokeTransparency = 1,
+		StrokeColor = INK,
 		Stroke = 1,
 	})
 
 	return {
-		Slot = slot, Card = card, Stroke = stroke, Icon = icon, IconGlyph = glyph, Label = label,
-		Text = text, Kind = kindName, Count = 1, Dead = false, Expiry = 0, Color = color,
+		Slot = slot, Card = card, Stroke = stroke, Accent = accent, Icon = icon, IconStroke = iconStroke,
+		IconGlyph = glyph, Label = label, Text = text, Kind = kindName, Count = 1, Dead = false, Expiry = 0,
+		Color = color,
 	}
 end
 
@@ -424,7 +644,7 @@ local function addToast(text, kind, duration)
 			live.Count = live.Count + 1
 			refreshToastText(live)
 			live.Label.TextColor3 = WHITE
-			tween(live.Label, 0.35, { TextColor3 = Theme.Lighten(live.Color, 0.4) }, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+			tween(live.Label, 0.35, { TextColor3 = toastTextColor(live.Color) }, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 			scheduleExpiry(live, duration)
 			return
 		end
@@ -432,10 +652,11 @@ local function addToast(text, kind, duration)
 
 	local toast = buildToast(text, kind)
 	table.insert(toasts, toast)
-	-- never more than MAX_TOASTS: the oldest one leaves first
+	-- never more than MAX_TOASTS (and never further down than the screen allows): the oldest leave first
 	while #toasts > MAX_TOASTS do
 		dismissToast(toasts[1])
 	end
+	trimToasts()
 
 	toast.Card.Position = UDim2.new(0, TOAST_W + 40, 0, 0)
 	tween(toast.Card, 0.38, { Position = UDim2.new(0, 0, 0, 0) }, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
@@ -470,6 +691,7 @@ local function closeResults(immediate)
 	local panel = result.Panel
 	result.Serial = result.Serial + 1
 	result.Panel = nil
+	publishResultCard()
 	if not panel or not panel.Root or not panel.Root.Parent then
 		return
 	end
@@ -506,18 +728,20 @@ local function countUp(label, target, delay, seconds, format, serial)
 	end)
 end
 
+-- Square "pixel" confetti (the voxel world's little sparkle) falling over the card.
 local function burstConfetti(root, serial)
 	local palette = Theme.World and Theme.World.Rainbow or Colors.Rainbow
 	for i = 1, CONFETTI_PIECES do
-		local x = rng:NextNumber(0.08, 0.92)
-		local startY = rng:NextNumber(-4, 16)
+		local x = rng:NextNumber(0.06, 0.94)
+		local startY = rng:NextNumber(-6, 18)
+		local px = rng:NextInteger(6, 10)
 		local piece = newFrame(root, "Confetti", {
 			AnchorPoint = Vector2.new(0.5, 0.5),
 			Position = UDim2.new(x, 0, 0, startY),
-			Size = UDim2.fromOffset(rng:NextInteger(5, 8), rng:NextInteger(7, 11)),
+			Size = UDim2.fromOffset(px, px),
 			BackgroundTransparency = 1,
 			BackgroundColor3 = palette[(i % #palette) + 1],
-			Rotation = rng:NextInteger(0, 359),
+			Rotation = rng:NextInteger(0, 3) * 90,
 			ZIndex = 12,
 		})
 		task.delay(rng:NextNumber(0.2, 0.7), function()
@@ -525,10 +749,10 @@ local function burstConfetti(root, serial)
 				return
 			end
 			piece.BackgroundTransparency = 0
-			local fall = rng:NextNumber(110, 190)
+			local fall = rng:NextNumber(130, 220)
 			tween(piece, rng:NextNumber(0.9, 1.4), {
 				Position = UDim2.new(Util.Clamp(x + rng:NextNumber(-0.12, 0.12), 0.02, 0.98), 0, 0, startY + fall),
-				Rotation = piece.Rotation + rng:NextInteger(-320, 320),
+				Rotation = piece.Rotation + rng:NextInteger(-2, 2) * 90,
 				BackgroundTransparency = 1,
 			}, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
 			task.delay(1.5, function()
@@ -566,7 +790,7 @@ end
 
 local function buildResults(data)
 	local won = data.Won == true
-	local diff = Config.GetDifficulty(data.DifficultyId)
+	local diff = Config.GetDifficulty and Config.GetDifficulty(data.DifficultyId) or nil
 	local diffColor = (diff and diff.Color) or Colors.Stamina
 	local starCount = tonumber(data.Stars) or (diff and diff.Stars) or 0
 	local members = normaliseMembers(data.Members)
@@ -574,7 +798,7 @@ local function buildResults(data)
 	local reason = (not won) and REASON_TEXT[tostring(data.Reason or "defeat")] or nil
 
 	-- fixed vertical layout (inner coordinates)
-	local TITLE_H, DIFF_H, REASON_H, ROW_H, MEMBER_H, FOOT_H = 36, 18, 16, 20, 18, 22
+	local TITLE_H, DIFF_H, REASON_H, ROW_H, MEMBER_H, FOOT_H = 46, 26, 24, 32, 26, 28
 	local y = 0
 	local titleY = y
 	y = y + TITLE_H
@@ -584,16 +808,17 @@ local function buildResults(data)
 	if reason then
 		y = y + REASON_H
 	end
-	y = y + 6
+	y = y + 8
 	local statsY = y
 	y = y + ROW_H * 3 + 4
 	local membersY = y
 	if showMembers then
-		y = y + #members * MEMBER_H + 4
+		y = y + #members * MEMBER_H + 6
 	end
 	local footY = y
 	y = y + FOOT_H
-	local panelH = 34 + 8 + y
+	local insetTop, _, insetBottom = CloudUI.ContentInset(false, true)
+	local panelH = insetTop + insetBottom + 10 + y
 	result.Height = panelH
 
 	local accent = won and (Theme.Buttons and Theme.Buttons.Gold or GOLD) or Color3.fromRGB(118, 130, 204)
@@ -612,21 +837,22 @@ local function buildResults(data)
 	panel.Body.Active = false
 	addViewportScale(panel.Root)
 	local inner = newFrame(panel.Content, "Inner", {
-		Position = UDim2.new(0, 10, 0, 4),
-		Size = UDim2.new(1, -20, 1, -8),
+		Position = UDim2.new(0, 12, 0, 5),
+		Size = UDim2.new(1, -24, 1, -10),
 	})
 
 	-- headline with a gradient (the label itself stays white, the gradient colours it)
-	local headline = newText(inner, "Headline", won and "VICTORY!" or "DEFEAT", "Title", 32, WHITE, {
+	local headline = newText(inner, "Headline", won and "VICTORY!" or "DEFEAT", "Title", 40, WHITE, {
 		Position = UDim2.fromOffset(0, titleY),
 		Size = UDim2.new(1, 0, 0, TITLE_H),
 		TextXAlignment = Enum.TextXAlignment.Center,
 		Stroke = 0.1,
+		Outline = 3,
 	})
 	if won then
 		Theme.Gradient(headline, Colors.TokenGlow, Colors.Token, 90)
 	else
-		Theme.Gradient(headline, Color3.fromRGB(190, 204, 244), Color3.fromRGB(128, 138, 214), 90)
+		Theme.Gradient(headline, Color3.fromRGB(196, 208, 246), Color3.fromRGB(132, 142, 216), 90)
 	end
 
 	-- difficulty + stars
@@ -634,18 +860,21 @@ local function buildResults(data)
 	if starCount > 0 then
 		diffText = diffText .. "  <font color=\"" .. hex(GOLD) .. "\">" .. string.rep("\226\152\133", math.min(5, starCount)) .. "</font>"
 	end
-	newText(inner, "Difficulty", diffText, "Heading", 15, Theme.Lighten(diffColor, 0.3), {
+	newText(inner, "Difficulty", diffText, "Heading", 21, Theme.Lighten(diffColor, 0.3), {
 		Position = UDim2.fromOffset(0, diffY),
 		Size = UDim2.new(1, 0, 0, DIFF_H),
 		TextXAlignment = Enum.TextXAlignment.Center,
 		RichText = true,
+		Stroke = 0.2,
+		Outline = 1.5,
 	})
 	if reason then
-		newText(inner, "Reason", reason, "Body", 13, MUTED, {
+		newText(inner, "Reason", reason, "Body", 18, MUTED, {
 			Position = UDim2.fromOffset(0, reasonY),
 			Size = UDim2.new(1, 0, 0, REASON_H),
 			TextXAlignment = Enum.TextXAlignment.Center,
-			Stroke = 0.5,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+			Stroke = 0.35,
 		})
 	end
 
@@ -655,22 +884,23 @@ local function buildResults(data)
 		local rowY = statsY + (index - 1) * ROW_H
 		local bar = newFrame(inner, "Row" .. caption, {
 			Position = UDim2.fromOffset(0, rowY),
-			Size = UDim2.new(1, 0, 0, ROW_H - 2),
-			BackgroundTransparency = 0.7,
+			Size = UDim2.new(1, 0, 0, ROW_H - 4),
+			BackgroundTransparency = 0.45,
 			BackgroundColor3 = Colors.Ink,
 		})
-		Theme.Corner(bar, UDim.new(0, 8))
-		newText(bar, "Caption", caption, "Body", 14, MUTED, {
-			Position = UDim2.new(0, 8, 0, 0),
-			Size = UDim2.new(0.4, 0, 1, 0),
-			Stroke = 0.5,
+		Theme.Corner(bar, UDim.new(0, 9))
+		newText(bar, "Caption", caption, "Body", 18, MUTED, {
+			Position = UDim2.new(0, 10, 0, 0),
+			Size = UDim2.new(0.45, 0, 1, 0),
+			Stroke = 0.35,
 		})
-		return newText(bar, "Value", valueText, "Heading", 15, valueColor, {
+		return newText(bar, "Value", valueText, "Heading", 20, valueColor, {
 			AnchorPoint = Vector2.new(1, 0),
-			Position = UDim2.new(1, -8, 0, 0),
-			Size = UDim2.new(0.6, 0, 1, 0),
+			Position = UDim2.new(1, -10, 0, 0),
+			Size = UDim2.new(0.55, 0, 1, 0),
 			TextXAlignment = Enum.TextXAlignment.Right,
-			Stroke = 0.3,
+			Stroke = 0.2,
+			Outline = 1.5,
 		})
 	end
 
@@ -701,18 +931,18 @@ local function buildResults(data)
 				Size = UDim2.new(1, 0, 0, MEMBER_H),
 			})
 			local mine = isLocalName(m.Name)
-			newText(row, "Name", m.Name, "Body", 13, mine and Colors.TokenGlow or WHITE, {
+			newText(row, "Name", m.Name, "Body", 18, mine and Colors.TokenGlow or WHITE, {
 				Position = UDim2.new(0, 6, 0, 0),
-				Size = UDim2.new(1, -86, 1, 0),
+				Size = UDim2.new(1, -104, 1, 0),
 				TextTruncate = Enum.TextTruncate.AtEnd,
-				Stroke = 0.5,
+				Stroke = 0.35,
 			})
-			newText(row, "Tokens", "\226\152\129 " .. tostring(m.Tokens), "Heading", 13, Colors.TokenGlow, {
+			newText(row, "Tokens", "\226\152\129 " .. tostring(m.Tokens), "Heading", 18, Colors.TokenGlow, {
 				AnchorPoint = Vector2.new(1, 0),
-				Position = UDim2.new(1, -24, 0, 0),
-				Size = UDim2.fromOffset(58, MEMBER_H),
+				Position = UDim2.new(1, -28, 0, 0),
+				Size = UDim2.fromOffset(70, MEMBER_H),
 				TextXAlignment = Enum.TextXAlignment.Right,
-				Stroke = 0.5,
+				Stroke = 0.3,
 			})
 			local stateText = ""
 			local stateColor = WHITE
@@ -723,21 +953,23 @@ local function buildResults(data)
 				stateText = "\226\152\160" -- skull and crossbones
 				stateColor = Colors.Bad
 			end
-			newText(row, "State", stateText, "Heading", 13, stateColor, {
+			newText(row, "State", stateText, "Heading", 18, stateColor, {
 				AnchorPoint = Vector2.new(1, 0),
 				Position = UDim2.new(1, -4, 0, 0),
-				Size = UDim2.fromOffset(16, MEMBER_H),
+				Size = UDim2.fromOffset(20, MEMBER_H),
 				TextXAlignment = Enum.TextXAlignment.Center,
+				Stroke = 0.3,
 			})
 		end
 	end
 
 	-- footer: countdown to the lobby
-	local footer = newText(inner, "Footer", "", "Toast", 15, Colors.Cloud, {
+	local footer = newText(inner, "Footer", "", "Toast", 19, Colors.Cloud, {
 		Position = UDim2.fromOffset(0, footY),
 		Size = UDim2.new(1, 0, 0, FOOT_H),
 		TextXAlignment = Enum.TextXAlignment.Center,
-		Stroke = 0.3,
+		Stroke = 0.2,
+		Outline = 1.5,
 	})
 
 	return panel, footer, serial
@@ -755,6 +987,7 @@ local function showResults(data)
 		return
 	end
 	result.Panel = panel
+	publishResultCard()
 
 	tween(panel.Root, 0.5, { Position = resultPosition(1) }, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
 	if data.Won == true then
@@ -1023,6 +1256,12 @@ function NotifyController.Init()
 	if not ok then
 		warn("[NotifyController] GUI setup failed: " .. tostring(err))
 	end
+	task.spawn(function()
+		local okHud, hudErr = pcall(watchHud)
+		if not okHud then
+			warn("[NotifyController] could not follow the HUD layout: " .. tostring(hudErr))
+		end
+	end)
 
 	Players.PlayerRemoving:Connect(function(player)
 		lastDashFx[player.UserId] = nil

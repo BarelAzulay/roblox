@@ -1,4 +1,4 @@
--- HotbarController (client, v2): four item slots at the bottom-centre of the screen.
+-- HotbarController (client, v3): four item slots at the bottom-centre of the screen.
 --
 --   HotbarController.Init()
 --   HotbarController.UseSlot(index)      -- same as pressing key `index` (1..4)
@@ -8,7 +8,14 @@
 -- and a tap / click use the item through the UseItem remote; the server validates everything.
 -- Counts come from State and re-render on State.Changed. Items only work in matches, so the whole
 -- bar is dimmed in the lobby (and while downed, or when a stack is empty); a used slot flashes, pops and
--- shows a short cooldown bar. Slots are at least 48 px on screen, so they stay tappable on phones.
+-- shows a short cooldown bar.
+--
+-- v3 readability rule: the bar is designed in 1080p pixels (80 px slots) under ONE UIScale of the screen
+-- factor clamp(viewportY / 1080, 0.8, 1.25). On touch screens it never grows past the footprint the touch
+-- RUN / DASH buttons keep clear of (MovementController: 280 x 64 px at clamp(min(w/1280, h/720), 0.75, 1.2))
+-- and it slides left of Roblox's jump button on narrow phones; slots stay >= 48 px (touch friendly). The
+-- count / key / hint texts grow in design pixels when the bar is scaled down, so they never render below
+-- 14.5 px on screen.
 -- Plain Lua 5.1-compatible syntax only. All text goes through Theme roles.
 
 local Players = game:GetService("Players")
@@ -36,18 +43,23 @@ end
 local HotbarController = {}
 
 ----------------------------------------------------------------------
--- Tunables
+-- Tunables (design pixels of a 1080p screen unless noted)
 ----------------------------------------------------------------------
-local REF_W, REF_H = 1280, 720
-local MIN_SCALE, MAX_SCALE = 0.75, 1.2 -- 64 px * 0.75 = 48 px: the touch minimum
-local SLOT = 64
-local GAP = 8
-local BOTTOM = 10
-local TOUCH_BOTTOM = 16
+local SLOT = 80
+local GAP = 10
+local BOTTOM = 14 -- screen px from the bottom edge
+local TOUCH_BOTTOM = 16 -- screen px on touch devices (MovementController expects 16)
 local JUMP_GAP = 8 -- clear space kept between the bar and Roblox's jump button (touch devices)
 local SIDE_GAP = 6 -- the bar never slides closer than this to the left screen edge
+local TOUCH_MIN_PX = 48 -- smallest on-screen slot
+local MIN_TEXT_PX = 14.5 -- smallest on-screen text
+local COUNT_TEXT = 22 -- design px of the "x3" stack count
+local KEY_TEXT = 19 -- design px of the key chip number
+local HINT_TEXT = 20 -- design px of the hint above the bar
 local COOLDOWN = 0.8 -- seconds between two uses of the same slot
-local HINT_SECONDS = 2.2
+local HINT_SECONDS = 2.4
+-- The touch-control footprint MovementController keeps clear of (keep in sync with it).
+local MC_W, MC_H = 280, 64
 
 local Colors = Theme.Colors
 local NAVY = Colors.Navy or Colors.Ink
@@ -74,28 +86,37 @@ local LocalPlayer = nil
 local gui = nil
 local holder = nil
 local holderScale = nil
-local slots = {} -- index -> { Slot, Def, Punch (UIScale), Bar (cooldown frame), CoolUntil, LastCount }
+local slots = {} -- index -> { Slot, Def, Punch (UIScale), Bar (cooldown frame), CoolUntil, LastCount, Count, Key }
 local useRemote = nil
-local hint = { Frame = nil, Label = nil, Token = 0 }
+local hint = { Frame = nil, Label = nil, Limit = nil, Token = 0 }
 local touchDevice = false
+local warned = {}
 
 ----------------------------------------------------------------------
 -- Helpers
 ----------------------------------------------------------------------
 local function warnOnce(key, err)
-	HotbarController._warned = HotbarController._warned or {}
-	if not HotbarController._warned[key] then
-		HotbarController._warned[key] = true
+	if not warned[key] then
+		warned[key] = true
 		warn("[HotbarController] " .. tostring(key) .. ": " .. tostring(err))
 	end
 end
 
 local function guiSize()
-	local size = gui and gui.AbsoluteSize or Vector2.new(REF_W, REF_H)
+	local size = gui and gui.AbsoluteSize or Vector2.new(1280, 720)
 	if size.X < 2 or size.Y < 2 then
-		return Vector2.new(REF_W, REF_H)
+		return Vector2.new(1280, 720)
 	end
 	return size
+end
+
+local function viewportSize()
+	local camera = workspace.CurrentCamera
+	local vp = camera and camera.ViewportSize
+	if vp and vp.X > 2 and vp.Y > 2 then
+		return vp
+	end
+	return guiSize()
 end
 
 local function inMatch()
@@ -110,6 +131,11 @@ local function slotCount()
 	return math.max(1, math.floor(tonumber(Config.Items.HotbarSlots) or 4))
 end
 
+local function barWidth()
+	local count = slotCount()
+	return count * SLOT + (count - 1) * GAP
+end
+
 local function getUseRemote()
 	if useRemote then
 		return useRemote
@@ -121,28 +147,74 @@ local function getUseRemote()
 	return useRemote
 end
 
+-- Design text size that renders at least MIN_TEXT_PX on screen under `scale`.
+local function readable(designPx, scale)
+	if scale <= 0 then
+		return designPx
+	end
+	return math.max(designPx, math.ceil(MIN_TEXT_PX / scale))
+end
+
+local function applyTextSizes(scale)
+	local countSize = readable(COUNT_TEXT, scale)
+	local keySize = readable(KEY_TEXT, scale)
+	for _, entry in ipairs(slots) do
+		if entry.Count then
+			entry.Count.TextSize = countSize
+			entry.Count.Size = UDim2.new(0.9, 0, 0, countSize + 2)
+		end
+		if entry.Key then
+			entry.Key.TextSize = keySize
+			local chip = entry.Key.Parent
+			if chip and chip:IsA("GuiObject") then
+				chip.Size = UDim2.fromOffset(keySize + 9, keySize + 9)
+			end
+		end
+	end
+	if hint.Label then
+		local hintSize = readable(HINT_TEXT, scale)
+		hint.Label.TextSize = hintSize
+		if hint.Limit then
+			hint.Limit.MaxSize = Vector2.new(math.floor(hintSize * 19), 200)
+		end
+	end
+end
+
 local function relayout()
 	if not holder then
 		return
 	end
 	local size = guiSize()
-	holderScale.Scale = Util.Clamp(math.min(size.X / REF_W, size.Y / REF_H), MIN_SCALE, MAX_SCALE)
+	local vp = viewportSize()
+	local width = barWidth()
+	local scale = Theme.ScreenFactor(vp.Y)
 	local bottom = BOTTOM
 	local shift = 0
 	if touchDevice then
 		bottom = TOUCH_BOTTOM
-		-- Roblox's own jump button sits bottom-right: its left edge is 1.5 J - 10 px from the right screen edge
+		-- stay inside the footprint the touch RUN / DASH buttons keep clear of
+		local mcScale = Util.Clamp(math.min(vp.X / 1280, vp.Y / 720), 0.75, 1.2)
+		scale = math.min(scale, MC_W * mcScale / width, MC_H * mcScale / SLOT)
+		-- Roblox's own jump button sits bottom-right: its left edge is 1.5 J + 10 px from the right screen edge
 		-- (J = 70 when the smaller screen axis is <= 500 px, else 120). On a narrow phone the centred bar would
-		-- touch it, so the bar slides left just far enough (and never off the left edge).
-		local camera = workspace.CurrentCamera
-		local vp = camera and camera.ViewportSize or size
+		-- touch it, so it shrinks (never below the touch minimum) and slides left just far enough.
 		local jump = math.min(vp.X, vp.Y) <= 500 and 70 or 120
-		local reach = size.X - (jump * 1.5 - 10) - JUMP_GAP -- right-most x the bar may reach
-		local half = holder.Size.X.Offset * holderScale.Scale / 2
+		local reach = size.X - (jump * 1.5 + 10) - JUMP_GAP -- right-most x the bar may reach
+		scale = math.min(scale, (reach - SIDE_GAP) / width)
+	end
+	-- never wider than the screen, never smaller than the touch minimum
+	scale = math.min(scale, (size.X - 2 * SIDE_GAP) / width)
+	scale = math.max(scale, TOUCH_MIN_PX / SLOT)
+	holderScale.Scale = scale
+	if touchDevice then
+		local jump = math.min(vp.X, vp.Y) <= 500 and 70 or 120
+		local reach = size.X - (jump * 1.5 + 10) - JUMP_GAP
+		local half = width * scale / 2
 		shift = math.min(0, reach - half - size.X / 2)
 		shift = math.min(0, math.max(shift, half + SIDE_GAP - size.X / 2))
 	end
 	holder.Position = UDim2.new(0.5, math.floor(shift), 1, -bottom)
+	applyTextSizes(scale)
 end
 
 ----------------------------------------------------------------------
@@ -152,37 +224,40 @@ local function buildHint()
 	local frame = Util.Create("Frame", {
 		Name = "Hint",
 		AnchorPoint = Vector2.new(0.5, 1),
-		Position = UDim2.new(0.5, 0, 0, -10),
+		Position = UDim2.new(0.5, 0, 0, -12),
 		Size = UDim2.fromOffset(0, 0),
 		AutomaticSize = Enum.AutomaticSize.XY,
-		BackgroundColor3 = Colors.Panel,
-		BackgroundTransparency = 0.06,
+		BackgroundColor3 = Colors.White, -- the gradient below multiplies this base colour
+		BackgroundTransparency = 0.04,
 		BorderSizePixel = 0,
 		Visible = false,
 		ZIndex = 20,
 		Parent = holder,
 	})
-	Theme.Corner(frame, UDim.new(0, 10))
+	Theme.Corner(frame, UDim.new(0, 12))
 	Theme.Stroke(frame, NAVY, 3, 0)
+	Theme.Gradient(frame, Colors.PanelLight, Colors.Panel, 90)
 	Util.Create("UIPadding", {
-		PaddingLeft = UDim.new(0, 12),
-		PaddingRight = UDim.new(0, 12),
-		PaddingTop = UDim.new(0, 6),
-		PaddingBottom = UDim.new(0, 6),
+		PaddingLeft = UDim.new(0, 14),
+		PaddingRight = UDim.new(0, 14),
+		PaddingTop = UDim.new(0, 8),
+		PaddingBottom = UDim.new(0, 8),
 		Parent = frame,
 	})
 	local label = Theme.Label("", "Toast", {
-		Size = 15,
-		Stroke = 0.25,
+		Size = HINT_TEXT,
+		Stroke = 0.2,
+		Outline = 1.5,
 		Props = {
 			Name = "Text",
 			AutomaticSize = Enum.AutomaticSize.XY,
 			Size = UDim2.fromOffset(0, 0),
 			TextWrapped = true,
 			TextXAlignment = Enum.TextXAlignment.Center,
+			ZIndex = 21,
 		},
 	})
-	Util.Create("UISizeConstraint", { MaxSize = Vector2.new(300, 120), Parent = label })
+	hint.Limit = Util.Create("UISizeConstraint", { MaxSize = Vector2.new(380, 200), Parent = label })
 	label.Parent = frame
 	hint.Frame = frame
 	hint.Label = label
@@ -196,7 +271,7 @@ local function showHint(text, kind)
 	local mine = hint.Token
 	local color = KINDS[kind or "info"] or KINDS.info or Colors.PanelLight
 	hint.Label.Text = tostring(text)
-	hint.Label.TextColor3 = Theme.Lighten(color, 0.45)
+	hint.Label.TextColor3 = Theme.Lighten(color, 0.55)
 	hint.Frame.Visible = true
 	task.delay(HINT_SECONDS, function()
 		if hint.Token == mine and hint.Frame then
@@ -246,8 +321,8 @@ end
 local function startCooldown(entry)
 	entry.CoolUntil = os.clock() + COOLDOWN
 	entry.Bar.Visible = true
-	entry.Bar.Size = UDim2.new(1, -12, 0, 5)
-	Util.Tween(entry.Bar, COOLDOWN, { Size = UDim2.new(0, 0, 0, 5) }, Enum.EasingStyle.Linear, Enum.EasingDirection.Out)
+	entry.Bar.Size = UDim2.new(1, -14, 0, 6)
+	Util.Tween(entry.Bar, COOLDOWN, { Size = UDim2.new(0, 0, 0, 6) }, Enum.EasingStyle.Linear, Enum.EasingDirection.Out)
 	paintSlot(entry)
 	task.delay(COOLDOWN + 0.02, function()
 		if entry.Bar and entry.Bar.Parent then
@@ -311,7 +386,7 @@ end
 
 local function buildSlots()
 	local count = slotCount()
-	holder.Size = UDim2.fromOffset(count * SLOT + (count - 1) * GAP, SLOT)
+	holder.Size = UDim2.fromOffset(barWidth(), SLOT)
 	for index = 1, count do
 		local def = itemForSlot(index)
 		local slot = CloudUI.Slot({
@@ -347,8 +422,8 @@ local function buildSlots()
 		local bar = Util.Create("Frame", {
 			Name = "Cooldown",
 			AnchorPoint = Vector2.new(0.5, 1),
-			Position = UDim2.new(0.5, 0, 1, -5),
-			Size = UDim2.new(1, -12, 0, 5),
+			Position = UDim2.new(0.5, 0, 1, -6),
+			Size = UDim2.new(1, -14, 0, 6),
 			BackgroundColor3 = Colors.Gold or Colors.Token,
 			BorderSizePixel = 0,
 			Visible = false,
@@ -356,7 +431,26 @@ local function buildSlots()
 			Parent = slot.Root,
 		})
 		Theme.Corner(bar, UDim.new(0.5, 0))
-		slots[index] = { Slot = slot, Def = def, Punch = punch, Bar = bar, CoolUntil = 0, LastCount = nil }
+		Theme.Stroke(bar, NAVY, 1.5, 0)
+		-- the kit's count / key labels, resized by relayout so they stay readable at any scale
+		local countLabel = slot.Root:FindFirstChild("Count", true)
+		local keyLabel = slot.Root:FindFirstChild("Key", true)
+		if countLabel and not countLabel:IsA("TextLabel") then
+			countLabel = nil
+		end
+		if keyLabel and not keyLabel:IsA("TextLabel") then
+			keyLabel = nil
+		end
+		slots[index] = {
+			Slot = slot,
+			Def = def,
+			Punch = punch,
+			Bar = bar,
+			CoolUntil = 0,
+			LastCount = nil,
+			Count = countLabel,
+			Key = keyLabel,
+		}
 	end
 end
 
@@ -377,7 +471,7 @@ function HotbarController.Init()
 		Name = "Hotbar",
 		AnchorPoint = Vector2.new(0.5, 1),
 		Position = UDim2.new(0.5, 0, 1, -BOTTOM),
-		Size = UDim2.fromOffset(4 * SLOT + 3 * GAP, SLOT),
+		Size = UDim2.fromOffset(barWidth(), SLOT),
 		BackgroundTransparency = 1,
 		BorderSizePixel = 0,
 		Parent = gui,
@@ -389,7 +483,12 @@ function HotbarController.Init()
 	relayout()
 	refresh()
 
-	gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(relayout)
+	gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+		local ok, err = pcall(relayout)
+		if not ok then
+			warnOnce("relayout", err)
+		end
+	end)
 	State.Changed:Connect(function()
 		local ok, err = pcall(refresh)
 		if not ok then

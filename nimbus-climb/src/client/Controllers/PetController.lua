@@ -3,13 +3,19 @@
 --   PetController.Init()
 --   PetController.Stop()            -- tears everything down (tests / hot reload)
 --   PetController.GetPetCount()     -- number of pet models currently alive (debug helper)
+--   PetController.GetMoveStats()    -- { Rigid = n, Pivot = n }: pets posed in the last frame by one root write /
+--                                      by the PivotTo fallback (debug helper for the smoke tests)
 --
 -- What it does
 --   * Reads the player attribute `EquippedPets` (csv of pet ids, Config.Attr.EquippedPets) of EVERY player
 --     and keeps one follower per player. Ids unknown to PetCatalog are ignored, at most
 --     Config.Pets.MaxEquipped are used. All pets are drawn on this client only (workspace.ClientPets, one
 --     Folder per owner named after the UserId); the server pays nothing.
---   * Each pet is a PetBuilder model that is moved with PivotTo + PetBuilder.Animate once per frame.
+--   * Each pet is a PetBuilder model. Right after it is built, every static part (body, head, eyes, eyelids...)
+--     is welded once to the anchored PrimaryPart (like NpcController / ShowcaseController do), so a pose is ONE
+--     CFrame write on the root: the engine carries the welded parts along. PetBuilder.Animate then re-poses only
+--     the wing / tail / halo parts from the root (they stay anchored). A model that cannot be welded falls back
+--     to PivotTo; a pet whose Animate keeps failing gets its animated parts welded too, so nothing trails behind.
 --     Pets hover in a loose formation (left / right / behind, ~4 studs out, at head height), bob and sway
 --     with their own phase, ease towards their slot with an exponential filter (so they trail and catch up
 --     naturally), face the direction the owner travels, bank into turns, pitch forward when they speed up,
@@ -18,11 +24,14 @@
 --     respawn get their pets snapped back into formation. A pet that ends up > 60 studs from its slot snaps.
 --   * Pets of OTHER players are only shown within 150 studs of the viewer (with a little hysteresis) and are
 --     updated less often the further away they are (LOD). The local player's pets are always shown.
---   * Models are built lazily (at most two per frame), destroyed when the pet is unequipped, when the owner's
---     character is removed or when the player leaves, and parked (Parent = nil) while culled.
+--   * Models are built lazily under a time budget (one per frame at least, more only while the frame's build
+--     time stays under BUILD_BUDGET: a first-time High sculpt is far more expensive than a cached clone),
+--     destroyed when the pet is unequipped, when the owner's character is removed or when the player leaves,
+--     and parked (Parent = nil) while culled.
 --
 -- Performance: the per-frame code touches only numbers stored on long-lived tables, builds no tables or
 -- closures, and creates exactly one CFrame per pet per update (the rotation matrix is written out by hand).
+-- Per pet and frame Lua writes one root CFrame plus the animated parts (no part is written twice).
 -- Everything is wrapped in pcall so one broken pet can never stop the others.
 -- Plain Lua 5.1-compatible syntax only.
 
@@ -74,8 +83,13 @@ local MAX_DT = 0.1
 local MIN_DT = 1 / 240
 local ROOT_POLL = 0.25 -- seconds between searches for a missing HumanoidRootPart
 local SLOW_TICK = 0.5 -- seconds between housekeeping checks per follower
-local BUILDS_PER_FRAME = 2 -- pet models built per frame (a model is ~50 parts)
+-- Builds per frame: a cached clone costs a few ms, a first-time High sculpt (~300 parts) tens of ms, so the
+-- budget is time, not a count: the first build of a frame always runs, the next ones only while the frame has
+-- spent less than BUILD_BUDGET seconds building, and never more than BUILD_MAX.
+local BUILD_BUDGET = 0.004
+local BUILD_MAX = 3
 local BUILD_RETRY = 5 -- seconds before a failed build is tried again
+local WELD_NAME = "PetFollowWeld"
 
 -- Owner motion estimate
 local VEL_RATE = 12 -- smoothing of the owner velocity (1/s)
@@ -129,7 +143,10 @@ local localFollower = nil -- the follower of LocalPlayer (reference point for cu
 local renderConn = nil
 local playerConns = {}
 local frameIndex = 0
-local buildBudget = 0
+local buildsThisFrame = 0 -- models built in the current frame
+local buildStart = 0 -- os.clock() when the frame's first build started
+local movedRigid, movedPivot = 0, 0 -- pets posed in the current frame (root write / PivotTo fallback)
+local lastRigid, lastPivot = 0, 0 -- ... in the last finished frame (GetMoveStats)
 local nextFolderCheck = 0
 local warnedAt = {} -- [key] = os.clock() of the last warning (rate limit)
 
@@ -237,6 +254,9 @@ local function newPetRecord(def)
 		fresh = 1, -- 0 settled, 1 snap into the slot, 2 emerge from the owner
 		retryAt = 0,
 		animFails = 0,
+		root = nil, -- the model's anchored PrimaryPart
+		rigid = false, -- true: the static parts are welded to `root` (a pose is one root CFrame write)
+		pivotInv = nil, -- inverse of root.PivotOffset when it is not the identity
 		opts = { Flap = 1, Excited = 0 }, -- reused every frame for PetBuilder.Animate
 	}
 end
@@ -244,14 +264,47 @@ end
 local function destroyPetModel(p)
 	local model = p.model
 	p.model = nil
+	p.root = nil
+	p.rigid = false
 	if model then
 		pcall(model.Destroy, model)
 	end
 end
 
+-- Parts that PetBuilder.Animate re-poses on every call: members of a PB_G group with a PB_Base pose, except the
+-- eyelids ("lid" groups only change their transparency, they move with the head like every static part).
+local function isAnimatedPart(part)
+	local spec = part:GetAttribute("PB_G")
+	if type(spec) ~= "string" or type(part:GetAttribute("PB_Base")) ~= "string" then
+		return false
+	end
+	local kind = string.match(spec, "^[^:]*:([^:]*)")
+	return kind ~= "lid"
+end
+
+-- Welds parts of `model` to its anchored `root` at their current offset (once per build, never per frame).
+-- all = false: the static parts only (Animate keeps posing the rest); true: every part that is still anchored.
+local function weldParts(model, root, all)
+	local inv = root.CFrame:Inverse()
+	local identity = CFrame.new()
+	for _, part in ipairs(model:GetDescendants()) do
+		if part:IsA("BasePart") and part ~= root and part.Anchored and (all or not isAnimatedPart(part)) then
+			local weld = Instance.new("Weld")
+			weld.Name = WELD_NAME
+			weld.Part0 = root
+			weld.Part1 = part
+			weld.C0 = inv * part.CFrame
+			weld.C1 = identity
+			weld.Parent = part
+			part.Anchored = false
+		end
+	end
+	root.Anchored = true
+end
+
 -- Builds the model of one pet (inside pcall: a broken definition must not take the controller down).
 local function buildModel(f, p)
-	local ok, model = pcall(PetBuilder.Build, p.def, BUILD_OPTS)
+	local ok, model = pcall(PetBuilder.Build, p.def, { Scale = BUILD_OPTS.Scale, Detail = f.isLocal and "High" or "Low" }) -- v3 LOD: own pets High, others Low
 	if not ok or typeof(model) ~= "Instance" then
 		p.retryAt = os.clock() + BUILD_RETRY
 		warnLimited("build_" .. tostring(p.id), "could not build pet " .. tostring(p.id) .. ": " .. tostring(model))
@@ -262,9 +315,33 @@ local function buildModel(f, p)
 	if okSize and typeof(size) == "Vector3" then
 		p.lift = clamp((size.Y - 2.7) * 0.35, -0.4, 0.6)
 	end
+	-- weld the static parts to the anchored root once: every later pose is a single root CFrame write
+	-- (followers live in workspace, where joints are solved; never do this inside a ViewportFrame)
+	local root = model.PrimaryPart
+	p.root, p.rigid, p.pivotInv = nil, false, nil
+	if root and root:IsA("BasePart") then
+		local okWeld, err = pcall(weldParts, model, root, false)
+		if okWeld then
+			p.root = root
+			p.rigid = true
+			local x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22 = root.PivotOffset:GetComponents()
+			if abs(x) + abs(y) + abs(z) > 1e-6 or abs(r00 - 1) + abs(r11 - 1) + abs(r22 - 1) + abs(r01) + abs(r02) + abs(r10) + abs(r12) + abs(r20) + abs(r21) > 1e-6 then
+				p.pivotInv = root.PivotOffset:Inverse()
+			end
+		else
+			warnLimited("weld_" .. tostring(p.id), "could not weld pet " .. tostring(p.id) .. ", using PivotTo: " .. tostring(err))
+		end
+	end
 	p.model = model
 	p.animFails = 0
 	model.Parent = f.folder
+end
+
+-- Animate gave up on this pet: weld its animated parts too (in their last pose), so they keep following.
+local function freezeAnimatedParts(p)
+	if p.rigid and p.model and p.root then
+		pcall(weldParts, p.model, p.root, true)
+	end
 end
 
 ----------------------------------------------------------------------
@@ -650,8 +727,12 @@ local function stepFollower(f, dt, now, viewPos)
 	for i = 1, f.n do
 		local p = pets[i]
 		local model = p.model
-		if not model and buildBudget > 0 and now >= p.retryAt then
-			buildBudget = buildBudget - 1
+		if not model and now >= p.retryAt and buildsThisFrame < BUILD_MAX
+			and (buildsThisFrame == 0 or os.clock() - buildStart < BUILD_BUDGET) then
+			if buildsThisFrame == 0 then
+				buildStart = os.clock()
+			end
+			buildsThisFrame = buildsThisFrame + 1
 			buildModel(f, p)
 			model = p.model
 		end
@@ -711,12 +792,25 @@ local function stepFollower(f, dt, now, viewPos)
 				-- rotation = Ry(yaw) * Rx(pitch) * Rz(roll), written out so only one CFrame is created
 				local spt, cpt = sin(pitch), cos(pitch)
 				local srl, crl = sin(roll), cos(roll)
-				model:PivotTo(CFrame.new(
+				local cf = CFrame.new(
 					nx, ny, nz,
 					cyw * crl + syw * spt * srl, -cyw * srl + syw * spt * crl, syw * cpt,
 					cpt * srl, cpt * crl, -spt,
 					-syw * crl + cyw * spt * srl, syw * srl + cyw * spt * crl, cyw * cpt
-				))
+				)
+				local root = p.root
+				if p.rigid and root and root.Parent == model then
+					-- one write: the welded static parts follow the anchored root
+					if p.pivotInv then
+						root.CFrame = cf * p.pivotInv
+					else
+						root.CFrame = cf
+					end
+					movedRigid = movedRigid + 1
+				else
+					model:PivotTo(cf)
+					movedPivot = movedPivot + 1
+				end
 
 				if p.animFails < 3 then
 					local o = p.opts
@@ -725,6 +819,9 @@ local function stepFollower(f, dt, now, viewPos)
 					local okAnim = pcall(PetBuilder.Animate, model, now, o)
 					if not okAnim then
 						p.animFails = p.animFails + 1
+						if p.animFails >= 3 then
+							freezeAnimatedParts(p)
+						end
 					end
 				end
 			else
@@ -742,7 +839,9 @@ local function onRender(dt)
 		return
 	end
 	frameIndex = frameIndex + 1
-	buildBudget = BUILDS_PER_FRAME
+	buildsThisFrame = 0
+	lastRigid, lastPivot = movedRigid, movedPivot
+	movedRigid, movedPivot = 0, 0
 	if dt > MAX_DT then
 		dt = MAX_DT
 	end
@@ -795,6 +894,11 @@ function PetController.GetPetCount()
 		end
 	end
 	return total
+end
+
+-- Pets posed in the last finished frame: Rigid = one root CFrame write (welded statics), Pivot = PivotTo fallback.
+function PetController.GetMoveStats()
+	return { Rigid = lastRigid, Pivot = lastPivot }
 end
 
 function PetController.Stop()

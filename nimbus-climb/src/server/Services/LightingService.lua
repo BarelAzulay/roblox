@@ -1,17 +1,20 @@
--- LightingService: owns the sky, atmosphere, post effects and global workspace rules.
+-- LightingService: owns the sky, atmosphere, post effects, the soft moving sky clouds and the global
+-- workspace rules.
 --
--- v2 look ("late-afternoon calm"): the old golden-hour setup was blown out (bright ambient,
--- strong bloom, strong colour shifts). Everything here is tuned the other way round so that
--- cloud platforms, hazards and UI-in-the-world stay readable:
---   * lower sun brightness and ambient, slightly negative exposure,
---   * a blue-grey atmosphere with a soft peach horizon (no white-out haze),
---   * bloom only on genuinely bright accents (neon trims, tokens), tiny sun rays,
---   * a little extra contrast, a hint of saturation, a cool tint, depth of field off.
+-- v3 look ("bright, warm afternoon", ARCHITECTURE_V3.md section 6): the player found the v2 world a bit
+-- sad. The sun is now higher, brighter and warmer, the shade a little lighter, colours a touch richer,
+-- while everything stays readable:
+--   * ClockTime ~14.5 with a warm ColorShift_Top: sunlit voxel tops read golden-white, shaded sides cool,
+--   * OutdoorAmbient a little higher (no black shadows on the voxel creases),
+--   * exposure kept slightly negative so the near-white cloud voxels never blow out,
+--   * a light sky-blue atmosphere with a soft peach horizon, gentle glare,
+--   * bloom stays subtle (only neon trims and tokens glow), faint sun rays,
+--   * real moving sky clouds (workspace.Terrain.Clouds) for depth above the lobby.
 -- No asset ids anywhere: the stock sky textures stay, only the celestial bodies are tuned.
--- Lighting.Technology (ShadowMap) cannot be written from a script (plugin security), so it is set
--- by the "Lighting" node in default.project.json; ShadowSoftness and the environment scales
--- below only matter with that technology.
--- Plain Lua 5.1-compatible syntax only.
+-- Lighting.Technology (ShadowMap) cannot be written from a script (plugin security), so it is set by
+-- the "Lighting" node in default.project.json; ShadowSoftness and the environment scales below only
+-- matter with that technology.
+-- Plain Lua 5.1-compatible syntax only. Init() is idempotent.
 
 local Lighting = game:GetService("Lighting")
 local Players = game:GetService("Players")
@@ -26,58 +29,55 @@ local LightingService = {}
 -- The tuned values live in one table so the whole mood can be adjusted in one place.
 local LOOK = {
 	Lighting = {
-		ClockTime = 15.2, -- mid-late afternoon: the sun is still up but already soft
-		-- A HIGHER latitude lowers the sun's path (a lower one pushes it towards the zenith). With
-		-- ClockTime 15.2 the sun stands about 36 degrees up at latitude 28, 30 at Roblox's default
-		-- (41.7) and 27 at 48: lower sun = longer, clearer shadows and ~10% less direct light on the
-		-- platform tops than the default, which is what the "too bright" fix wants.
-		GeographicLatitude = 48,
-		Brightness = 1.5,
-		Ambient = Color3.fromRGB(84, 96, 128),
-		OutdoorAmbient = Color3.fromRGB(108, 120, 152),
-		-- Colour shifts are added on top of the lit / shaded sides. Keep them very dim: the old
-		-- values (hundreds of points) were a big part of the "way too bright" problem.
-		ColorShift_Top = Color3.fromRGB(34, 26, 16),
-		ColorShift_Bottom = Color3.fromRGB(8, 14, 30),
-		EnvironmentDiffuseScale = 0.5,
-		EnvironmentSpecularScale = 0.4,
-		ExposureCompensation = -0.3,
+		ClockTime = 14.5, -- early afternoon: a high, friendly sun
+		-- A lower latitude lifts the sun's path. At 34 degrees and 14:30 the sun stands roughly 50 degrees
+		-- up: voxel tops are well lit, sides still get readable shade and shadows stay short and crisp.
+		GeographicLatitude = 34,
+		Brightness = 2.0,
+		Ambient = Color3.fromRGB(98, 106, 132),
+		OutdoorAmbient = Color3.fromRGB(132, 138, 160), -- a little higher than v2: no black creases
+		-- Colour shifts are added on top of the lit / shaded sides: a warm sun, a cool sky bounce.
+		ColorShift_Top = Color3.fromRGB(66, 50, 26),
+		ColorShift_Bottom = Color3.fromRGB(14, 20, 40),
+		EnvironmentDiffuseScale = 0.6,
+		EnvironmentSpecularScale = 0.35,
+		ExposureCompensation = -0.15, -- brighter than v2 (-0.3) yet the cloud whites keep their shades
 		GlobalShadows = true,
-		ShadowSoftness = 0.25,
+		ShadowSoftness = 0.3,
 		FogStart = 0,
 		FogEnd = 100000, -- the Atmosphere does the distance haze instead of classic fog
 	},
 	Atmosphere = {
-		Density = 0.3,
+		Density = 0.28,
 		Offset = 0.25,
-		Color = Color3.fromRGB(158, 172, 200), -- blue-grey air
-		Decay = Color3.fromRGB(226, 182, 160), -- soft peach horizon
-		Glare = 0.2,
-		Haze = 1.2,
+		Color = Color3.fromRGB(178, 198, 228), -- light sky-blue air
+		Decay = Color3.fromRGB(238, 200, 170), -- soft warm peach horizon
+		Glare = 0.25,
+		Haze = 1.0,
 	},
 	Sky = {
 		StarCount = 2500,
 		CelestialBodiesShown = true,
-		SunAngularSize = 14,
+		SunAngularSize = 16,
 		MoonAngularSize = 9,
 	},
 	Bloom = {
 		Enabled = true,
-		Intensity = 0.12,
-		Size = 16,
-		Threshold = 1.8, -- only the brightest accents (neon, tokens) glow
+		Intensity = 0.16,
+		Size = 18,
+		Threshold = 1.6, -- only the brightest accents (neon, tokens) glow
 	},
 	SunRays = {
 		Enabled = true,
-		Intensity = 0.04,
+		Intensity = 0.06,
 		Spread = 0.6,
 	},
 	ColorCorrection = {
 		Enabled = true,
-		Brightness = -0.03,
-		Contrast = 0.14,
-		Saturation = 0.08,
-		TintColor = Color3.fromRGB(232, 240, 255), -- soft cool tint
+		Brightness = 0,
+		Contrast = 0.1,
+		Saturation = 0.14, -- a little richer than v2: "more colour in the world", still not neon
+		TintColor = Color3.fromRGB(255, 250, 242), -- the faintest warm tint
 	},
 	-- Depth of field is kept switched off (it blurs the course edges players need to read).
 	DepthOfField = {
@@ -87,7 +87,16 @@ local LOOK = {
 		FocusDistance = 200,
 		InFocusRadius = 160,
 	},
+	-- Real moving sky clouds (workspace.Terrain.Clouds): soft, half cover, never a grey overcast.
+	Clouds = {
+		Enabled = true,
+		Cover = 0.5,
+		Density = 0.6,
+		Color = Color3.fromRGB(240, 244, 252),
+	},
 }
+
+LightingService.Look = LOOK
 
 -- Assign every property in `props` to `inst`; a property that does not exist (or is not
 -- scriptable on this engine version) only produces a warning instead of breaking boot.
@@ -102,16 +111,30 @@ local function setProps(inst, props)
 	end
 end
 
--- Reuse the first child of `className` under Lighting, otherwise create one. This makes
--- Init() idempotent and keeps a place that already ships a Sky/Atmosphere from doubling up.
-local function ensure(className, name)
-	local inst = Lighting:FindFirstChildOfClass(className)
+-- Reuse the first child of `className` under `parent`, otherwise create one. This makes Init()
+-- idempotent and keeps a place that already ships a Sky/Atmosphere from doubling up.
+local function ensure(parent, className, name)
+	local inst = parent:FindFirstChildOfClass(className)
 	if not inst then
 		inst = Instance.new(className)
 		inst.Name = name
-		inst.Parent = Lighting
+		inst.Parent = parent
 	end
 	return inst
+end
+
+-- workspace.Terrain.Clouds (skipped quietly when the engine has no Terrain or no Clouds class).
+local function applyClouds()
+	local terrain = Workspace:FindFirstChildOfClass("Terrain")
+	if not terrain then
+		return
+	end
+	local ok, err = pcall(function()
+		setProps(ensure(terrain, "Clouds", "NimbusClouds"), LOOK.Clouds)
+	end)
+	if not ok then
+		warn("[LightingService] sky clouds skipped: " .. tostring(err))
+	end
 end
 
 -- Global physics / world rules. StreamingEnabled is deliberately left alone (false).
@@ -128,12 +151,13 @@ end
 function LightingService.Init()
 	setProps(Lighting, LOOK.Lighting)
 
-	setProps(ensure("Atmosphere", "NimbusAtmosphere"), LOOK.Atmosphere)
-	setProps(ensure("Sky", "NimbusSky"), LOOK.Sky)
-	setProps(ensure("BloomEffect", "NimbusBloom"), LOOK.Bloom)
-	setProps(ensure("SunRaysEffect", "NimbusSunRays"), LOOK.SunRays)
-	setProps(ensure("ColorCorrectionEffect", "NimbusColor"), LOOK.ColorCorrection)
-	setProps(ensure("DepthOfFieldEffect", "NimbusDepthOfField"), LOOK.DepthOfField)
+	setProps(ensure(Lighting, "Atmosphere", "NimbusAtmosphere"), LOOK.Atmosphere)
+	setProps(ensure(Lighting, "Sky", "NimbusSky"), LOOK.Sky)
+	setProps(ensure(Lighting, "BloomEffect", "NimbusBloom"), LOOK.Bloom)
+	setProps(ensure(Lighting, "SunRaysEffect", "NimbusSunRays"), LOOK.SunRays)
+	setProps(ensure(Lighting, "ColorCorrectionEffect", "NimbusColor"), LOOK.ColorCorrection)
+	setProps(ensure(Lighting, "DepthOfFieldEffect", "NimbusDepthOfField"), LOOK.DepthOfField)
+	applyClouds()
 
 	LightingService.ApplyWorldRules()
 end

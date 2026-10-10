@@ -12,6 +12,8 @@
 --     bigger, paler pop).
 --
 -- Colours follow the calmer v2 palette: nothing flashes white, the lightning flash is a faint warm wash.
+-- v3 readability rule: the floating texts are sized with Theme.ScaledSize (1080p sizes scaled by the screen
+-- height, never below 14 px) and carry a thick glyph outline, so they read over sky, clouds and grass alike.
 --
 -- Camera shake
 --   The shake is driven through Humanoid.CameraOffset by a RenderStepped connection that exists only
@@ -48,8 +50,14 @@ local SHAKE_MAX = 0.8 -- studs of camera offset at full trauma
 local SHAKE_DECAY = 2.6 -- trauma lost per second
 local SHAKE_SPEED = 1.0 -- multiplier for the shake oscillation speed
 
-local FLOAT_W = 220
-local FLOAT_H = 100
+-- 1080p design sizes of the floating texts (scaled per screen by Theme.ScaledSize)
+local FLOAT_W = 260
+local FLOAT_H = 120
+local NUMBER_SIZE = 40
+local NUMBER_SIZE_BIG = 48 -- hits of 25+
+local WORD_SIZE = 24
+local TOKEN_SIZE = 34
+local TOKEN_SIZE_GOLDEN = 42
 
 local Colors = Theme.Colors
 
@@ -318,6 +326,7 @@ local function spawnFloat(cfg)
 	local startOffset = Vector3.new(cfg.StartX or 0, (cfg.StartY or 2.6) + bias, 0)
 	local endOffset = startOffset + Vector3.new(0, cfg.Rise or 3, 0)
 	local life = cfg.Life or 1.1
+	local factor = Theme.ScreenFactor()
 
 	local board = Instance.new("BillboardGui")
 	board.Name = "NC_FloatText"
@@ -325,7 +334,7 @@ local function spawnFloat(cfg)
 	board.AlwaysOnTop = true
 	board.LightInfluence = 0
 	board.ResetOnSpawn = false
-	board.Size = UDim2.fromOffset(FLOAT_W, FLOAT_H)
+	board.Size = UDim2.fromOffset(math.floor(FLOAT_W * factor), math.floor(FLOAT_H * factor))
 	board.StudsOffset = startOffset
 
 	-- the scale pop lives on an inner frame so the billboard itself keeps its size
@@ -342,21 +351,27 @@ local function spawnFloat(cfg)
 	scale.Parent = root
 
 	local texts = {}
-	local textSize = cfg.TextSize or 34
+	local outlines = {}
+	local textSize = Theme.ScaledSize(cfg.TextSize or NUMBER_SIZE)
+	local outlineColor = Theme.Darken(cfg.Color or Colors.Bad, 0.72)
 	local number = Theme.Label(cfg.Text, "Accent", {
 		Size = textSize,
 		Color = cfg.Color,
 		Stroke = 0.1,
+		StrokeColor = outlineColor,
+		Outline = 3,
+		OutlineColor = outlineColor,
 		Props = {
 			Name = "Number",
-			Size = UDim2.new(1, 0, 0, 48),
-			Position = UDim2.new(0, 0, 0.5, -20),
+			Size = UDim2.new(1, 0, 0, math.floor(textSize * 1.3)),
+			Position = UDim2.new(0, 0, 0.5, -math.floor(textSize * 0.5)),
 			TextXAlignment = Enum.TextXAlignment.Center,
 			TextYAlignment = Enum.TextYAlignment.Center,
 		},
 	})
 	number.Parent = root
 	table.insert(texts, number)
+	table.insert(outlines, number:FindFirstChild("TextOutline"))
 	if cfg.Gradient then
 		-- UIGradient multiplies the text colour, so the label itself must be white
 		number.TextColor3 = Colors.White
@@ -364,20 +379,27 @@ local function spawnFloat(cfg)
 	end
 
 	if cfg.Word then
+		local wordSize = Theme.ScaledSize(WORD_SIZE)
+		local wordColor = cfg.WordColor or cfg.Color
+		local wordOutline = Theme.Darken(wordColor or Colors.Bad, 0.72)
 		local word = Theme.Label(cfg.Word, "Accent", {
-			Size = 18,
-			Color = cfg.WordColor or cfg.Color,
+			Size = wordSize,
+			Color = wordColor,
 			Stroke = 0.15,
+			StrokeColor = wordOutline,
+			Outline = 2,
+			OutlineColor = wordOutline,
 			Props = {
 				Name = "Word",
-				Size = UDim2.new(1, 0, 0, 24),
-				Position = UDim2.new(0, 0, 0.5, -42),
+				Size = UDim2.new(1, 0, 0, math.floor(wordSize * 1.3)),
+				Position = UDim2.new(0, 0, 0.5, -math.floor(textSize * 0.5 + wordSize * 1.25)),
 				TextXAlignment = Enum.TextXAlignment.Center,
 				TextYAlignment = Enum.TextYAlignment.Center,
 			},
 		})
 		word.Parent = root
 		table.insert(texts, word)
+		table.insert(outlines, word:FindFirstChild("TextOutline"))
 	end
 
 	board.Parent = playerGui
@@ -393,6 +415,11 @@ local function spawnFloat(cfg)
 		for _, label in ipairs(texts) do
 			Util.Tween(label, life * 0.45, { TextTransparency = 1, TextStrokeTransparency = 1 })
 		end
+		for _, outline in ipairs(outlines) do
+			if outline then
+				Util.Tween(outline, life * 0.45, { Transparency = 1 })
+			end
+		end
 	end)
 	task.delay(life + 0.1, function()
 		liveFloats = math.max(0, liveFloats - 1)
@@ -405,9 +432,9 @@ end
 local function spawnDamageNumber(amount, kind)
 	local style = KIND_STYLE[kind] or KIND_STYLE.Other
 	local n = math.max(1, math.floor(amount + 0.5))
-	local size = 34
+	local size = NUMBER_SIZE
 	if n >= 25 then
-		size = 42
+		size = NUMBER_SIZE_BIG
 	end
 	spawnFloat({
 		Text = "-" .. n,
@@ -425,11 +452,11 @@ end
 local function spawnTokenPop(delta)
 	local golden = delta >= (Config.Tokens.GoldenValue or 5)
 	spawnFloat({
-		Text = "+" .. delta .. " ☁",
+		Text = "+" .. delta .. " \226\152\129",
 		Color = Colors.Token,
 		Gradient = golden and { Colors.White:Lerp(Colors.TokenGlow, 0.4), Colors.TokenGlow }
 			or { Colors.TokenGlow, Colors.Token },
-		TextSize = golden and 38 or 30,
+		TextSize = golden and TOKEN_SIZE_GOLDEN or TOKEN_SIZE,
 		Rise = 3.2,
 		Life = 1.2,
 		StartX = rng:NextNumber(-1.4, 1.4),

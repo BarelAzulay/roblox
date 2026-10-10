@@ -7,6 +7,12 @@
 --   PetService.GetPerks(player) -> {MaxHealth, TokenBonus, StaminaRegen, CheckpointHeal}
 --   PetService.GetTokenMultiplier(player) -> number >= 1
 --   PetService.PerksChanged                  Util.Signal, Fire(player)
+--   PetService.Rolled                        Util.Signal, Fire(player, petId) after every successful roll (v3)
+--
+-- v3 (ARCHITECTURE_V3.md section 3): every successful roll marks the pet as discovered for the Pet Index
+-- (DataService.MarkDiscovered) before the ProfileSync goes out; RouletteResult.IsNew keeps meaning "first time
+-- owned" and the payload also carries NewDiscovery (first time in the Index). Owned pets are re-checked as
+-- discovered whenever a profile loads or is rebased.
 --
 -- Everything is server authoritative: the client only sends ids, we validate ownership, prices,
 -- stack caps and slot limits, then write to the live profile and Sync it back.
@@ -34,6 +40,7 @@ local DataService = require(script.Parent.DataService)
 
 local PetService = {}
 PetService.PerksChanged = Util.Signal()
+PetService.Rolled = Util.Signal()
 
 local STRIP_LENGTH = 40 -- cosmetic roulette strip: the client scrolls it and stops on WIN_INDEX
 local WIN_INDEX = 34
@@ -203,6 +210,29 @@ local function validateEquipped(profile)
 	return true
 end
 
+-- Pet Index: marks a pet as discovered. Returns true the first time. Safe when DataService predates v3.
+local function markDiscovered(player, petId)
+	if type(DataService.MarkDiscovered) ~= "function" then
+		return false
+	end
+	local ok, isNew = pcall(DataService.MarkDiscovered, player, petId)
+	if not ok then
+		warn("[PetService] MarkDiscovered errored: " .. tostring(isNew))
+		return false
+	end
+	return isNew == true
+end
+
+-- Every owned pet counts as discovered (DataService migrates stored profiles; this also covers pets
+-- granted outside the roulette).
+local function discoverOwned(player, profile)
+	for petId, count in pairs(profile.Pets) do
+		if type(count) == "number" and count > 0 then
+			markDiscovered(player, petId)
+		end
+	end
+end
+
 local function onProfileReady(player)
 	if not isLivePlayer(player) then
 		return
@@ -212,6 +242,7 @@ local function onProfileReady(player)
 		return
 	end
 	local changed = validateEquipped(profile)
+	discoverOwned(player, profile) -- the ProfileSync snapshot already lists owned pets, so no extra Sync
 	refreshPlayer(player, false)
 	if changed then
 		DataService.MarkDirty(player)
@@ -412,6 +443,7 @@ function PetService.BuyRoulette(player, rouletteId)
 	if firstPetEver and #profile.Equipped < Config.Pets.MaxEquipped then
 		table.insert(profile.Equipped, petId)
 	end
+	local newDiscovery = markDiscovered(player, petId) -- before the Sync, so the snapshot shows it in the Index
 	DataService.MarkDirty(player)
 	refreshPlayer(player, false)
 	DataService.Sync(player)
@@ -421,12 +453,14 @@ function PetService.BuyRoulette(player, rouletteId)
 		RouletteId = rouletteId,
 		PetId = petId,
 		IsNew = owned == 0,
+		NewDiscovery = newDiscovery,
 		Count = owned + 1,
 		Tokens = DataService.GetTokens(player),
 		Strip = buildStrip(rouletteId, petId, seed + 7919),
 	}
 	fireClient("RouletteResult", player, result)
 	announcePull(player, def)
+	PetService.Rolled:Fire(player, petId)
 	return true, result
 end
 

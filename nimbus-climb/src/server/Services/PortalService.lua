@@ -1,35 +1,104 @@
--- PortalService (v2): forms parties on the lobby portal pads and launches matches.
+-- PortalService (v3 polish): forms parties on the lobby portal pads, locks the members in until launch and
+-- shows every portal's state on a readable billboard.
 --
 -- Standing inside a portal Zone (the "ready pad") puts a player in that portal's party. The first
 -- player starts a countdown; a full party shortens it. When it reaches zero the party is handed to
 -- MatchService.StartMatch. MatchService is passed in through Init (no require) so the two services
--- never form a circular dependency.
+-- never form a circular dependency. One party per entry of Config.Difficulties, matched to
+-- lobbyInfo.Portals[difficulty.Id] (no difficulty id is hard-coded here).
 --
--- v2: one party per entry of Config.Difficulties (five: Easy .. Saint), matched to
--- lobbyInfo.Portals[difficulty.Id]. No difficulty id is hard-coded here; a difficulty without a
--- lobby portal is skipped with a warning, a portal without a difficulty is ignored.
+-- Lock-in (asked for after the playtest): a party member is LOCKED on the pad for the whole countdown.
+--   * Their character parts move to the collision group NC_PortalLocked. Every pad has five invisible walls
+--     (four sides + a ceiling) in NC_PortalWall, which collides ONLY with NC_PortalLocked: everybody else walks
+--     straight through, and raycasts / overlap queries (Default group) never see the walls. Walking, jumping
+--     and dashing (velocity based) all stop at the walls.
+--   * Server safety net: the 5 Hz zone poll puts a locked player who is outside the zone anyway (flung,
+--     teleported) back on the pad, with a side toast that explains the Leave button.
+--   * The only way out is the Leave button of the party panel (Remotes.LeaveParty, validated + rate-limited):
+--     unlock, LEAVE_LOCKOUT, and a step off the pad. Launch, a cancelled countdown, death, a match and leaving
+--     the game unlock as well.
+--   * While a countdown runs the side walls show a soft ForceField shimmer in the portal colour.
+-- Billboard (World text rule, ARCHITECTURE_V3.md): a PIXEL-sized BillboardGui above each gate replaces the
+-- studs-sized card LobbyBuilder made: difficulty name + stars, "2/4 players" and a status pill ("Step in to
+-- play" / "Starting in 12"). It floats ~27 studs up, so it serves viewers further away.
+-- Countdown face (eye level, for friends standing next to the portal): a SurfaceGui in the gate's swirl,
+-- facing the plaza, ~11 studs above the pad: "Starting in", a 3.2-stud numeral on a round badge and the head
+-- count. Shown only while the pad has a party.
+-- The server writes a text only when it changes (at most once per second per line) and mirrors the numbers as
+-- attributes on the portal model (PartyCount, PartyMax, Countdown).
 -- Plain Lua 5.1-compatible syntax only.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
+local PhysicsService = game:GetService("PhysicsService")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Config = require(Shared.Config)
 local Util = require(Shared.Util)
 local Remotes = require(Shared.Remotes)
+local Theme = require(Shared.Theme)
 
 local PortalService = {}
 
 ----------------------------------------------------------------------
 -- Tunables local to this module
 ----------------------------------------------------------------------
-local POLL = 0.2 -- zone poll period (5 Hz)
+local POLL = 0.2 -- zone poll period (5 Hz); also the safety-net reaction time
 local STATE_INTERVAL = 1 -- PartyState refresh period
 local LEAVE_LOCKOUT = 3 -- seconds a player cannot re-join after pressing Leave
 local FAILED_LOCKOUT = 4 -- ... after a failed launch
-local EJECT_DISTANCE = 12 -- studs the Leave button moves a player off the pad
+local EJECT_DISTANCE = 12 -- studs the Leave button moves a player off the pad (outside the walls)
 local ZONE_HYSTERESIS = 1.5 -- extra studs of tolerance for players already inside (no edge flicker)
+local LEAVE_COOLDOWN = 0.5 -- LeaveParty rate limit per player
+local PULL_TOAST_COOLDOWN = 5 -- seconds between two "press Leave" toasts after a safety-net pull
+
+-- Lock-in walls. The inner faces sit ZONE_HYSTERESIS outside the zone, so a member's root always stays inside
+-- the (hysteresis) zone and the safety net never fights the walls.
+local LOCK_GROUP = "NC_PortalLocked"
+local WALL_GROUP = "NC_PortalWall"
+local WALL_THICKNESS = 2
+local WALL_HEIGHT = 14 -- studs above the pad surface (a full jump tops out ~10 studs up)
+local WALL_DEPTH = 2 -- studs the walls reach below the pad surface
+local BARRIER_TRANSPARENCY = 0.55 -- side walls while a countdown runs (ForceField shimmer)
+local PAD_ROOT_HEIGHT = 3.2 -- root height above the pad surface for a safety-net placement
+local PAD_SPREAD = 2.5 -- members put back on the pad stand on a ring this wide
+
+-- Billboard (pixels; World text rule: names >= 22 px, info lines >= 18 px, compact plate)
+local BB = {
+	Width = 380, -- transparent container; the plate inside is sized to its text
+	Height = 150,
+	MaxDistance = 120,
+	Gap = 2.5, -- studs between the top of the gate and the bottom of the plate
+	NameText = 32,
+	InfoText = 21,
+	StatusText = 25,
+	PlateMinW = 190,
+}
+
+-- Countdown face (SurfaceGui, World text rule: 40-60 px per stud, titles >= 1 stud, info lines >= 0.6 stud).
+-- Roblox caps TextSize at 100, so the numeral gets a UIScale: 100 px x 1.6 = 160 px = 3.2 studs at 50 px per stud.
+local FACE = {
+	Width = 8.4, -- studs; corners stay inside the gate ring's 6-stud hole
+	Height = 7,
+	Thickness = 0.2,
+	PPS = 50,
+	Lift = 11.2, -- studs above the pad surface when the gate has no SwirlCore
+	WallGap = 0.3, -- studs in front of the back lock wall (no ForceField layer between the face and the plaza)
+	SwirlGap = 0.6, -- studs in front of the swirl's centre plane
+	Disc = 240, -- px: the round numeral badge (4.8 studs)
+	TopY = 4, -- px: top of the "Starting in" ribbon (it overlaps the badge's rim)
+	DiscY = 178, -- px: badge centre
+	CountY = 312, -- px: centre of the head-count pill (it overlaps the badge's bottom)
+	NumText = 100,
+	NumScale = 1.6,
+	TopText = 56, -- 1.12 studs
+	CountText = 40, -- 0.8 stud
+}
+
+local STAR_FULL = "\226\152\133"
+local STAR_EMPTY = "\226\152\134"
+local MAX_STARS = 5
 
 ----------------------------------------------------------------------
 -- State
@@ -45,8 +114,15 @@ local lockedUntil = {} -- Player -> clock deadline for re-joining
 local mustExit = {} -- Player -> true until they have been seen outside every zone
 local starting = {} -- Player -> true while a launched match is being built
 local fullNotified = {} -- Player -> portal id they were told is full
+local locks = {} -- Player -> { PortalId, Groups = { [BasePart] = previous group }, Conns }
+local lastLeave = {} -- Player -> clock of the last accepted LeaveParty
+local lastPullToast = {} -- Player -> clock of the last safety-net toast
+local groupsReady = false
 
 local remoteCache = {}
+
+-- forward declaration (the lock's Died handler leaves the party)
+local removeFromParty
 
 ----------------------------------------------------------------------
 -- Helpers
@@ -77,6 +153,10 @@ local function nameOf(player)
 		n = player.Name
 	end
 	return n
+end
+
+local function isPlayer(value)
+	return typeof(value) == "Instance" and value:IsA("Player")
 end
 
 local function getRemote(name)
@@ -137,28 +217,602 @@ local function getAliveRoot(player)
 	return root
 end
 
+local function zoneAlive(zone)
+	return zone ~= nil and zone.Parent ~= nil
+end
+
+-- Is `position` inside `zone` (grown by `pad` studs sideways)? The zone reaches a little below its floor and
+-- up to the ceiling of the lock walls, so a jump never counts as leaving.
+local function inZone(zone, position, pad)
+	local rel = zone.CFrame:PointToObjectSpace(position)
+	local hs = zone.Size * 0.5
+	return math.abs(rel.X) <= hs.X + pad
+		and math.abs(rel.Z) <= hs.Z + pad
+		and rel.Y >= -hs.Y - 2
+		and rel.Y <= hs.Y + 8
+end
+
 -- Which portal zone (if any) contains `position`. Players already in `hintId` get a slightly
 -- larger zone so standing on the edge does not flicker in and out of the party.
 local function zoneAt(position, hintId)
 	for _, id in ipairs(order) do
 		local zone = parties[id].Info.Zone
-		if zone and zone.Parent then
-			local rel = zone.CFrame:PointToObjectSpace(position)
-			local hs = zone.Size * 0.5
+		if zoneAlive(zone) then
 			local pad = 0
 			if hintId == id then
 				pad = ZONE_HYSTERESIS
 			end
-			if math.abs(rel.X) <= hs.X + pad
-				and math.abs(rel.Z) <= hs.Z + pad
-				and rel.Y >= -hs.Y - 2
-				and rel.Y <= hs.Y + 8
-			then
+			if inZone(zone, position, pad) then
 				return id
 			end
 		end
 	end
 	return nil
+end
+
+local function hex(color)
+	return string.format("#%02X%02X%02X", math.floor(color.R * 255 + 0.5), math.floor(color.G * 255 + 0.5), math.floor(color.B * 255 + 0.5))
+end
+
+----------------------------------------------------------------------
+-- Collision groups + lock walls
+----------------------------------------------------------------------
+-- NC_PortalWall collides with NC_PortalLocked only. Groups registered by other code later keep the engine
+-- default (collidable), so this runs again whenever a pad gets locked (cheap, idempotent).
+local function setupCollisionGroups()
+	for _, name in ipairs({ LOCK_GROUP, WALL_GROUP }) do
+		local registered = false
+		pcall(function()
+			registered = PhysicsService:IsCollisionGroupRegistered(name)
+		end)
+		if not registered then
+			local ok, err = pcall(function()
+				PhysicsService:RegisterCollisionGroup(name)
+			end)
+			if not ok and not groupsReady then
+				warn("[PortalService] could not register collision group " .. name .. ": " .. tostring(err))
+			end
+		end
+	end
+	local names = { "Default" }
+	pcall(function()
+		for _, info in ipairs(PhysicsService:GetRegisteredCollisionGroups()) do
+			if type(info) == "table" and type(info.name) == "string" and info.name ~= "Default" then
+				table.insert(names, info.name)
+			end
+		end
+	end)
+	for _, name in ipairs(names) do
+		if name ~= LOCK_GROUP then
+			pcall(function()
+				PhysicsService:CollisionGroupSetCollidable(WALL_GROUP, name, false)
+			end)
+		end
+	end
+	pcall(function()
+		PhysicsService:CollisionGroupSetCollidable(WALL_GROUP, LOCK_GROUP, true)
+	end)
+	groupsReady = true
+end
+
+-- Four side walls + a ceiling around the zone, in the zone's own frame.
+local function buildWalls(party)
+	local zone = party.Info.Zone
+	local parent = party.Info.Model or zone.Parent
+	local old = parent:FindFirstChild("LockWalls")
+	if old then
+		old:Destroy()
+	end
+	local folder = Instance.new("Folder")
+	folder.Name = "LockWalls"
+
+	local hs = zone.Size * 0.5
+	local ix, iz = hs.X + ZONE_HYSTERESIS, hs.Z + ZONE_HYSTERESIS -- inner faces
+	local t = WALL_THICKNESS
+	local floorY = -hs.Y -- pad surface in zone space
+	local h = WALL_HEIGHT + WALL_DEPTH
+	local cy = floorY - WALL_DEPTH + h / 2
+	local specs = {
+		{ "WallFront", CFrame.new(0, cy, -(iz + t / 2)), Vector3.new(2 * (ix + t), h, t), true },
+		{ "WallBack", CFrame.new(0, cy, iz + t / 2), Vector3.new(2 * (ix + t), h, t), true },
+		{ "WallLeft", CFrame.new(-(ix + t / 2), cy, 0), Vector3.new(t, h, 2 * iz), true },
+		{ "WallRight", CFrame.new(ix + t / 2, cy, 0), Vector3.new(t, h, 2 * iz), true },
+		{ "Ceiling", CFrame.new(0, floorY + WALL_HEIGHT + t / 2, 0), Vector3.new(2 * (ix + t), t, 2 * (iz + t)), false },
+	}
+	local sides = {}
+	for _, spec in ipairs(specs) do
+		local wall = Instance.new("Part")
+		wall.Name = spec[1]
+		wall.Anchored = true
+		wall.CanCollide = true
+		wall.CanTouch = false
+		wall.CastShadow = false
+		wall.Size = spec[3]
+		wall.CFrame = zone.CFrame * spec[2]
+		wall.Material = Enum.Material.ForceField
+		wall.Color = party.Diff.Color
+		wall.Transparency = 1
+		wall.TopSurface = Enum.SurfaceType.Smooth
+		wall.BottomSurface = Enum.SurfaceType.Smooth
+		pcall(function()
+			wall.CollisionGroup = WALL_GROUP
+		end)
+		if wall.CollisionGroup ~= WALL_GROUP then
+			wall.CanCollide = false -- no group: a Default wall would block everybody; the safety net still holds the lock
+		end
+		wall:SetAttribute("PortalId", party.Id)
+		wall.Parent = folder
+		if spec[4] then
+			table.insert(sides, wall)
+		end
+	end
+	folder.Parent = parent
+	party.Walls = folder
+	party.SideWalls = sides
+	party.BarrierOn = false
+end
+
+-- Side-wall shimmer on while the pad has a party, off when it is empty.
+local function setBarrier(party, on)
+	if party.BarrierOn == on or not party.SideWalls then
+		return
+	end
+	party.BarrierOn = on
+	for _, wall in ipairs(party.SideWalls) do
+		if wall.Parent then
+			wall.Transparency = on and BARRIER_TRANSPARENCY or 1
+		end
+	end
+end
+
+----------------------------------------------------------------------
+-- Locking players
+----------------------------------------------------------------------
+local function lockPart(rec, inst)
+	if inst:IsA("BasePart") and rec.Groups[inst] == nil then
+		rec.Groups[inst] = inst.CollisionGroup
+		pcall(function()
+			inst.CollisionGroup = LOCK_GROUP
+		end)
+	end
+end
+
+local function unlockPlayer(player)
+	local rec = locks[player]
+	if not rec then
+		return
+	end
+	locks[player] = nil
+	for _, conn in ipairs(rec.Conns) do
+		pcall(function()
+			conn:Disconnect()
+		end)
+	end
+	for part, group in pairs(rec.Groups) do
+		if part.Parent ~= nil then
+			pcall(function()
+				if part.CollisionGroup == LOCK_GROUP then
+					part.CollisionGroup = group
+				end
+			end)
+		end
+	end
+	if player.Parent ~= nil then
+		player:SetAttribute("PortalLocked", nil)
+	end
+end
+
+local function lockPlayer(player, id)
+	unlockPlayer(player)
+	setupCollisionGroups()
+	local rec = { PortalId = id, Groups = {}, Conns = {} }
+	locks[player] = rec
+	local char = player.Character
+	if char then
+		for _, d in ipairs(char:GetDescendants()) do
+			lockPart(rec, d)
+		end
+		-- accessories / tools added while locked
+		table.insert(rec.Conns, char.DescendantAdded:Connect(function(d)
+			if locks[player] == rec then
+				lockPart(rec, d)
+			end
+		end))
+		local hum = char:FindFirstChildOfClass("Humanoid")
+		if hum then
+			table.insert(rec.Conns, hum.Died:Connect(function()
+				if locks[player] == rec then
+					removeFromParty(player)
+				end
+			end))
+		end
+	end
+	table.insert(rec.Conns, player.CharacterRemoving:Connect(function()
+		if locks[player] == rec then
+			removeFromParty(player)
+		end
+	end))
+	player:SetAttribute("PortalLocked", id)
+end
+
+-- A spot on the pad for member `player` (a small ring, so several pulls never stack players inside each other).
+local function padCFrame(party, player)
+	local zone = party.Info.Zone
+	local hs = zone.Size * 0.5
+	local index, count = 1, math.max(1, #party.Players)
+	for i, p in ipairs(party.Players) do
+		if p == player then
+			index = i
+		end
+	end
+	local radius = (count > 1) and PAD_SPREAD or 0
+	local angle = (index - 1) / count * math.pi * 2
+	local pos = zone.CFrame:PointToWorldSpace(Vector3.new(math.cos(angle) * radius, -hs.Y + PAD_ROOT_HEIGHT, math.sin(angle) * radius))
+	local look = zone.CFrame.LookVector
+	local flat = Vector3.new(look.X, 0, look.Z)
+	if flat.Magnitude < 0.01 then
+		flat = Vector3.new(0, 0, -1)
+	end
+	return CFrame.new(pos, pos + flat.Unit)
+end
+
+-- Safety net: a locked player outside the zone goes straight back onto the pad.
+local function returnToPad(player, party, t)
+	local char = player.Character
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	if not root then
+		return
+	end
+	local cf = padCFrame(party, player)
+	pcall(function()
+		char:PivotTo(cf)
+		root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+		root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+	end)
+	if t - (lastPullToast[player] or -1e9) >= PULL_TOAST_COOLDOWN then
+		lastPullToast[player] = t
+		notify(player, "You're locked in the portal. Press Leave to step out.", "info", 4)
+	end
+end
+
+----------------------------------------------------------------------
+-- Billboard (pixel-sized, World text rule)
+----------------------------------------------------------------------
+local INK = Theme.Colors.TextStroke or Theme.Colors.Ink
+local GOLD = Theme.Colors.Gold or Theme.Colors.Token
+local STAR_OFF = Color3.fromRGB(150, 158, 186)
+
+local function starText(filled)
+	filled = math.max(0, math.min(MAX_STARS, math.floor(tonumber(filled) or 1)))
+	local out = string.format('<font color="%s">%s</font>', hex(GOLD), string.rep(STAR_FULL, filled))
+	if filled < MAX_STARS then
+		out = out .. string.format('<font color="%s">%s</font>', hex(STAR_OFF), string.rep(STAR_EMPTY, MAX_STARS - filled))
+	end
+	return out
+end
+
+local function plateLabel(parent, name, text, role, size, color, outlineColor, order)
+	local label = Theme.Label(text, role, {
+		Size = size,
+		Color = color,
+		Stroke = 1, -- the glyph outline below replaces the classic stroke
+		Outline = 2.5,
+		OutlineColor = outlineColor or INK,
+		Props = {
+			Name = name,
+			AutomaticSize = Enum.AutomaticSize.XY,
+			Size = UDim2.fromOffset(0, size + 4),
+			TextWrapped = false,
+			LayoutOrder = order or 0,
+		},
+	})
+	label.Parent = parent
+	return label
+end
+
+local function listLayout(parent, direction, padding)
+	local layout = Instance.new("UIListLayout")
+	layout.FillDirection = direction
+	layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	layout.VerticalAlignment = Enum.VerticalAlignment.Center
+	layout.SortOrder = Enum.SortOrder.LayoutOrder
+	layout.Padding = UDim.new(0, padding)
+	layout.Parent = parent
+	return layout
+end
+
+local function uiPadding(parent, top, side, bottom)
+	local pad = Instance.new("UIPadding")
+	pad.PaddingTop = UDim.new(0, top)
+	pad.PaddingBottom = UDim.new(0, bottom)
+	pad.PaddingLeft = UDim.new(0, side)
+	pad.PaddingRight = UDim.new(0, side)
+	pad.Parent = parent
+	return pad
+end
+
+-- World height of the gate's top (the star gems), or a sensible height above the zone.
+local function gateTopY(info)
+	local top = nil
+	local model = info.Model
+	if model then
+		for _, d in ipairs(model:GetDescendants()) do
+			if d:IsA("BasePart") and (d.Name == "StarGem" or d.Name == "StarGemOff") then
+				local y = d.Position.Y + 1.1
+				if not top or y > top then
+					top = y
+				end
+			end
+		end
+	end
+	if not top and zoneAlive(info.Zone) then
+		top = info.Zone.Position.Y + info.Zone.Size.Y * 0.5 + 10
+	end
+	return top
+end
+
+local function billboardAnchor(party)
+	local info = party.Info
+	local anchor = info.Model and info.Model:FindFirstChild("BillboardAnchor")
+	if anchor and anchor:IsA("BasePart") then
+		return anchor
+	end
+	anchor = Instance.new("Part")
+	anchor.Name = "BillboardAnchor"
+	anchor.Anchored = true
+	anchor.CanCollide = false
+	anchor.CanTouch = false
+	anchor.CanQuery = false
+	anchor.CastShadow = false
+	anchor.Transparency = 1
+	anchor.Size = Vector3.new(1, 1, 1)
+	anchor.CFrame = CFrame.new(info.Zone.Position + Vector3.new(0, 14, 0))
+	anchor.Parent = info.Model or info.Zone.Parent
+	return anchor
+end
+
+local function buildBillboard(party)
+	local info = party.Info
+	local diff = party.Diff
+	local color = diff.Color
+	local anchor = billboardAnchor(party)
+
+	-- the old studs-sized card (text shrank with distance) goes away
+	local old = info.Billboard
+	if old and old.Parent and old ~= party.Billboard then
+		old:Destroy()
+	end
+
+	local gui = Instance.new("BillboardGui")
+	gui.Name = "PortalBillboard"
+	gui.Size = UDim2.fromOffset(BB.Width, BB.Height)
+	gui.SizeOffset = Vector2.new(0, 0.5) -- the container's bottom edge sits on the anchor point
+	local topY = gateTopY(info)
+	local offsetY = 0
+	if topY then
+		offsetY = topY + BB.Gap - anchor.Position.Y
+	end
+	gui.StudsOffsetWorldSpace = Vector3.new(0, offsetY, 0)
+	gui.LightInfluence = 0
+	gui.AlwaysOnTop = false
+	gui.MaxDistance = BB.MaxDistance
+	gui.ClipsDescendants = false
+	gui.Adornee = anchor
+
+	local plate = Instance.new("Frame")
+	plate.Name = "Plate"
+	plate.AnchorPoint = Vector2.new(0.5, 1)
+	plate.Position = UDim2.new(0.5, 0, 1, 0)
+	plate.Size = UDim2.fromOffset(BB.PlateMinW, 0)
+	plate.AutomaticSize = Enum.AutomaticSize.XY
+	plate.BackgroundColor3 = Color3.fromRGB(255, 255, 255) -- the gradient supplies the colour
+	plate.BackgroundTransparency = 0.04
+	plate.BorderSizePixel = 0
+	Theme.Corner(plate, UDim.new(0, 16))
+	Theme.Stroke(plate, Theme.Lighten(color, 0.15), 4, 0)
+	Theme.Gradient(plate, Theme.Darken(color, 0.48), Theme.Darken(color, 0.72), 90)
+	uiPadding(plate, 8, 18, 10)
+	listLayout(plate, Enum.FillDirection.Vertical, 3)
+	plate.Parent = gui
+
+	local title = plateLabel(plate, "TitleLabel", diff.DisplayName or diff.Id, "Title", BB.NameText, Theme.Lighten(color, 0.6), Theme.Darken(color, 0.7), 1)
+
+	local infoRow = Instance.new("Frame")
+	infoRow.Name = "InfoRow"
+	infoRow.BackgroundTransparency = 1
+	infoRow.Size = UDim2.fromOffset(0, BB.InfoText + 4)
+	infoRow.AutomaticSize = Enum.AutomaticSize.XY
+	infoRow.LayoutOrder = 2
+	listLayout(infoRow, Enum.FillDirection.Horizontal, 12)
+	infoRow.Parent = plate
+	local stars = plateLabel(infoRow, "StarLabel", "", "Heading", BB.InfoText, GOLD, INK, 1)
+	stars.RichText = true
+	stars.Text = starText(diff.Stars)
+	local count = plateLabel(infoRow, "CountLabel", "0/" .. tostring(Config.Match.MaxPlayers) .. " players", "Heading", BB.InfoText, Theme.Colors.White, INK, 2)
+
+	local pill = Instance.new("Frame")
+	pill.Name = "StatusPill"
+	pill.Size = UDim2.fromOffset(0, BB.StatusText + 10)
+	pill.AutomaticSize = Enum.AutomaticSize.XY
+	pill.BorderSizePixel = 0
+	pill.BackgroundTransparency = 0
+	pill.LayoutOrder = 3
+	Theme.Corner(pill, UDim.new(0, 12))
+	local pillStroke = Theme.Stroke(pill, INK, 2.5, 0)
+	uiPadding(pill, 3, 14, 4)
+	pill.Parent = plate
+	local status = plateLabel(pill, "StatusLabel", "Step in to play", "Display", BB.StatusText, Theme.Colors.White, INK, 1)
+
+	gui.Parent = anchor
+
+	party.Billboard = gui
+	party.Pill = pill
+	party.PillStroke = pillStroke
+	party.PillMode = nil
+	-- keep the LobbyInfo contract (Billboard + labels) pointing at the live billboard
+	info.Billboard = gui
+	info.TitleLabel = title
+	info.StarLabel = stars
+	info.CountLabel = count
+	info.StatusLabel = status
+end
+
+----------------------------------------------------------------------
+-- Countdown face (eye level, SurfaceGui in the gate's swirl)
+----------------------------------------------------------------------
+-- In the zone's frame (-Z faces the plaza): the swirl's centre, pulled just in front of the back lock wall so
+-- viewers on the plaza look through the front wall only. Without a SwirlCore: the back edge of the pad.
+local function faceCFrame(party)
+	local zone = party.Info.Zone
+	local hs = zone.Size * 0.5
+	local inner = hs.Z + ZONE_HYSTERESIS -- the back wall's inner face
+	local model = party.Info.Model
+	local swirl = model and model:FindFirstChild("SwirlCore")
+	local rel
+	if swirl and swirl:IsA("BasePart") then
+		rel = zone.CFrame:PointToObjectSpace(swirl.Position)
+	else
+		rel = Vector3.new(0, -hs.Y + FACE.Lift, inner)
+	end
+	local z = math.min(rel.Z - FACE.SwirlGap, inner - FACE.WallGap - FACE.Thickness / 2)
+	return zone.CFrame * CFrame.new(rel.X, rel.Y, z)
+end
+
+local function buildFace(party)
+	local info = party.Info
+	local color = party.Diff.Color
+	local parent = info.Model or info.Zone.Parent
+	local old = parent:FindFirstChild("CountdownFace")
+	if old then
+		old:Destroy()
+	end
+
+	local part = Instance.new("Part")
+	part.Name = "CountdownFace"
+	part.Anchored = true
+	part.CanCollide = false
+	part.CanTouch = false
+	part.CanQuery = false
+	part.CastShadow = false
+	part.Transparency = 1
+	part.Size = Vector3.new(FACE.Width, FACE.Height, FACE.Thickness)
+	part.CFrame = faceCFrame(party)
+	part:SetAttribute("PortalId", party.Id)
+
+	local gui = Instance.new("SurfaceGui")
+	gui.Name = "CountdownGui"
+	gui.Face = Enum.NormalId.Front
+	gui.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud
+	gui.PixelsPerStud = FACE.PPS
+	gui.CanvasSize = Vector2.new(FACE.Width * FACE.PPS, FACE.Height * FACE.PPS)
+	gui.LightInfluence = 0
+	gui.AlwaysOnTop = false
+	gui.Enabled = false -- shown while the pad has a party
+	gui.Adornee = part
+
+	-- round badge: portal-coloured gradient, gold rim, a soft inner ring
+	local disc = Instance.new("Frame")
+	disc.Name = "Disc"
+	disc.AnchorPoint = Vector2.new(0.5, 0.5)
+	disc.Position = UDim2.new(0.5, 0, 0, FACE.DiscY)
+	disc.Size = UDim2.fromOffset(FACE.Disc, FACE.Disc)
+	disc.BackgroundColor3 = Color3.fromRGB(255, 255, 255) -- the gradient supplies the colour
+	disc.BackgroundTransparency = 0.04
+	disc.BorderSizePixel = 0
+	Theme.Corner(disc, UDim.new(0.5, 0))
+	local discStroke = Theme.Stroke(disc, GOLD, 9, 0)
+	Theme.Gradient(disc, Theme.Darken(color, 0.38), Theme.Darken(color, 0.74), 90)
+	disc.Parent = gui
+	local ring = Instance.new("Frame")
+	ring.Name = "Ring"
+	ring.AnchorPoint = Vector2.new(0.5, 0.5)
+	ring.Position = UDim2.fromScale(0.5, 0.5)
+	ring.Size = UDim2.fromOffset(FACE.Disc - 26, FACE.Disc - 26)
+	ring.BackgroundTransparency = 1
+	Theme.Corner(ring, UDim.new(0.5, 0))
+	Theme.Stroke(ring, Theme.Lighten(color, 0.35), 3, 0.35)
+	ring.Parent = disc
+
+	-- the numeral fills the badge box (its UIScale grows it around the centre)
+	local num = Theme.Label("0", "Display", {
+		Size = FACE.NumText,
+		Color = Theme.Colors.White,
+		Stroke = 1,
+		Outline = 6,
+		OutlineColor = INK,
+		Props = {
+			Name = "NumeralLabel",
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromScale(0.5, 0.5),
+			Size = UDim2.fromScale(1, 1),
+			TextXAlignment = Enum.TextXAlignment.Center,
+			TextYAlignment = Enum.TextYAlignment.Center,
+			ZIndex = 3,
+		},
+	})
+	local numScale = Instance.new("UIScale")
+	numScale.Scale = FACE.NumScale
+	numScale.Parent = num
+	num.Parent = disc
+
+	-- "Starting in" ribbon over the badge's top edge
+	local top = Instance.new("Frame")
+	top.Name = "TopPill"
+	top.AnchorPoint = Vector2.new(0.5, 0)
+	top.Position = UDim2.new(0.5, 0, 0, FACE.TopY)
+	top.Size = UDim2.fromOffset(0, FACE.TopText + 12)
+	top.AutomaticSize = Enum.AutomaticSize.X
+	top.BackgroundColor3 = GOLD
+	top.BorderSizePixel = 0
+	top.ZIndex = 4
+	Theme.Corner(top, UDim.new(0, 22))
+	local topStroke = Theme.Stroke(top, Theme.Darken(GOLD, 0.7), 5, 0)
+	uiPadding(top, 3, 24, 5)
+	top.Parent = gui
+	local topLabel = plateLabel(top, "TopLabel", "Starting in", "Title", FACE.TopText, Theme.Colors.White, Theme.Darken(GOLD, 0.66), 1)
+	topLabel.ZIndex = 5
+	local topOutline = topLabel:FindFirstChild("TextOutline")
+	if topOutline then
+		topOutline.Thickness = 4
+	end
+
+	-- head count under the badge
+	local bottom = Instance.new("Frame")
+	bottom.Name = "CountPill"
+	bottom.AnchorPoint = Vector2.new(0.5, 0.5)
+	bottom.Position = UDim2.new(0.5, 0, 0, FACE.CountY)
+	bottom.Size = UDim2.fromOffset(0, FACE.CountText + 12)
+	bottom.AutomaticSize = Enum.AutomaticSize.X
+	bottom.BackgroundColor3 = Theme.Colors.Panel or INK
+	bottom.BorderSizePixel = 0
+	bottom.ZIndex = 4
+	Theme.Corner(bottom, UDim.new(0, 18))
+	Theme.Stroke(bottom, Theme.Lighten(color, 0.15), 4, 0)
+	uiPadding(bottom, 3, 18, 5)
+	bottom.Parent = gui
+	local countLabel = plateLabel(bottom, "CountLabel", "0/" .. tostring(Config.Match.MaxPlayers) .. " players", "Heading", FACE.CountText, Theme.Colors.White, INK, 1)
+	countLabel.ZIndex = 5
+	local countOutline = countLabel:FindFirstChild("TextOutline")
+	if countOutline then
+		countOutline.Thickness = 3
+	end
+
+	gui.Parent = part
+	part.Parent = parent
+
+	party.Face = {
+		Part = part,
+		Gui = gui,
+		DiscStroke = discStroke,
+		TopPill = top,
+		TopStroke = topStroke,
+		TopOutline = topOutline,
+		Top = topLabel,
+		Num = num,
+		Count = countLabel,
+		Shown = false,
+	}
+	info.CountdownFace = part
 end
 
 ----------------------------------------------------------------------
@@ -189,6 +843,7 @@ end
 local function onMembershipChanged(party)
 	local t = clock()
 	local n = #party.Players
+	setBarrier(party, n > 0)
 	if n == 0 then
 		party.BaseDeadline = nil
 		party.FullDeadline = nil
@@ -218,27 +873,94 @@ local function setText(label, text, cacheKey, party)
 	end
 end
 
--- Billboard above the portal: "2 / 4" and a status line.
+local function setModelAttr(party, name, value)
+	local model = party.Info.Model
+	if model and model.Parent and model:GetAttribute(name) ~= value then
+		model:SetAttribute(name, value)
+	end
+end
+
+-- Status pill colours: the portal colour while idle, gold while a countdown runs.
+local function setPillMode(party, mode)
+	if party.PillMode == mode or not party.Pill then
+		return
+	end
+	party.PillMode = mode
+	local base = (mode == "Countdown") and GOLD or Theme.Darken(party.Diff.Color, 0.2)
+	party.Pill.BackgroundColor3 = base
+	party.PillStroke.Color = Theme.Darken(base, 0.7)
+	local outline = party.Info.StatusLabel and party.Info.StatusLabel:FindFirstChild("TextOutline")
+	if outline then
+		outline.Color = Theme.Darken(base, 0.66)
+	end
+	-- the face's ribbon and badge rim follow: gold while counting down, the portal colour while waiting
+	local face = party.Face
+	if face then
+		face.TopPill.BackgroundColor3 = base
+		face.TopStroke.Color = Theme.Darken(base, 0.7)
+		if face.TopOutline then
+			face.TopOutline.Color = Theme.Darken(base, 0.66)
+		end
+		face.DiscStroke.Color = (mode == "Countdown") and GOLD or Theme.Lighten(party.Diff.Color, 0.2)
+	end
+end
+
+-- The eye-level face: hidden on an empty pad, otherwise "Starting in" / the seconds / the head count.
+local function refreshFace(party, n, seconds, mode)
+	local face = party.Face
+	if not face then
+		return
+	end
+	local shown = n > 0
+	if face.Shown ~= shown then
+		face.Shown = shown
+		pcall(function()
+			face.Gui.Enabled = shown
+		end)
+	end
+	if not shown then
+		return
+	end
+	local max = Config.Match.MaxPlayers
+	setText(face.Top, (mode == "Countdown") and "Starting in" or "Waiting...", "LastFaceTop", party)
+	setText(face.Num, tostring(seconds or 0), "LastFaceNum", party)
+	local count
+	if isFull(party) then
+		count = string.format("Full! %d/%d", n, max)
+	else
+		count = string.format("%d/%d players", n, max)
+	end
+	setText(face.Count, count, "LastFaceCount", party)
+end
+
+-- Billboard above the portal: "2/4 players" and the status pill.
 local function refreshLabels(party)
 	local info = party.Info
 	local n = #party.Players
 	local max = Config.Match.MaxPlayers
-	setText(info.CountLabel, string.format("%d / %d players", n, max), "LastCount", party)
+	setText(info.CountLabel, string.format("%d/%d players", n, max), "LastCount", party)
 
-	local status
+	local status, mode
+	local seconds = countdownOf(party)
 	if n == 0 then
-		status = "Waiting for players..."
+		status, mode = "Step in to play", "Idle"
 	elseif n < Config.Match.MinPlayers then
-		status = "Waiting for players..."
+		status, mode = "Waiting for players...", "Idle"
+	elseif isFull(party) then
+		status, mode = string.format("Full! Starting in %d", seconds or 0), "Countdown"
 	else
-		local seconds = countdownOf(party) or 0
-		if isFull(party) then
-			status = string.format("Party full! %ds", seconds)
-		else
-			status = string.format("Starting in %ds", seconds)
-		end
+		status, mode = string.format("Starting in %d", seconds or 0), "Countdown"
 	end
 	setText(info.StatusLabel, status, "LastStatus", party)
+	setPillMode(party, mode)
+	refreshFace(party, n, seconds, mode)
+	setModelAttr(party, "PartyCount", n)
+	setModelAttr(party, "PartyMax", max)
+	if n > 0 then
+		setModelAttr(party, "Countdown", seconds)
+	else
+		setModelAttr(party, "Countdown", nil)
+	end
 end
 
 local function buildPartyState(party)
@@ -253,6 +975,7 @@ local function buildPartyState(party)
 		Players = list,
 		Max = Config.Match.MaxPlayers,
 		Countdown = countdownOf(party),
+		Locked = true, -- members stay on the pad until launch; Leave is the only way out
 	}
 end
 
@@ -282,13 +1005,17 @@ local function addToParty(player, id)
 	table.insert(party.Players, player)
 	playerParty[player] = id
 	fullNotified[player] = nil
+	lockPlayer(player, id)
 	onMembershipChanged(party)
 	refreshLabels(party)
 	sendPartyState(party) -- everybody's list changed
+	notify(player, "You're in the " .. tostring(party.Diff.DisplayName) .. " portal! Press Leave to step out.", "info", 4)
 	return true
 end
 
-local function removeFromParty(player)
+-- Leave the party (no lockout, no teleport) and unlock.
+removeFromParty = function(player)
+	unlockPlayer(player)
 	local id = playerParty[player]
 	if not id then
 		return
@@ -305,6 +1032,21 @@ local function removeFromParty(player)
 	sendPartyState(party)
 end
 
+-- Cancel a countdown: everybody is unlocked and leaves; they step out before they can join again.
+local function cancelParty(party, message)
+	local members = copyList(party.Players)
+	local t = clock()
+	for _, p in ipairs(members) do
+		removeFromParty(p)
+		lockedUntil[p] = t + LEAVE_LOCKOUT
+		mustExit[p] = true
+		if message then
+			notify(p, message, "info", 4)
+		end
+	end
+	return #members
+end
+
 ----------------------------------------------------------------------
 -- Launching a match
 ----------------------------------------------------------------------
@@ -314,6 +1056,7 @@ local function launch(party)
 	-- clear the party first: from here on these players belong to MatchService
 	for _, p in ipairs(members) do
 		playerParty[p] = nil
+		unlockPlayer(p)
 		starting[p] = true
 		fireClient("PartyState", p, nil)
 	end
@@ -357,6 +1100,10 @@ local function updateParty(party, t)
 	end
 
 	local n = #party.Players
+	if n > 0 and not zoneAlive(party.Info.Zone) then
+		cancelParty(party, nil) -- the pad itself is gone
+		n = 0
+	end
 	if n == 0 then
 		refreshLabels(party)
 		return
@@ -368,10 +1115,10 @@ local function updateParty(party, t)
 			launch(party)
 			return
 		end
-		-- not enough players: keep waiting with a fresh timer
-		party.BaseDeadline = t + Config.Match.PartyCountdown
-		party.FullDeadline = nil
-		onMembershipChanged(party)
+		-- not enough players: the countdown is cancelled (nobody stays locked in an endless wait)
+		cancelParty(party, "Not enough players to start. Step in again!")
+		refreshLabels(party)
+		return
 	end
 
 	refreshLabels(party)
@@ -388,36 +1135,49 @@ local function pollPlayer(player, t)
 		return
 	end
 	local current = playerParty[player]
+	local inMatch = isInMatch(player)
+	local root = nil
+	if not inMatch then
+		root = getAliveRoot(player)
+	end
 
-	local zoneId = nil
-	if not isInMatch(player) then
-		local root = getAliveRoot(player)
-		if root then
-			zoneId = zoneAt(root.Position, current)
+	if current then
+		local party = parties[current]
+		if inMatch or not root or not party then
+			-- died, downed, no character, or pulled into a match: the seat (and the lock) ends here
+			removeFromParty(player)
+			current = nil
+		elseif not zoneAlive(party.Info.Zone) then
+			return -- updateParty cancels this party
+		elseif inZone(party.Info.Zone, root.Position, ZONE_HYSTERESIS) then
+			if not locks[player] then
+				lockPlayer(player, current) -- a fresh character mid-countdown (should not happen, but never leave a member unlocked)
+			end
+			return
+		else
+			-- safety net: locked members cannot walk, jump, dash or get flung out
+			returnToPad(player, party, t)
+			return
 		end
 	end
 
-	-- walked out (or died / got sent away): leave the party
-	if current and current ~= zoneId then
-		removeFromParty(player)
-		current = nil
+	local zoneId = nil
+	if root then
+		zoneId = zoneAt(root.Position, nil)
 	end
-
 	if zoneId == nil then
 		mustExit[player] = nil
 		fullNotified[player] = nil
 		return
 	end
 
-	if not current then
-		local until_ = lockedUntil[player]
-		if until_ and t >= until_ then
-			lockedUntil[player] = nil
-			until_ = nil
-		end
-		if until_ == nil and not mustExit[player] then
-			addToParty(player, zoneId)
-		end
+	local until_ = lockedUntil[player]
+	if until_ and t >= until_ then
+		lockedUntil[player] = nil
+		until_ = nil
+	end
+	if until_ == nil and not mustExit[player] then
+		addToParty(player, zoneId)
 	end
 end
 
@@ -448,7 +1208,7 @@ local function pollLoop()
 end
 
 ----------------------------------------------------------------------
--- Leave button: remove from the party and step the player off the pad
+-- Leave button: unlock, remove from the party and step the player off the pad
 ----------------------------------------------------------------------
 local function ejectFromPad(player, id)
 	local party = parties[id]
@@ -492,12 +1252,20 @@ local function ejectFromPad(player, id)
 end
 
 local function onLeaveParty(player)
+	if not isPlayer(player) then
+		return
+	end
 	local id = playerParty[player]
 	if not id then
 		return
 	end
-	removeFromParty(player)
-	lockedUntil[player] = clock() + LEAVE_LOCKOUT
+	local t = clock()
+	if t - (lastLeave[player] or -1e9) < LEAVE_COOLDOWN then
+		return
+	end
+	lastLeave[player] = t
+	removeFromParty(player) -- unlocks first, so the step off the pad never meets a wall
+	lockedUntil[player] = t + LEAVE_LOCKOUT
 	mustExit[player] = true
 	ejectFromPad(player, id)
 end
@@ -512,6 +1280,11 @@ function PortalService.Init(lobbyInfo, matchServiceArg)
 		return
 	end
 	initialized = true
+
+	local okGroups, errGroups = pcall(setupCollisionGroups)
+	if not okGroups then
+		warn("[PortalService] collision groups: " .. tostring(errGroups))
+	end
 
 	local portals = (lobbyInfo and lobbyInfo.Portals) or {}
 	for _, diff in ipairs(Config.Difficulties) do
@@ -536,7 +1309,21 @@ function PortalService.Init(lobbyInfo, matchServiceArg)
 		end
 	end
 	for _, id in ipairs(order) do
-		refreshLabels(parties[id])
+		local party = parties[id]
+		local okWalls, errWalls = pcall(buildWalls, party)
+		if not okWalls then
+			warn("[PortalService] lock walls for " .. id .. ": " .. tostring(errWalls))
+		end
+		local okBoard, errBoard = pcall(buildBillboard, party)
+		if not okBoard then
+			warn("[PortalService] billboard for " .. id .. ": " .. tostring(errBoard))
+		end
+		local okFace, errFace = pcall(buildFace, party)
+		if not okFace then
+			party.Face = nil
+			warn("[PortalService] countdown face for " .. id .. ": " .. tostring(errFace))
+		end
+		refreshLabels(party)
 	end
 
 	local okRemote, leaveRemote = pcall(Remotes.Get, "LeaveParty")
@@ -552,13 +1339,15 @@ function PortalService.Init(lobbyInfo, matchServiceArg)
 		mustExit[player] = nil
 		starting[player] = nil
 		fullNotified[player] = nil
+		lastLeave[player] = nil
+		lastPullToast[player] = nil
 	end)
 
 	running = true
 	task.spawn(pollLoop)
 end
 
--- Leave the current party (no-op when not in one). No lockout, no teleport.
+-- Leave the current party (no-op when not in one) and unlock. No lockout, no teleport.
 function PortalService.RemovePlayer(player)
 	removeFromParty(player)
 end
@@ -571,9 +1360,33 @@ function PortalService.GetParty(portalId)
 	return { Players = copyList(party.Players), Countdown = countdownOf(party) }
 end
 
--- Stops the poll loop (not needed in normal play; handy for tests / shutdown).
+-- true, portalId while `player` is locked inside a portal pad (waiting for its countdown).
+function PortalService.IsLocked(player)
+	local rec = locks[player]
+	if rec then
+		return true, rec.PortalId
+	end
+	return false, nil
+end
+
+-- Cancels a running countdown: every member is unlocked and removed (they must step out before re-joining).
+-- Returns how many players were in the party.
+function PortalService.CancelParty(portalId, message)
+	local party = parties[portalId]
+	if not party then
+		return 0
+	end
+	local n = cancelParty(party, message)
+	refreshLabels(party)
+	return n
+end
+
+-- Stops the poll loop and releases everybody (not needed in normal play; handy for tests / shutdown).
 function PortalService.Stop()
 	running = false
+	for _, id in ipairs(order) do
+		pcall(PortalService.CancelParty, id, nil)
+	end
 end
 
 return PortalService

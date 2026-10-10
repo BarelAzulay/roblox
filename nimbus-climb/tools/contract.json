@@ -1,5 +1,5 @@
 {
-  "_comment": "Public API of every module, taken from ARCHITECTURE.md + ARCHITECTURE_V2.md (v2 supersedes v1) and from the extras other modules depend on (Main wires PlayerService.SetHomeProvider etc.). Read by tools/check.mjs (static) and tools/smoke.py (runtime). Keys are paths below src/ without .lua. 'functions' must be callable, 'signals' must expose Connect + Fire, 'fields' must merely exist (non-nil). Add new public members here when a contract grows.",
+  "_comment": "Public API of every module, taken from ARCHITECTURE.md + ARCHITECTURE_V2.md + ARCHITECTURE_V3.md (each later doc supersedes the earlier ones) and from the extras other modules depend on (Main wires PlayerService.SetHomeProvider etc.). Read by tools/check.mjs (static) and tools/smoke.py (runtime). Keys are paths below src/ without .lua. 'functions' must be callable, 'signals' must expose Connect + Fire, 'fields' must merely exist (non-nil). 'optional': true marks a module Main loads only when present (a missing file is reported as info, a present one must expose its API). 'pending' lists members another engineer is adding in the current round: while none of them is defined that is reported as info; once any one is defined, the whole group is required like 'functions' / 'signals' / 'fields' (a half-landed API fails). Add new public members here when a contract grows.",
   "modules": {
     "shared/Config": {
       "functions": [
@@ -23,7 +23,12 @@
         "Rarities",
         "Pets",
         "Roulettes",
-        "Items"
+        "Items",
+        "Index",
+        "Tutorial",
+        "PetStats",
+        "Elements",
+        "Art"
       ]
     },
     "shared/Theme": {
@@ -34,7 +39,9 @@
         "Corner",
         "Stroke",
         "Gradient",
-        "Panel"
+        "Panel",
+        "ScaledSize",
+        "ScreenFactor"
       ],
       "fields": [
         "Fonts",
@@ -76,13 +83,26 @@
         "GetOdds",
         "PossiblePets",
         "PerkLabel",
-        "SumPerks"
+        "SumPerks",
+        "IndexGroups",
+        "GetStats",
+        "TotalCount"
       ],
       "fields": [
         "Species",
         "Pets",
-        "ById"
-      ]
+        "ById",
+        "Accessories",
+        "WingStyles"
+      ],
+      "pending": {
+        "_comment": "ARCHITECTURE_V3.md section 11 (elements, built in the Stormfang round)",
+        "functions": [
+          "GetElements",
+          "ElementMultiplier",
+          "ElementsOf"
+        ]
+      }
     },
     "shared/ItemCatalog": {
       "functions": [
@@ -98,6 +118,30 @@
         "Build",
         "Animate",
         "GetHeight"
+      ]
+    },
+    "shared/Voxel": {
+      "functions": [
+        "NewGrid",
+        "Shape",
+        "Shade",
+        "Merge",
+        "Build",
+        "Box"
+      ]
+    },
+    "shared/TutorialSteps": {
+      "fields": [
+        "Steps"
+      ]
+    },
+    "shared/NpcDialog": {
+      "functions": [
+        "Get"
+      ],
+      "fields": [
+        "Npcs",
+        "Tag"
       ]
     },
     "server/Services/LightingService": {
@@ -135,7 +179,10 @@
         "GetProfile",
         "MarkDirty",
         "Sync",
-        "RecordMatch"
+        "RecordMatch",
+        "MarkDiscovered",
+        "GetTutorial",
+        "SetTutorial"
       ],
       "signals": [
         "ProfileLoaded"
@@ -214,7 +261,8 @@
         "GetTokenMultiplier"
       ],
       "signals": [
-        "PerksChanged"
+        "PerksChanged",
+        "Rolled"
       ]
     },
     "server/Services/ItemService": {
@@ -232,6 +280,40 @@
         "Teleport"
       ]
     },
+    "server/Services/IndexService": {
+      "functions": [
+        "Init",
+        "CanClaim",
+        "Claim"
+      ],
+      "signals": [
+        "Completed"
+      ]
+    },
+    "server/Services/TutorialService": {
+      "functions": [
+        "Init",
+        "HandleEvent",
+        "GetState"
+      ],
+      "signals": [
+        "Finished"
+      ]
+    },
+    "server/Services/NpcService": {
+      "functions": [
+        "Init"
+      ],
+      "signals": [
+        "Talked"
+      ]
+    },
+    "server/Services/StormAltar": {
+      "optional": true,
+      "functions": [
+        "Build"
+      ]
+    },
     "client/State": {
       "functions": [
         "Init",
@@ -240,7 +322,9 @@
         "IsEquipped",
         "EquippedCount",
         "ItemCount",
-        "Tokens"
+        "Tokens",
+        "IsDiscovered",
+        "IsClaimed"
       ],
       "signals": [
         "Changed"
@@ -288,6 +372,9 @@
         "Init",
         "Open",
         "Close"
+      ],
+      "signals": [
+        "WindowOpened"
       ]
     },
     "client/Controllers/HotbarController": {
@@ -304,6 +391,41 @@
       ]
     },
     "client/Controllers/TokenFx": {
+      "functions": [
+        "Init"
+      ]
+    },
+    "client/Controllers/SkyDragonController": {
+      "functions": [
+        "Init",
+        "GetModel"
+      ]
+    },
+    "client/Controllers/IndexController": {
+      "functions": [
+        "Init",
+        "Open",
+        "Close",
+        "IsOpen"
+      ]
+    },
+    "client/Controllers/NpcController": {
+      "functions": [
+        "Init",
+        "Open",
+        "Close",
+        "Advance",
+        "IsOpen"
+      ]
+    },
+    "client/Controllers/TutorialController": {
+      "functions": [
+        "Init",
+        "GetState"
+      ]
+    },
+    "client/Controllers/ShowcaseController": {
+      "optional": true,
       "functions": [
         "Init"
       ]
@@ -342,9 +464,7 @@
       "phoenix_feather"
     ],
     "partBudget": {
-      "lobby": 2500,
-      "course": 2500,
-      "pet": 70
+      "course": 2500
     },
     "centreTolerance": 0.14,
     "tagAttributes": {
@@ -406,5 +526,117 @@
       }
     },
     "_tagAttributes": "Attributes (and their Lua types) CourseBuilder must put on every part carrying a Config.Tags tag - the comments in Config.Tags are canonical."
+  },
+  "v3": {
+    "_comment": "Numbers and names the v3 scenarios assert (ARCHITECTURE_V3.md: ART DIRECTION, sections 3-7, 10 and 11). Part budgets are upper limits (the doc's '~' values rounded up).",
+    "partBudget": {
+      "lobby": 6500,
+      "npcs": 2600,
+      "petHigh": 350,
+      "petLow": 120,
+      "skyDragon": 300,
+      "stormAltar": 450,
+      "showcasePet": 350
+    },
+    "petDetail": {
+      "levels": [
+        "High",
+        "Low"
+      ],
+      "default": "High"
+    },
+    "secretRarity": "Secret",
+    "minSecretPets": 3,
+    "lighting": {
+      "ClockTime": 14.5,
+      "Brightness": 2.0
+    },
+    "menuEntries": [
+      "Inventory",
+      "Pets",
+      "Index",
+      "Shop",
+      "Spot",
+      "Stats"
+    ],
+    "npcCount": 6,
+    "npcScale": 2.2,
+    "npcPromptDistance": 10,
+    "lobbyInfo": {
+      "_comment": "v3 LobbyInfo keys (LobbyBuilder.Build) and their Lua types; a trailing ? means the key may be nil",
+      "NpcSpots": "table",
+      "AltarSite": "CFrame?",
+      "AltarDock": "Vector3?"
+    },
+    "tutorialRemotes": [
+      "TutorialState",
+      "TutorialEvent",
+      "IndexClaim"
+    ],
+    "elements": {
+      "wheel": [
+        "Water",
+        "Flame",
+        "Frost",
+        "Nature",
+        "Earth",
+        "Storm"
+      ],
+      "pair": [
+        "Celestial",
+        "Shadow"
+      ],
+      "strong": 1.5,
+      "weak": 0.75,
+      "minPetsPerElement": 3
+    },
+    "stormfang": {
+      "petId": "stormfang",
+      "name": "Stormfang",
+      "species": "Stormfang",
+      "wingStyle": "StormCloud",
+      "role": "Combat",
+      "specialKind": "Pounce",
+      "element": "Storm",
+      "_palette": "reference colours from ARCHITECTURE_V3.md section 10 (r, g, b)",
+      "palette": {
+        "armour": [
+          42,
+          44,
+          51
+        ],
+        "armourMid": [
+          75,
+          77,
+          87
+        ],
+        "armourLight": [
+          112,
+          115,
+          126
+        ],
+        "violet": [
+          122,
+          60,
+          255
+        ],
+        "electric": [
+          47,
+          180,
+          255
+        ],
+        "gem": [
+          63,
+          200,
+          255
+        ],
+        "cloud": [
+          46,
+          58,
+          102
+        ]
+      }
+    },
+    "artImage": "rbxassetid://129423539279679"
   }
 }

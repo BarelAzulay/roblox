@@ -1,35 +1,60 @@
--- LobbyBuilder (v2): procedurally builds the Nimbus Climb cloud village at Config.Lobby.Origin.
+-- LobbyBuilder (v3): builds the Nimbus Climb sky village in the DETAILED VOXEL style
+-- (ARCHITECTURE_V3.md, "ART DIRECTION" + section 6), sculpted with shared/Voxel.lua.
 --
 -- Top view (+X right, +Z up the page, angles in degrees: x = cos, z = sin, plaza centre = Origin):
 --
---   * PLAZA          a grand round cloud (radius ~116) with a medallion, paths, benches, lantern trees,
---                    a muted rainbow arch with the welcome board, and two info boards.
---   * PORTAL GATES   one per Config.Difficulties entry (Easy..Saint) spread over the +Z half of the
---                    plaza at radius Config.Lobby.PortalRingRadius, each in its difficulty colour with a
---                    3D star row and a billboard (title, stars, party count, status, blurb).
---   * SHOP ISLAND    south of the plaza (Config.Lobby.ShopOffset): four roulette machines (colour =
---                    roulette colour), an item-shop stall, a rarity guide board and decor.
---   * RING ROAD      a wide cloud promenade (radius ~168) around the village. Six spokes join it to the
---                    plaza; its two ends dock into the shop island.
---   * SPOT ISLANDS   Config.Lobby.SpotCount personal cloud homes on the outer ring, each reached by a
---                    short ramp from the ring road: home pad, nameplate, showcase podium, bench, lantern.
---   * DECOR ISLANDS  small gardens behind the portals, joined to the ring road by short planks.
---   * SKY            drifting clouds, a far cloud sea, fireflies and sparkle dust.
+--   * PLAZA          a big round cloud island (walkable radius ~116). Its body is a tiered voxel cloud with
+--                    puffy rim clouds; the top is tiled ground in layers: shaded lawn with flower pixels, a
+--                    stone court with a golden medallion (arrows point at every portal), a stone promenade
+--                    on the portal ring, stone / sand paths with borders, a wooden boardwalk to the shop
+--                    with a fountain roundabout (Nimbus, the Cloudy Dragon, on top), a voxel rainbow arch
+--                    with the welcome sign, notice boards, trees, lamps, benches, flower beds, bunting and
+--                    banners in the difficulty colours.
+--   * PORTAL GATES   Model Portal_<Id>: one per Config.Difficulties entry on Config.Lobby.PortalRingRadius,
+--                    spread over the +Z half (Easy at 0 degrees ... Saint at 180). A sculpted cloud-and-stone
+--                    ring gate in the difficulty colour, star gems, a tiled ready pad (the Zone) + billboard.
+--   * SHOP ISLAND    at Config.Lobby.ShopOffset: four voxel gacha machines (Model Roulette_<Id>, built in
+--                    the roulette colour), the striped item stall (Model ItemShop), a rarity board, a token
+--                    statue and an entrance arch, joined to the plaza by a short stone neck.
+--   * HOME PLOTS     Config.Lobby.SpotCount cloud islands on Config.Lobby.SpotRingRadius: a puffy cloud body
+--                    (billows along the sides and back, a hanging cumulus underneath, a soft rim of puffs on the
+--                    outer margins) under a flat PlotSize x PlotSize mowed lawn yard (kept EMPTY for the
+--                    phase-2 home), fence posts and rails, a gate facing the ring street, a mailbox with the
+--                    nameplate, the pet podium.
+--   * RING STREET    a stone street along the front of every plot; wooden bridges join neighbouring plots
+--                    at the junctions. Wooden spoke bridges (supported by cloud puffs) join the plaza to every
+--                    other junction; two garden islands hang off the street; one junction slot stays free for
+--                    the Storm Altar (LobbyInfo.AltarSite).
+--   * SKY            voxel cumulus clouds around the village and one far below it.
 --
--- Walkability rules (so nobody gets stuck): every connection is a gently sloped slab, never a gap
--- bigger than a step; connecting slabs sit 0.06-0.16 studs BELOW the surface they dock into and end
--- inside it (no coplanar overlaps, no z-fighting); nothing needs more than a plain walk.
+-- LobbyBuilder.Build() -> LobbyInfo (ARCHITECTURE.md / _V2 / _V3 contract):
+--   Folder, SpawnCFrame, Portals[id] = PortalInfo (+ Model), Spots[i] = SpotInfo, Shop = { Roulettes[id], ItemShop },
+--   NpcSpots = { CFrame x6 }   ground-level CFrames on the plaza lawn beside the walkways, LookVector = towards
+--                              the walkway / court, each with ~5 studs of free space for an NPC pedestal
+--   AltarSite = CFrame | nil   reserved, empty spot inside the ring for the Storm Altar island (faces the plaza)
+--   AltarDock = Vector3 | nil  inner edge of the street junction in front of it (where a bridge can dock; that
+--                              junction's inner rope rail is left open for the altar's bridge and gate)
+-- SpotInfo also carries PlotCFrame (centre of the flat yard surface, LookVector = towards the gate),
+-- PlotSize (= Config.Lobby.PlotSize), GateCFrame (gate, on the ground) and Accent (the plot colour).
+-- Spot folders are named Spot_NN and carry the attribute SpotIndex; portal / roulette models are named
+-- Portal_<Id> / Roulette_<Id> (tutorial targets).
 --
--- No external assets: Parts, ParticleEmitters (built-in textures) and Theme-styled GUI text.
--- Plain Lua 5.1-compatible syntax only. Everything is deterministic (seeded Random).
+-- Walkability: every walking surface is a flat collidable part at the plaza height (TOP); layers that meet
+-- differ by at most 0.3 studs (no gaps, no jumps, no z-fighting: overlapping layers are offset in height).
+-- Decor stands on the surface under it: props on the lawn sit LAWN studs under TOP (nothing hovers), pennants
+-- hang from their rope, puffs under bridges stop at the deck, and no cloud rises over a path or an exit.
+-- No server-side animation (v3 replication rule): life comes from ParticleEmitters and lights only.
+--
+-- Part budget: <= ~6500 parts after the greedy voxel merge. Repeated decor (trees, lamps, benches, flower beds,
+-- the whole plot with its island, fence and gate, cloud puffs, sky clouds) is sculpted once and :Clone()d.
+-- No external assets: Parts, built-in particle textures and Theme-styled GUI text. Deterministic (seeded).
 -- ProximityPrompts are NOT created here: PetService / ItemService attach them to the PromptParts.
 --
--- Robustness: portals, spots, the shop machines and the item stall are the objects other services
--- depend on. Each is built inside pcall with a bare-bones fallback that still returns the same
--- LobbyInfo shape, and all pure decoration runs in guarded sections, so one scenery bug can never
--- take the whole lobby (or the game boot) down.
+-- Robustness: portals, spots, the shop machines and the item stall are what other services depend on. Each
+-- is built inside pcall with a plain-part fallback that still returns the same LobbyInfo shape (the
+-- fallbacks also cover a missing shared/Voxel module), and all decoration runs in guarded sections.
+-- Plain Lua 5.1-compatible syntax only.
 
-local TweenService = game:GetService("TweenService")
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
@@ -40,28 +65,47 @@ local Util = require(Shared.Util)
 
 local LobbyBuilder = {}
 
+local function loadShared(name)
+	local inst = Shared:FindFirstChild(name)
+	if not inst then
+		return nil
+	end
+	local ok, result = pcall(require, inst)
+	if ok and type(result) == "table" then
+		return result
+	end
+	warn("[LobbyBuilder] shared/" .. name .. " unavailable: " .. tostring(result))
+	return nil
+end
+
+local Voxel = loadShared("Voxel")
+
 ----------------------------------------------------------------------
 -- Constants
 ----------------------------------------------------------------------
 
 local LOBBY = Config.Lobby
 local ORIGIN = LOBBY.Origin
-local TOP = ORIGIN.Y -- y of the plaza walking surface
-local SURF_R = LOBBY.PlazaRadius + 6 -- the cloud disc reaches a bit past PlazaRadius
-local PORTAL_R = LOBBY.PortalRingRadius
-local SPOT_R = LOBBY.SpotRingRadius
-local SPOT_COUNT = LOBBY.SpotCount
-local SEED = 20250117
-
-local SPARKLES = "rbxasset://textures/particles/sparkles_main.dds"
+local TOP = ORIGIN.Y -- y of every walking surface
+local LAWN = 0.4 -- the lawn layer's top sits this far under TOP (paths 0, borders -0.1, patches -0.3)
+local OX, OZ = ORIGIN.X, ORIGIN.Z
+local PLAZA_R = (LOBBY.PlazaRadius or 110) + 6 -- walkable radius of the plaza ground
+local PORTAL_R = LOBBY.PortalRingRadius or 88
+local SPOT_R = LOBBY.SpotRingRadius or 300
+local SPOT_COUNT = math.max(1, LOBBY.SpotCount or 16)
+local PLOT = LOBBY.PlotSize or 72
+local SEED = 20261009
 local MAT = Enum.Material
+local SPARKLES = "rbxasset://textures/particles/sparkles_main.dds"
 
 -- Glyphs as UTF-8 byte escapes (keeps the source file ASCII).
-local STAR_FULL = "\226\152\133"
-local STAR_EMPTY = "\226\152\134"
-local CLOUD_GLYPH = "\226\152\129"
-local BULLET = "\226\128\162"
-local ELLIPSIS = "\226\128\166"
+local GLYPH = {
+	StarFull = "\226\152\133",
+	StarEmpty = "\226\152\134",
+	Cloud = "\226\152\129",
+	Bullet = "\226\128\162",
+	Ellipsis = "\226\128\166",
+}
 
 local function atan2(y, x)
 	if math.atan2 then
@@ -70,215 +114,196 @@ local function atan2(y, x)
 	return math.atan(y, x)
 end
 
+-- Layout numbers (studs). Plot-local frames: origin = yard centre on the ground, -Z = towards the plaza
+-- (the gate side), +X = across.
+local G = {}
+G.CourtR = 29 -- stone court around the spawn
+G.PromIn = PORTAL_R - 9 -- stone promenade ring the portal pads sit on
+G.PromOut = PORTAL_R + 9
+G.PathHalf = 5 -- radial stone paths (half width incl. border)
+G.BoardHalf = 7 -- the wooden boardwalk to the shop
+G.StubHalf = 5 -- sand paths to the spoke bridges
+G.FountainD = 58 -- fountain roundabout, distance from the centre towards the shop
+G.Step = 360 / SPOT_COUNT
+G.HalfStep = G.Step / 2
+G.PlotHalf = PLOT / 2
+G.Verge = 4
+G.StreetW = 14
+G.StreetZ = -(G.PlotHalf + G.Verge + G.StreetW / 2) -- plot-local z of the street centre line
+G.StreetR = SPOT_R + G.StreetZ -- distance of the street centre line from the origin
+G.IslandHalfX = G.PlotHalf + 6
+G.IslandBack = G.PlotHalf + 6
+G.IslandFront = G.StreetZ - G.StreetW / 2
+G.JunctionX = G.StreetR * math.tan(math.rad(G.HalfStep)) -- plot-local x of the junctions
+G.StreetExt = (G.StreetW / 2) * math.tan(math.rad(G.HalfStep)) + 0.8 -- overlap past the junction
+G.SpokeEndR = (G.StreetR - G.StreetW / 2) / math.cos(math.rad(G.HalfStep)) + 2.4
+G.SpokeW = 10
+G.GardenR = 186 -- garden island centres
+G.GardenSize = 22 -- garden island radius
+
 ----------------------------------------------------------------------
--- Palette: Theme.World when the uikit agent provides it, calm fallbacks otherwise.
--- Nothing here is pure white; neon is only used on small accents.
+-- Palette: cheerful but not blinding. Nothing is pure white (cloud tops stay below 249 on red).
 ----------------------------------------------------------------------
 
-local function pickColor(value, fallback)
-	if typeof(value) == "Color3" then
-		return value
-	end
-	return fallback
+local function rgb(r, g, b)
+	return Color3.fromRGB(r, g, b)
 end
 
-local World = Theme.World
-if type(World) ~= "table" then
-	World = {}
-end
-local ThemeColors = Theme.Colors or {}
-
--- Whatever the theme says, no world surface may get brighter than `limit` on any channel
--- (keeps the lobby calm even if Theme.World is ever tuned too bright).
-local function capBright(color, limit)
-	local peak = math.max(color.R, color.G, color.B) * 255
-	if peak > limit then
-		local k = limit / peak
-		return Color3.new(color.R * k, color.G * k, color.B * k)
-	end
-	return color
-end
-
-local COL = {}
-COL.Top = capBright(pickColor(World.CloudTop, Color3.fromRGB(190, 204, 228)), 214)
-COL.Side = capBright(pickColor(World.CloudSide, Color3.fromRGB(156, 172, 204)), 184)
-COL.Shadow = capBright(pickColor(World.CloudShadow, Color3.fromRGB(120, 138, 178)), 150)
-COL.Gold = capBright(pickColor(World.Token, Color3.fromRGB(226, 182, 84)), 232)
-COL.Ink = pickColor(ThemeColors.Ink, Color3.fromRGB(34, 40, 72))
-COL.Puff = COL.Top:Lerp(COL.Side, 0.18)
-COL.Dusk = COL.Side:Lerp(Color3.fromRGB(118, 110, 170), 0.35)
-COL.Path = Color3.fromRGB(196, 176, 152)
-COL.Wood = Color3.fromRGB(150, 110, 82)
-COL.WoodLight = Color3.fromRGB(176, 136, 102)
-COL.WoodDark = Color3.fromRGB(104, 76, 60)
-COL.Stem = Color3.fromRGB(98, 170, 122)
-COL.Lantern = Color3.fromRGB(238, 188, 108)
-COL.GoldDark = COL.Gold:Lerp(Color3.fromRGB(120, 80, 40), 0.35)
-COL.Navy = Color3.fromRGB(34, 42, 76)
-COL.Violet = Color3.fromRGB(68, 60, 118)
-COL.Post = Color3.fromRGB(76, 70, 112)
-COL.Slate = Color3.fromRGB(58, 66, 100)
-COL.Water = Color3.fromRGB(96, 160, 214)
-COL.WaterBed = Color3.fromRGB(70, 128, 196)
-COL.Text = Color3.fromRGB(238, 243, 252) -- light text colour (GUI text only)
-COL.TextDim = Color3.fromRGB(176, 190, 222)
-COL.TextGold = Color3.fromRGB(244, 214, 132)
-COL.StarOff = Color3.fromRGB(88, 96, 128)
-
--- Muted rainbow (arch + medallion).
-local RAINBOW = {
-	Color3.fromRGB(196, 92, 102),
-	Color3.fromRGB(214, 142, 84),
-	Color3.fromRGB(212, 190, 98),
-	Color3.fromRGB(108, 170, 128),
-	Color3.fromRGB(92, 144, 200),
-	Color3.fromRGB(140, 116, 196),
+local C = {
+	CloudLight = rgb(244, 247, 252),
+	Cloud = rgb(232, 238, 249),
+	CloudShade = rgb(212, 222, 241),
+	Mist = rgb(194, 211, 240),
+	MistDark = rgb(170, 190, 228),
+	Grass = rgb(108, 186, 86),
+	GrassLight = rgb(132, 202, 98),
+	GrassDark = rgb(86, 160, 76),
+	Hedge = rgb(74, 146, 72),
+	HedgeLight = rgb(100, 170, 84),
+	Stone = rgb(208, 202, 190),
+	StoneLight = rgb(226, 221, 209),
+	StoneDark = rgb(172, 164, 154),
+	StoneEdge = rgb(146, 138, 132),
+	Sand = rgb(236, 214, 166),
+	SandDark = rgb(212, 186, 138),
+	Plank = rgb(196, 146, 98),
+	PlankLight = rgb(214, 166, 114),
+	PlankDark = rgb(152, 108, 72),
+	Bark = rgb(132, 92, 62),
+	Iron = rgb(64, 70, 92),
+	IronLight = rgb(96, 104, 130),
+	Gold = rgb(244, 198, 84),
+	GoldDark = rgb(206, 154, 62),
+	Lamp = rgb(255, 214, 140),
+	Water = rgb(92, 178, 236),
+	WaterDeep = rgb(62, 136, 212),
+	Leaf = rgb(98, 178, 80),
+	Pine = rgb(60, 138, 92),
+	Blossom = rgb(246, 174, 204),
+	BlossomWhite = rgb(250, 228, 238),
+	Soil = rgb(120, 86, 64),
+	Navy = rgb(34, 42, 76),
+	Violet = rgb(68, 60, 118),
+	Ink = (Theme.Colors and Theme.Colors.Ink) or rgb(26, 32, 64),
+	Text = rgb(238, 243, 252),
+	TextDim = rgb(190, 202, 230),
+	TextGold = rgb(246, 216, 132),
+	StarOff = rgb(96, 104, 136),
+	Rose = rgb(234, 120, 146),
+	Cream = rgb(246, 234, 210),
 }
 
-local BLOSSOMS = {
-	Color3.fromRGB(226, 170, 196),
-	Color3.fromRGB(230, 190, 160),
-	Color3.fromRGB(170, 210, 186),
-	Color3.fromRGB(186, 176, 226),
+local FLOWERS = {
+	rgb(246, 150, 188), -- pink
+	rgb(250, 214, 92), -- yellow
+	rgb(244, 244, 248), -- white (not pure)
+	rgb(172, 142, 232), -- violet
+	rgb(236, 104, 108), -- red
+	rgb(112, 172, 240), -- blue
 }
 
-local FLOWER_COLORS = {
-	Color3.fromRGB(226, 140, 170),
-	Color3.fromRGB(232, 196, 108),
-	Color3.fromRGB(170, 150, 226),
-	Color3.fromRGB(226, 130, 126),
-	Color3.fromRGB(130, 190, 226),
-	Color3.fromRGB(230, 214, 150),
-}
-
--- One accent colour per spot (cycled): it tints the pad, podium and banner so a spot is easy to find.
+-- One accent per home plot (cycled): banner, mailbox flag, podium trim.
 local ACCENTS = {
-	Color3.fromRGB(214, 120, 134),
-	Color3.fromRGB(224, 160, 96),
-	Color3.fromRGB(214, 196, 104),
-	Color3.fromRGB(116, 184, 140),
-	Color3.fromRGB(98, 176, 196),
-	Color3.fromRGB(108, 148, 214),
-	Color3.fromRGB(150, 126, 210),
-	Color3.fromRGB(200, 128, 184),
+	rgb(232, 112, 132),
+	rgb(240, 160, 84),
+	rgb(236, 204, 92),
+	rgb(108, 192, 124),
+	rgb(86, 186, 206),
+	rgb(98, 148, 226),
+	rgb(154, 122, 222),
+	rgb(222, 120, 192),
 }
+
+local RAINBOW = {
+	rgb(232, 104, 116),
+	rgb(242, 160, 86),
+	rgb(244, 212, 96),
+	rgb(108, 196, 120),
+	rgb(96, 164, 232),
+	rgb(156, 124, 226),
+}
+
+-- One palette for every voxel grid (keys are shared; Voxel derives missing _Light / _Dark variants).
+local P = {
+	CloudLight = C.CloudLight,
+	Cloud = C.Cloud,
+	CloudShade = C.CloudShade,
+	Mist = C.Mist,
+	MistDark = C.MistDark,
+	Grass = C.Grass,
+	GrassLight = C.GrassLight,
+	GrassDark = C.GrassDark,
+	Hedge = C.Hedge,
+	Stone = C.Stone,
+	StoneLight = C.StoneLight,
+	StoneDark = C.StoneDark,
+	StoneEdge = C.StoneEdge,
+	Sand = C.Sand,
+	SandDark = C.SandDark,
+	Plank = C.Plank,
+	PlankLight = C.PlankLight,
+	PlankDark = C.PlankDark,
+	Bark = C.Bark,
+	Iron = C.Iron,
+	Gold = C.Gold,
+	GoldDark = C.GoldDark,
+	GoldGlow = { Color = C.Gold, Material = MAT.Neon },
+	Leaf = C.Leaf,
+	Pine = C.Pine,
+	Blossom = C.Blossom,
+	BlossomWhite = C.BlossomWhite,
+	Soil = C.Soil,
+	Water = { Color = C.Water, Material = MAT.Glass, Transparency = 0.35 },
+	WaterDeep = C.WaterDeep,
+	Lamp = { Color = C.Lamp, Material = MAT.Neon },
+	Rose = C.Rose,
+	Cream = C.Cream,
+}
+for i, color in ipairs(FLOWERS) do
+	P["Flower" .. i] = color
+end
+for i, color in ipairs(RAINBOW) do
+	P["Rainbow" .. i] = color
+end
+for i, diff in ipairs(Config.Difficulties) do
+	P["Diff" .. i] = diff.Color
+end
+
+-- Cloud keys used by tiers, from the top tier down (height-banded shading: cheap and soft).
+local TIER_KEYS = { "CloudLight", "Cloud", "CloudShade", "Mist", "MistDark" }
 
 ----------------------------------------------------------------------
 -- Per-build state
 ----------------------------------------------------------------------
 
-local partCount = 0
-local activeTweens = {}
-local animQueue = {}
-
--- Animations are queued while building and started once the lobby is parented to Workspace.
-local function later(fn)
-	animQueue[#animQueue + 1] = fn
-end
-
-local function stopAnimations()
-	for _, tween in ipairs(activeTweens) do
-		pcall(function()
-			tween:Cancel()
-		end)
-	end
-	activeTweens = {}
-	animQueue = {}
-end
-
-local function loopTween(inst, seconds, goal, style, reverses)
-	local info = TweenInfo.new(
-		seconds,
-		style or Enum.EasingStyle.Sine,
-		Enum.EasingDirection.InOut,
-		-1,
-		reverses ~= false,
-		0
-	)
-	local tween = TweenService:Create(inst, info, goal)
-	tween:Play()
-	activeTweens[#activeTweens + 1] = tween
-	return tween
-end
+local templates = {} -- name -> unparented Model built at the origin, cloned with place()
+local reserved = {} -- { x, z, radius } world circles taken by plaza decor (keeps props apart)
 
 ----------------------------------------------------------------------
--- Primitive builders
+-- Small math helpers
 ----------------------------------------------------------------------
 
-local function merge(dst, src)
-	if src then
-		for key, value in pairs(src) do
-			dst[key] = value
-		end
-	end
-	return dst
-end
-
-local function newFolder(parent, name)
-	local folder = Instance.new("Folder")
-	folder.Name = name
-	folder.Parent = parent
-	return folder
-end
-
--- Anchored smooth-plastic part with sane defaults; props override anything.
-local function mk(parent, props, className)
-	local all = {
-		Anchored = true,
-		Material = MAT.SmoothPlastic,
-		TopSurface = Enum.SurfaceType.Smooth,
-		BottomSurface = Enum.SurfaceType.Smooth,
-		CastShadow = false,
-		Parent = parent,
-	}
-	merge(all, props)
-	partCount = partCount + 1
-	return Util.Create(className or "Part", all)
-end
-
-local function block(parent, cf, size, props)
-	return mk(parent, merge({ CFrame = cf, Size = size }, props))
-end
-
--- Upright cylinder (axis = world Y). pos = centre; "thickness" is its height.
-local function disc(parent, pos, diameter, thickness, props)
-	return mk(
-		parent,
-		merge({
-			Shape = Enum.PartType.Cylinder,
-			Size = Vector3.new(thickness, diameter, diameter),
-			CFrame = CFrame.new(pos) * CFrame.Angles(0, 0, math.rad(90)),
-		}, props)
-	)
-end
-
--- Cylinder whose flat faces look along the local Z axis of `cf` (a wheel standing on its edge).
-local function faceDisc(parent, cf, diameter, thickness, props)
-	return mk(
-		parent,
-		merge({
-			Shape = Enum.PartType.Cylinder,
-			Size = Vector3.new(thickness, diameter, diameter),
-			CFrame = cf * CFrame.Angles(0, math.rad(90), 0),
-		}, props)
-	)
-end
-
-local function ball(parent, pos, diameter, props)
-	return mk(
-		parent,
-		merge({
-			Shape = Enum.PartType.Ball,
-			Size = Vector3.new(diameter, diameter, diameter),
-			CFrame = CFrame.new(pos),
-		}, props)
-	)
-end
-
--- Point on the lobby at polar coordinates around the plaza centre (degrees).
 local function polar(angleDeg, radius, y)
 	local a = math.rad(angleDeg)
-	return Vector3.new(ORIGIN.X + math.cos(a) * radius, y or TOP, ORIGIN.Z + math.sin(a) * radius)
+	return Vector3.new(OX + math.cos(a) * radius, y or TOP, OZ + math.sin(a) * radius)
+end
+
+local function dirOf(angleDeg)
+	local a = math.rad(angleDeg)
+	return Vector3.new(math.cos(a), 0, math.sin(a))
+end
+
+-- CFrame at `pos` looking (flat) at `target`.
+local function flatLook(pos, target)
+	local d = Vector3.new(target.X - pos.X, 0, target.Z - pos.Z)
+	if d.Magnitude < 1e-3 then
+		return CFrame.new(pos)
+	end
+	return CFrame.lookAt(pos, pos + d.Unit)
+end
+
+local function faceCentre(pos)
+	return flatLook(pos, Vector3.new(OX, pos.Y, OZ))
 end
 
 local function angleDiff(a, b)
@@ -290,43 +315,104 @@ local function angleDiff(a, b)
 end
 
 local function nearAny(angle, list, half)
-	if list then
-		for _, other in ipairs(list) do
-			if angleDiff(angle, other) < half then
-				return true
-			end
+	for _, other in ipairs(list or {}) do
+		if angleDiff(angle, other) < half then
+			return true
 		end
 	end
 	return false
 end
 
--- Flat horizontal perpendicular of a direction (for lining things up along a slab).
-local function perpendicular(dir)
-	local flat = Vector3.new(-dir.Z, 0, dir.X)
-	if flat.Magnitude < 0.001 then
-		return Vector3.new(1, 0, 0)
+-- angle inside [from, to] (degrees, from may be negative)
+local function angleIn(angle, from, to)
+	local a = (angle - from) % 360
+	return a <= (to - from)
+end
+
+local function clamp(v, lo, hi)
+	if v < lo then
+		return lo
+	elseif v > hi then
+		return hi
 	end
-	return flat.Unit
+	return v
 end
 
--- A tilted block between two points on its TOP surface (centres of the top face at both ends).
--- The slab hangs `thick` below the line; used for ramps, bridges and road segments.
-local function slab(parent, a, b, width, thick, props)
-	local dir = b - a
-	local mid = (a + b) * 0.5
-	local look = CFrame.lookAt(mid, mid + dir)
-	return mk(
-		parent,
-		merge({
-			CFrame = look * CFrame.new(0, -thick * 0.5, 0),
-			Size = Vector3.new(width, thick, dir.Magnitude),
-		}, props)
-	)
+-- Deterministic hash of integers -> [0, 1). The squared term makes hashes with different seeds independent.
+local function hash3(x, y, z, seed)
+	local h = (x * 73856093 + y * 19349663 + z * 83492791 + seed * 2654435761) % 2147483647
+	h = (h * 16807) % 2147483647
+	local a = h % 65521
+	a = (a * a + seed * 7919 + 12345) % 65521
+	h = ((h + a * 32771) * 16807) % 2147483647
+	return h / 2147483647
+end
+
+-- Smooth 2D value noise in 0..1 (deterministic).
+local function vnoise(x, z, scale, seed)
+	local fx, fz = x / scale, z / scale
+	local x0, z0 = math.floor(fx), math.floor(fz)
+	local tx, tz = fx - x0, fz - z0
+	tx = tx * tx * (3 - 2 * tx)
+	tz = tz * tz * (3 - 2 * tz)
+	local a, b = hash3(x0, 0, z0, seed), hash3(x0 + 1, 0, z0, seed)
+	local c, d = hash3(x0, 0, z0 + 1, seed), hash3(x0 + 1, 0, z0 + 1, seed)
+	local ab = a + (b - a) * tx
+	local cd = c + (d - c) * tx
+	return ab + (cd - ab) * tz
 end
 
 ----------------------------------------------------------------------
--- Effects helpers
+-- Instance helpers
 ----------------------------------------------------------------------
+
+local function newFolder(parent, name)
+	local folder = Instance.new("Folder")
+	folder.Name = name
+	folder.Parent = parent
+	return folder
+end
+
+local function newModel(parent, name)
+	local model = Instance.new("Model")
+	model.Name = name
+	model.Parent = parent
+	return model
+end
+
+-- One anchored block. opts: Collide (default false), Material, Transparency, Shadow, Reflectance.
+local function box(parent, name, cf, size, color, opts)
+	opts = opts or {}
+	local p = Instance.new("Part")
+	p.Name = name
+	p.Anchored = true
+	p.Size = size
+	p.CFrame = cf
+	p.Color = color
+	p.Material = opts.Material or MAT.SmoothPlastic
+	p.Transparency = opts.Transparency or 0
+	if opts.Reflectance then
+		p.Reflectance = opts.Reflectance
+	end
+	p.TopSurface = Enum.SurfaceType.Smooth
+	p.BottomSurface = Enum.SurfaceType.Smooth
+	p.CanCollide = opts.Collide == true
+	p.CanQuery = opts.Collide == true or opts.Query == true
+	p.CanTouch = false
+	if opts.Shadow ~= nil then
+		p.CastShadow = opts.Shadow == true
+	else
+		p.CastShadow = math.max(size.X, size.Y, size.Z) >= 4
+	end
+	p.Parent = parent
+	return p
+end
+
+-- Invisible part used to host emitters / billboards / lights.
+local function anchorPart(parent, name, pos, size)
+	local p = box(parent, name, CFrame.new(pos), size or Vector3.new(1, 1, 1), C.Cloud, { Transparency = 1, Shadow = false })
+	return p
+end
 
 local FADE_IN_OUT = NumberSequence.new({
 	NumberSequenceKeypoint.new(0, 1),
@@ -343,17 +429,11 @@ local function popSize(maxSize)
 	})
 end
 
--- ParticleEmitter.EmissionDirection that points UP on a part made by disc(): disc() rolls its
--- cylinder 90 degrees about Z, so the part's local +Y (the default Top face) points along world -X
--- and the flat top face is the local Right face. Pass it for emitters parented to a disc() part
--- (not to faceDisc() or to the unrolled gate swirl cylinder, and not needed with a 180 degree spread).
-local DISC_UP = Enum.NormalId.Right
-
 -- Sparkle ParticleEmitter with soft defaults; `props` overrides anything.
 local function emitter(parent, props)
 	local e = Instance.new("ParticleEmitter")
 	e.Texture = SPARKLES
-	e.Color = ColorSequence.new(COL.TextGold)
+	e.Color = ColorSequence.new(C.TextGold)
 	e.LightEmission = 0.6
 	e.LightInfluence = 0
 	e.Rate = 6
@@ -363,7 +443,11 @@ local function emitter(parent, props)
 	e.Transparency = FADE_IN_OUT
 	e.Rotation = NumberRange.new(0, 360)
 	e.RotSpeed = NumberRange.new(-60, 60)
-	merge(e, props)
+	if props then
+		for key, value in pairs(props) do
+			e[key] = value
+		end
+	end
 	e.Parent = parent
 	return e
 end
@@ -378,115 +462,165 @@ local function pointLight(parent, color, brightness, range)
 	return l
 end
 
--- Invisible part used to host emitters / billboards.
-local function anchorPart(parent, name, pos, size)
-	return mk(parent, {
-		Name = name,
-		Size = size or Vector3.new(1, 1, 1),
-		CFrame = CFrame.new(pos),
-		Transparency = 1,
-		CanCollide = false,
-		CanTouch = false,
-		CanQuery = false,
-	})
-end
-
 ----------------------------------------------------------------------
--- GUI helpers (all text goes through Theme roles)
+-- GUI helpers (all text goes through Theme font roles)
 ----------------------------------------------------------------------
+-- World text rule (ARCHITECTURE_V3.md, added after the playtest "letters too small"):
+--   * Tags above things are PIXEL-sized BillboardGuis (offset UDim2), so their text keeps one on-screen size at
+--     any distance: names >= 22 px and info lines >= 18 px at 1080p, outlined glyphs on a compact solid plate
+--     that sizes itself to its text, LightInfluence 0 and a MaxDistance of ~60-120 studs.
+--   * Signs on surfaces are SurfaceGuis at SIGN_PPS pixels per stud with FIXED text sizes: titles >= 1 stud,
+--     info lines >= 0.6 stud.
+--   * Never TextScaled in the world: the engine drew the auto-scaled world text tiny in the playtest.
 
--- World-sized billboard: Size is in studs, so it shrinks with distance like the thing it labels.
--- The height offset is in WORLD space (StudsOffsetWorldSpace): StudsOffset is camera-relative and
--- would slide the tag forward / back over its island whenever the camera pitches.
-local function newBillboard(adornee, widthStuds, heightStuds, offsetY, maxDistance)
+local INK = (Theme.Colors and Theme.Colors.TextStroke) or C.Ink
+local TAG_NAME = 28 -- px: the name / title of a tag
+local TAG_INFO = 20 -- px: info lines of a tag
+local TAG_SMALL = 18 -- px: badges and pills (the info-line minimum)
+local TAG_RANGE = 110 -- studs: MaxDistance of an ordinary tag
+local SIGN_PPS = 50 -- pixels per stud on every surface sign
+local SIGN_TITLE = 56 -- px at SIGN_PPS = 1.12 studs
+local SIGN_INFO = 30 -- px at SIGN_PPS = 0.6 stud
+
+-- Pixel-sized tag on `adornee`. The `w` x `h` container is transparent (the plate inside sizes itself to its
+-- text); SizeOffset puts the container's BOTTOM edge on the adornee, raised `lift` studs in world space, so the
+-- tag grows upwards and never sinks into what it labels, whatever the camera distance.
+local function newTag(adornee, name, w, h, lift, maxDistance)
 	local gui = Instance.new("BillboardGui")
-	gui.Name = "Billboard"
-	gui.Size = UDim2.new(widthStuds, 0, heightStuds, 0)
-	gui.StudsOffsetWorldSpace = Vector3.new(0, offsetY or 0, 0)
+	gui.Name = name or "Tag"
+	gui.Size = UDim2.fromOffset(w, h)
+	gui.SizeOffset = Vector2.new(0, 0.5)
+	gui.StudsOffsetWorldSpace = Vector3.new(0, lift or 0, 0)
 	gui.AlwaysOnTop = false
 	gui.LightInfluence = 0
-	gui.MaxDistance = maxDistance or 120
+	gui.MaxDistance = maxDistance or TAG_RANGE
+	gui.ClipsDescendants = false
 	gui.Adornee = adornee
 	gui.Parent = adornee
 	return gui
 end
 
--- Rounded dark card with a coloured outline; fills its parent.
-local function cardPanel(parent, strokeColor, transparency)
-	local card = Instance.new("Frame")
-	card.Name = "Card"
-	card.Size = UDim2.new(1, 0, 1, 0)
-	card.BackgroundColor3 = Color3.fromRGB(255, 255, 255) -- the gradient below sets the real colour
-	card.BackgroundTransparency = transparency or 0.18
-	card.BorderSizePixel = 0
-	local gradient = Instance.new("UIGradient")
-	gradient.Color = ColorSequence.new(COL.Violet, COL.Navy)
-	gradient.Rotation = 90
-	gradient.Parent = card
-	local corner = Instance.new("UICorner")
-	corner.CornerRadius = UDim.new(0.14, 0)
-	corner.Parent = card
-	local stroke = Instance.new("UIStroke")
-	stroke.Color = strokeColor
-	stroke.Thickness = 5
-	stroke.Transparency = 0.1
-	stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-	stroke.Parent = card
-	card.Parent = parent
-	return card, stroke
+local function listLayout(parent, direction, gap, hAlign)
+	local layout = Instance.new("UIListLayout")
+	layout.FillDirection = direction or Enum.FillDirection.Vertical
+	layout.HorizontalAlignment = hAlign or Enum.HorizontalAlignment.Center
+	layout.VerticalAlignment = Enum.VerticalAlignment.Center
+	layout.SortOrder = Enum.SortOrder.LayoutOrder
+	layout.Padding = UDim.new(0, gap or 0)
+	layout.Parent = parent
+	return layout
 end
 
--- Theme.Label when the theme provides it; otherwise an equivalent plain label (still Theme fonts).
-local function makeLabel(text, role, opts)
-	opts = opts or {}
-	if type(Theme.Label) == "function" then
-		return Theme.Label(text, role, opts)
-	end
-	local label = Instance.new("TextLabel")
-	label.BackgroundTransparency = 1
-	label.Text = text
-	if type(Theme.Fonts) == "table" and Theme.Fonts[role] then
-		label.Font = Theme.Fonts[role]
-	end
-	label.TextColor3 = opts.Color or COL.Text
-	label.TextStrokeColor3 = COL.Ink
-	label.TextStrokeTransparency = opts.Stroke or 0.55
-	if opts.Scaled then
-		label.TextScaled = true
-	elseif opts.Size then
-		label.TextSize = opts.Size
-	end
-	if opts.Props then
-		for key, value in pairs(opts.Props) do
-			label[key] = value
+local function padding(parent, top, left, bottom, right)
+	local pad = Instance.new("UIPadding")
+	pad.PaddingTop = UDim.new(0, top)
+	pad.PaddingLeft = UDim.new(0, left)
+	pad.PaddingBottom = UDim.new(0, bottom or top)
+	pad.PaddingRight = UDim.new(0, right or left)
+	pad.Parent = parent
+	return pad
+end
+
+local function rounded(parent, radius)
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = (type(radius) == "number") and UDim.new(0, radius) or radius
+	corner.Parent = parent
+	return corner
+end
+
+local function outline(parent, color, thickness, transparency)
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = color
+	stroke.Thickness = thickness
+	stroke.Transparency = transparency or 0
+	stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	stroke.Parent = parent
+	return stroke
+end
+
+local function vgradient(parent, top, bottom)
+	local g = Instance.new("UIGradient")
+	g.Color = ColorSequence.new(top, bottom)
+	g.Rotation = 90
+	g.Parent = parent
+	return g
+end
+
+local function plainFrame(parent, name, props)
+	local f = Instance.new("Frame")
+	f.Name = name
+	f.BackgroundTransparency = 1
+	f.BorderSizePixel = 0
+	if props then
+		for key, value in pairs(props) do
+			f[key] = value
 		end
 	end
-	return label
+	f.Parent = parent
+	return f
 end
 
--- Auto-scaled text label placed with fractions of its parent.
-local function fitLabel(parent, text, role, color, name, x, y, w, h, align)
-	local label = makeLabel(text, role, {
-		Scaled = true,
-		Color = color,
+-- The compact solid plate of a tag in the HUD card look (navy gradient, rounded, a thick outline in `edge`),
+-- sized to its content and standing on the bottom centre of the tag; its children are laid out by a list.
+local function tagPlate(gui, edge, minW, direction, gap)
+	local plate = plainFrame(gui, "Plate", {
+		AnchorPoint = Vector2.new(0.5, 1),
+		Position = UDim2.new(0.5, 0, 1, 0),
+		Size = UDim2.fromOffset(minW or 0, 0),
+		AutomaticSize = Enum.AutomaticSize.XY,
+		BackgroundColor3 = Color3.fromRGB(255, 255, 255), -- the gradient supplies the colour
+		BackgroundTransparency = 0.04,
+	})
+	rounded(plate, 16)
+	outline(plate, edge or C.TextGold, 3.5)
+	vgradient(plate, (Theme.Colors and Theme.Colors.PanelLight) or C.Violet, (Theme.Colors and Theme.Colors.Panel) or C.Navy)
+	padding(plate, 7, 16, 9)
+	listLayout(plate, direction, gap or 2)
+	return plate
+end
+
+-- Fixed-size outlined text that sizes itself to its text (tags, pills, list layouts).
+local function tagText(parent, name, text, role, size, color, order, thickness)
+	local label = Theme.Label(text, role, {
+		Size = size,
+		Color = color or C.Text,
+		Stroke = 1, -- the glyph outline below replaces the classic text stroke
+		Outline = thickness or 2.5,
+		OutlineColor = INK,
 		Props = {
 			Name = name,
-			Position = UDim2.new(x, 0, y, 0),
-			Size = UDim2.new(w, 0, h, 0),
+			AutomaticSize = Enum.AutomaticSize.XY,
+			Size = UDim2.fromOffset(0, size + 4),
 			TextWrapped = false,
-			TextXAlignment = align or Enum.TextXAlignment.Center,
+			LayoutOrder = order or 0,
 		},
 	})
 	label.Parent = parent
 	return label
 end
 
-local function surfaceGui(part, pixelsPerStud, face)
+-- A rounded colour pill around one short text (status, price, rarity). Returns pill, label.
+local function tagPill(parent, name, text, role, size, fill, order)
+	local pill = plainFrame(parent, name, {
+		Size = UDim2.fromOffset(0, size + 8),
+		AutomaticSize = Enum.AutomaticSize.XY,
+		BackgroundColor3 = fill,
+		BackgroundTransparency = 0,
+		LayoutOrder = order or 0,
+	})
+	rounded(pill, math.floor(size * 0.55))
+	outline(pill, INK, 2.5)
+	padding(pill, 2, math.floor(size * 0.5), 3)
+	local label = tagText(pill, name .. "Label", text, role, size, C.Text, 1, 2)
+	return pill, label
+end
+
+local function surfaceGui(part, face)
 	local gui = Instance.new("SurfaceGui")
 	gui.Name = "SignGui"
 	gui.Face = face or Enum.NormalId.Front
 	gui.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud
-	gui.PixelsPerStud = pixelsPerStud or 40
+	gui.PixelsPerStud = SIGN_PPS
 	gui.LightInfluence = 0
 	gui.AlwaysOnTop = false
 	gui.Adornee = part
@@ -500,21 +634,32 @@ local function signPanel(gui, strokeColor)
 	panel.Size = UDim2.new(1, 0, 1, 0)
 	panel.BackgroundColor3 = Color3.fromRGB(255, 255, 255) -- UIGradient multiplies this
 	panel.BorderSizePixel = 0
-	local gradient = Instance.new("UIGradient")
-	gradient.Color = ColorSequence.new(COL.Violet, COL.Navy)
-	gradient.Rotation = 90
-	gradient.Parent = panel
-	local corner = Instance.new("UICorner")
-	corner.CornerRadius = UDim.new(0, 28)
-	corner.Parent = panel
-	local stroke = Instance.new("UIStroke")
-	stroke.Color = strokeColor or COL.TextGold
-	stroke.Thickness = 6
-	stroke.Transparency = 0.25
-	stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-	stroke.Parent = panel
+	vgradient(panel, C.Violet, C.Navy)
+	rounded(panel, 24)
+	outline(panel, strokeColor or C.TextGold, 6, 0.2)
 	panel.Parent = gui
 	return panel
+end
+
+-- Sign text with a FIXED size (px at SIGN_PPS), placed with fractions of its parent (x, y, w, h).
+local function signText(parent, text, role, size, color, name, x, y, w, h, align, wrap)
+	local label = Theme.Label(text, role, {
+		Size = size,
+		Color = color,
+		Stroke = 1,
+		Outline = math.max(2, math.floor(size / 16 + 0.5)),
+		OutlineColor = INK,
+		Props = {
+			Name = name,
+			Position = UDim2.new(x, 0, y, 0),
+			Size = UDim2.new(w, 0, h, 0),
+			TextWrapped = wrap == true,
+			TextXAlignment = align or Enum.TextXAlignment.Center,
+			TextYAlignment = Enum.TextYAlignment.Center,
+		},
+	})
+	label.Parent = parent
+	return label
 end
 
 local function textGradient(label, keypoints, rotation)
@@ -530,1694 +675,1536 @@ local function textGradient(label, keypoints, rotation)
 end
 
 local function hex(color)
-	return string.format(
-		"#%02X%02X%02X",
-		math.floor(color.R * 255 + 0.5),
-		math.floor(color.G * 255 + 0.5),
-		math.floor(color.B * 255 + 0.5)
-	)
+	return string.format("#%02X%02X%02X", math.floor(color.R * 255 + 0.5), math.floor(color.G * 255 + 0.5), math.floor(color.B * 255 + 0.5))
 end
 
 -- "50 <cloud>" / "5,000 <cloud>"
 local function priceText(price)
-	return Util.Commas(price) .. " " .. CLOUD_GLYPH
+	return Util.Commas(price) .. " " .. GLYPH.Cloud
 end
 
 -- Rich-text star row: `filled` gold stars then dim hollow ones up to `total`.
 local function starRow(filled, total)
-	local out = string.format('<font color="%s">%s</font>', hex(COL.TextGold), string.rep(STAR_FULL, filled))
+	local out = string.format('<font color="%s">%s</font>', hex(C.TextGold), string.rep(GLYPH.StarFull, filled))
 	if total > filled then
-		out = out .. string.format('<font color="%s">%s</font>', hex(COL.StarOff), string.rep(STAR_EMPTY, total - filled))
+		out = out .. string.format('<font color="%s">%s</font>', hex(C.StarOff), string.rep(GLYPH.StarEmpty, total - filled))
 	end
 	return out
 end
 
--- Small floating name tag in the cosy "Script" font.
-local function nameTag(anchor, text, offsetY, maxDistance)
-	local gui = newBillboard(anchor, 16, 3.6, offsetY, maxDistance or 110)
-	gui.Name = "NameTag"
-	fitLabel(gui, text, "Script", COL.Text, "Text", 0, 0, 1, 1)
-	return gui
+-- A key-cap chip + a description: one row of a notice board (fractions of the 550 x 400 px board canvas).
+local function keyRow(parent, y, rowH, keyText, descText)
+	local chip = Instance.new("Frame")
+	chip.Name = "KeyChip"
+	chip.Size = UDim2.new(0.27, 0, rowH, 0)
+	chip.Position = UDim2.new(0.04, 0, y, 0)
+	chip.BackgroundColor3 = rgb(58, 66, 100)
+	chip.BorderSizePixel = 0
+	rounded(chip, 12)
+	outline(chip, C.TextGold, 2.5, 0.25)
+	chip.Parent = parent
+	signText(chip, keyText, "Heading", SIGN_INFO, C.TextGold, "Key", 0, 0, 1, 1)
+	signText(parent, descText, "Body", SIGN_INFO, C.Text, "Desc", 0.335, y, 0.64, rowH, Enum.TextXAlignment.Left)
 end
 
 ----------------------------------------------------------------------
--- Cloud helpers
+-- Voxel helpers
 ----------------------------------------------------------------------
 
--- Flat-bottomed cumulus: one wide base disc plus overlapping domed puffs. `pos` is the centre
--- of the cluster's floor plane. opts: Puffs, Base, Color, Shade, Transparency, CanCollide.
--- Returns the list of parts (so callers can animate them together).
-local function cloudCluster(parent, rng, pos, radius, opts)
-	opts = opts or {}
-	local color = opts.Color or COL.Puff
-	local shade = opts.Shade or COL.Side
-	local trans = opts.Transparency or 0
-	local collide = opts.CanCollide ~= false
-	local parts = {}
+local VX = {}
 
-	if opts.Base ~= false then
-		local baseTh = radius * 0.45
-		parts[#parts + 1] = disc(parent, pos - Vector3.new(0, baseTh * 0.5, 0), radius * 1.9, baseTh, {
-			Name = "CloudBase",
-			Color = shade,
-			Transparency = trans,
-			CanCollide = collide,
-		})
-	end
-	for _ = 1, opts.Puffs or 6 do
-		local ang = rng:Float(0, math.pi * 2)
-		local dist = rng:Float(0, radius * 0.75)
-		local k = 1 - dist / (radius * 0.8) -- 1 in the middle, ~0 at the edge: domes the silhouette
-		local d = radius * (0.65 + 0.55 * k) * rng:Float(0.85, 1.1)
-		local puffPos = pos + Vector3.new(math.cos(ang) * dist, d * 0.3, math.sin(ang) * dist)
-		parts[#parts + 1] = ball(parent, puffPos, d, {
-			Name = "CloudPuff",
-			Color = color:Lerp(shade, rng:Float(0, 0.3)),
-			Transparency = trans,
-			CanCollide = collide,
-		})
-	end
-	return parts
-end
-
--- A ring of big soft puffs around a disc edge (never solid: the disc itself is the floor).
--- `center` is the surface centre; a puff's crest pokes `crestMin..crestMax` studs above center.Y.
--- Angles listed in `skip` stay open (bridge entrances) within `skipHalf` degrees.
-local function rimPuffs(parent, rng, center, ringR, count, dMin, dMax, crestMin, crestMax, color, skip, skipHalf)
-	for i = 1, count do
-		local ang = (i - 1) * (360 / count) + rng:Float(-4, 4)
-		if not nearAny(ang, skip, skipHalf or 9) then
-			local d = rng:Float(dMin, dMax)
-			local r = ringR + rng:Float(-1, 1.5)
-			local crest = rng:Float(crestMin, crestMax)
-			local a = math.rad(ang)
-			local pos = Vector3.new(center.X + math.cos(a) * r, center.Y + crest - d * 0.5, center.Z + math.sin(a) * r)
-			ball(parent, pos, d, {
-				Name = "RimPuff",
-				Color = color:Lerp(COL.Side, rng:Float(0, 0.2)),
-				CanCollide = false,
-			})
-		end
-	end
-end
-
--- Under-side of a round island: stacked, shrinking, slightly translucent tiers plus a few puffs.
--- `c` = centre of the walking surface, `r` = island radius, `top` = thickness of the top disc.
-local function islandBody(parent, rng, c, r, top, tint, puffCount)
-	local tiers = {
-		{ k = 0.82, th = 3, y = top + 1.5, color = COL.Side, trans = 0.04 },
-		{ k = 0.52, th = 4, y = top + 4.5, color = COL.Side:Lerp(COL.Shadow, 0.4), trans = 0.12 },
-		{ k = 0.26, th = 4, y = top + 8.5, color = COL.Dusk, trans = 0.28 },
-	}
-	for _, tier in ipairs(tiers) do
-		disc(parent, c - Vector3.new(0, tier.y, 0), r * 2 * tier.k, tier.th, {
-			Name = "IslandTier",
-			Color = tier.color:Lerp(tint, 0.08),
-			Transparency = tier.trans,
-			CanCollide = false,
-		})
-	end
-	for _ = 1, puffCount or 2 do
-		local a = rng:Float(0, math.pi * 2)
-		local dist = rng:Float(r * 0.3, r * 0.7)
-		local d = rng:Float(r * 0.4, r * 0.65)
-		ball(parent, c + Vector3.new(math.cos(a) * dist, -rng:Float(top + 3, top + 8), math.sin(a) * dist), d, {
-			Name = "UnderPuff",
-			Color = COL.Dusk:Lerp(COL.Top, rng:Float(0.1, 0.4)),
-			Transparency = 0.12,
-			CanCollide = false,
-		})
-	end
-end
-
--- Deterministic scatter with an exclusion list (used for island decorations).
-local function newPlacer(rng)
-	local taken = {}
-	local placer = {}
-
-	function placer.Reserve(x, z, radius)
-		taken[#taken + 1] = { x, z, radius }
-	end
-
-	-- Angles are world degrees (so features can prefer the outer half of an island).
-	-- Returns x, z offsets from the island centre, or nil when nothing fits.
-	function placer.Find(radius, minD, maxD, angMin, angMax)
-		for _ = 1, 40 do
-			local ang = math.rad(rng:Float(angMin or 0, angMax or 360))
-			local dist = rng:Float(minD, maxD)
-			local x = math.cos(ang) * dist
-			local z = math.sin(ang) * dist
-			local ok = true
-			for _, t in ipairs(taken) do
-				local dx = x - t[1]
-				local dz = z - t[2]
-				local need = radius + t[3]
-				if dx * dx + dz * dz < need * need then
-					ok = false
+-- Vertical cylinder of voxels (voxel units). keep = only fill empty voxels.
+function VX.Disc(g, cx, cz, r, y0, y1, key, keep)
+	local ri = math.ceil(r) + 1
+	local r2 = r * r
+	for y = y0, y1 do
+		for x = math.floor(cx) - ri, math.ceil(cx) + ri do
+			for z = math.floor(cz) - ri, math.ceil(cz) + ri do
+				local dx, dz = x - cx, z - cz
+				if dx * dx + dz * dz <= r2 and (not keep or Voxel.Get(g, x, y, z) == nil) then
+					Voxel.Set(g, x, y, z, key)
 				end
 			end
-			if ok then
-				taken[#taken + 1] = { x, z, radius }
-				return x, z
+		end
+	end
+end
+
+function VX.Ring(g, cx, cz, r0, r1, y0, y1, key)
+	local ri = math.ceil(r1) + 1
+	for y = y0, y1 do
+		for x = math.floor(cx) - ri, math.ceil(cx) + ri do
+			for z = math.floor(cz) - ri, math.ceil(cz) + ri do
+				local dx, dz = x - cx, z - cz
+				local d = math.sqrt(dx * dx + dz * dz)
+				if d >= r0 and d <= r1 then
+					Voxel.Set(g, x, y, z, key)
+				end
 			end
 		end
-		return nil, nil
 	end
-
-	return placer
 end
 
-----------------------------------------------------------------------
--- Decorations
-----------------------------------------------------------------------
-
--- Wooden bench (plain parts, no Seat: running past must never sit you down by accident).
--- `cf` is at ground level; its LookVector is the direction the sitter faces.
-local function bench(parent, cf)
-	local function part(name, offset, size, color, material)
-		return mk(parent, {
-			Name = name,
-			CFrame = cf * CFrame.new(offset),
-			Size = size,
-			Color = color,
-			Material = material or MAT.WoodPlanks,
-		})
-	end
-	part("BenchSeat", Vector3.new(0, 1.55, 0), Vector3.new(5.6, 0.45, 2.1), COL.Wood, MAT.WoodPlanks)
-	part("BenchBack", Vector3.new(0, 2.7, 0.95), Vector3.new(5.6, 1.7, 0.35), COL.WoodLight, MAT.WoodPlanks)
-	part("BenchLegL", Vector3.new(-2.4, 0.65, 0), Vector3.new(0.5, 1.3, 1.9), COL.WoodDark, MAT.Wood)
-	part("BenchLegR", Vector3.new(2.4, 0.65, 0), Vector3.new(0.5, 1.3, 1.9), COL.WoodDark, MAT.Wood)
-end
-
--- Blossom tree hung with glowing lanterns. `base` = ground position at the trunk.
-local function lanternTree(parent, rng, base, scale, blossom, withLight)
-	local h = 8.5 * scale
-	disc(parent, base + Vector3.new(0, h * 0.5, 0), 1.5 * scale, h, {
-		Name = "TreeTrunk",
-		Color = COL.WoodDark,
-		Material = MAT.Wood,
-	})
-
-	-- Canopy: one big crown ball plus two smaller ones.
-	local crownPos = base + Vector3.new(0, h + 0.6 * scale, 0)
-	local crown = ball(parent, crownPos, 7.6 * scale, {
-		Name = "TreeCrown",
-		Color = blossom,
-		CanCollide = false,
-		CastShadow = true,
-	})
-	for i = 1, 2 do
-		local a = (i - 1) * math.pi + rng:Float(-0.5, 0.5)
-		local rr = rng:Float(2.4, 3.1) * scale
-		ball(parent, crownPos + Vector3.new(math.cos(a) * rr, rng:Float(-1.4, -0.2) * scale, math.sin(a) * rr), rng:Float(4.6, 6) * scale, {
-			Name = "TreeBlossom",
-			Color = blossom:Lerp(COL.Top, rng:Float(0.1, 0.35)),
-			CanCollide = false,
-		})
-	end
-	emitter(crown, {
-		Color = ColorSequence.new(blossom, COL.Top),
-		Rate = 2,
-		Lifetime = NumberRange.new(5, 7),
-		Speed = NumberRange.new(0.3, 1),
-		Acceleration = Vector3.new(0, -1.4, 0),
-		Size = popSize(0.45),
-		EmissionDirection = Enum.NormalId.Bottom,
-	})
-
-	-- Two lanterns on strings; the first one carries the real light.
-	local a0 = rng:Float(0, math.pi * 2)
-	for i = 1, 2 do
-		local a = a0 + (i - 1) * math.pi
-		local lx = math.cos(a) * 3.3 * scale
-		local lz = math.sin(a) * 3.3 * scale
-		local topY = h - 1.2 * scale
-		disc(parent, base + Vector3.new(lx, topY - 1.4, lz), 0.12, 2.8, {
-			Name = "LanternString",
-			Color = COL.WoodDark,
-			CanCollide = false,
-		})
-		local lantern = ball(parent, base + Vector3.new(lx, topY - 3.3, lz), 1.3, {
-			Name = "Lantern",
-			Color = COL.Lantern,
-			Material = MAT.Neon,
-			CanCollide = false,
-		})
-		if withLight and i == 1 then
-			pointLight(lantern, COL.Lantern, 0.8, 16)
+-- Inclusive integer box of voxels.
+function VX.Fill(g, x0, x1, y0, y1, z0, z1, key)
+	for y = y0, y1 do
+		for x = x0, x1 do
+			for z = z0, z1 do
+				Voxel.Set(g, x, y, z, key)
+			end
 		end
 	end
 end
 
--- A handful of flowers scattered inside a circle. center = ground position.
-local function flowerPatch(parent, rng, center, radius, count)
-	for _ = 1, count do
-		local a = rng:Float(0, math.pi * 2)
-		local rr = radius * math.sqrt(rng:Float(0, 1))
-		local pos = center + Vector3.new(math.cos(a) * rr, 0, math.sin(a) * rr)
-		local h = rng:Float(1.1, 1.9)
-		disc(parent, pos + Vector3.new(0, h * 0.5, 0), 0.18, h, {
-			Name = "FlowerStem",
-			Color = COL.Stem,
-			CanCollide = false,
-		})
-		ball(parent, pos + Vector3.new(0, h + 0.1, 0), rng:Float(0.9, 1.3), {
-			Name = "FlowerBloom",
-			Color = rng:Pick(FLOWER_COLORS),
-			CanCollide = false,
-		})
+-- Rounded rectangle prism centred on (cx, cz): sx by sz voxels, corner radius `round`.
+function VX.RoundRect(g, cx, cz, sx, sz, round, y0, y1, key, keep)
+	local hx, hz = sx / 2, sz / 2
+	round = math.max(0, math.min(round, hx, hz))
+	for y = y0, y1 do
+		for x = math.floor(cx - hx) - 1, math.ceil(cx + hx) + 1 do
+			for z = math.floor(cz - hz) - 1, math.ceil(cz + hz) + 1 do
+				local qx, qz = math.abs(x - cx) - (hx - round), math.abs(z - cz) - (hz - round)
+				local ox, oz = math.max(qx, 0), math.max(qz, 0)
+				local d = math.sqrt(ox * ox + oz * oz) + math.min(math.max(qx, qz), 0)
+				if d <= round and (not keep or Voxel.Get(g, x, y, z) == nil) then
+					Voxel.Set(g, x, y, z, key)
+				end
+			end
+		end
 	end
 end
 
--- Tiny pond: dark bed, glassy water, a ring of cloud stones, lily pads and a lotus.
-local function pond(parent, rng, ground, radius)
-	disc(parent, ground + Vector3.new(0, 0.1, 0), radius * 2, 0.2, {
-		Name = "PondBed",
-		Color = COL.WaterBed,
-		CanCollide = false,
-	})
-	local water = disc(parent, ground + Vector3.new(0, 0.35, 0), radius * 2 - 0.4, 0.3, {
-		Name = "PondWater",
-		Color = COL.Water,
-		Material = MAT.Glass,
-		Transparency = 0.4,
-		Reflectance = 0.1,
-		CanCollide = false,
-	})
-	local stones = math.max(6, math.floor(math.pi * 2 * radius / 3))
-	for i = 1, stones do
-		local a = (i - 1) * (math.pi * 2 / stones) + rng:Float(-0.1, 0.1)
-		ball(parent, ground + Vector3.new(math.cos(a) * (radius + 0.5), 0.3, math.sin(a) * (radius + 0.5)), rng:Float(1.8, 2.4), {
-			Name = "PondStone",
-			Color = COL.Top:Lerp(COL.Side, rng:Float(0, 0.4)),
-			CanCollide = false,
-		})
+-- Moves every voxel whose base key is in `keys` into a new grid (for split collision / materials).
+function VX.Split(g, keys)
+	local out = Voxel.NewGrid(g.Resolution)
+	local move = {}
+	for k, v in pairs(g.Cells) do
+		if keys[Voxel.BaseKey(v)] or keys[v] then
+			move[#move + 1] = k
+		end
 	end
-	for _ = 1, 2 do
-		local a = rng:Float(0, math.pi * 2)
-		local rr = rng:Float(0.3, radius * 0.55)
-		disc(parent, ground + Vector3.new(math.cos(a) * rr, 0.55, math.sin(a) * rr), rng:Float(1.4, 1.9), 0.08, {
-			Name = "LilyPad",
-			Color = Color3.fromRGB(98, 172, 120),
-			CanCollide = false,
-		})
+	for _, k in ipairs(move) do
+		out.Cells[k] = g.Cells[k]
+		out.Count = out.Count + 1
+		g.Cells[k] = nil
+		g.Count = g.Count - 1
 	end
-	ball(parent, ground + Vector3.new(radius * 0.25, 0.8, -radius * 0.2), 0.9, {
-		Name = "Lotus",
-		Color = Color3.fromRGB(226, 170, 196),
-		CanCollide = false,
+	return out
+end
+
+-- Voxel.Build with the lobby defaults. o: V (voxel size), Name, CF (where voxel 0,0,0 sits), Parent,
+-- Collide, MaxParts, Keep, Shadow, Pal.
+function VX.Build(g, o)
+	if not g or g.Count == 0 then
+		return nil
+	end
+	local model = Voxel.Build(g, {
+		VoxelSize = o.V or 1,
+		Palette = o.Pal or P,
+		Name = o.Name or "Voxels",
+		CFrame = o.CF or CFrame.new(),
+		CanCollide = o.Collide == true,
+		CanQuery = o.Collide == true,
+		MaxParts = o.MaxParts,
+		Keep = o.Keep,
+		CastShadow = o.Shadow,
 	})
-	emitter(water, {
-		Color = ColorSequence.new(Color3.fromRGB(170, 210, 240)),
-		Rate = 2,
-		Lifetime = NumberRange.new(2, 3),
-		Speed = NumberRange.new(0.3, 0.8),
-		Size = popSize(0.5),
-		EmissionDirection = DISC_UP,
+	if o.Parent then
+		model.Parent = o.Parent
+	end
+	return model
+end
+
+-- Clones a template (built at the origin) to `cf`; returns the clone.
+local function place(tpl, cf, parent, name)
+	if not tpl then
+		return nil
+	end
+	local m = tpl:Clone()
+	for _, d in ipairs(m:GetDescendants()) do
+		if d:IsA("BasePart") then
+			d.CFrame = cf * d.CFrame
+		end
+	end
+	if name then
+		m.Name = name
+	end
+	m.Parent = parent
+	return m
+end
+
+local function template(name, make)
+	local t = templates[name]
+	if t == nil then
+		local ok, result = pcall(make)
+		if ok and result then
+			t = result
+		else
+			warn("[LobbyBuilder] template " .. name .. " failed: " .. tostring(result))
+			t = false
+		end
+		templates[name] = t
+	end
+	return t or nil
+end
+
+-- One flat layer of ground cells (a one-voxel-thick grid) whose top face sits at topY. fn(x, z) -> key | nil
+-- gets the cell centre in studs relative to `centre`. Layers that overlap are offset in height (no z-fight).
+local function groundLayer(parent, name, centre, radius, topY, cell, fn, maxParts)
+	local g = Voxel.NewGrid(1)
+	local n = math.ceil(radius / cell)
+	for i = -n, n do
+		for k = -n, n do
+			local key = fn(i * cell, k * cell)
+			if key then
+				Voxel.Set(g, i, 0, k, key)
+			end
+		end
+	end
+	return VX.Build(g, {
+		V = cell,
+		Name = name,
+		CF = CFrame.new(centre.X, topY - cell / 2, centre.Z),
+		Collide = true,
+		Shadow = false,
+		Parent = parent,
+		MaxParts = maxParts,
 	})
 end
 
--- Glowing lamp post.
-local function lampPost(parent, ground, withLight)
-	disc(parent, ground + Vector3.new(0, 2.1, 0), 0.5, 4.2, {
-		Name = "LampPost",
-		Color = COL.Post,
-	})
-	local glow = ball(parent, ground + Vector3.new(0, 4.5, 0), 1.5, {
-		Name = "LampGlow",
-		Color = COL.Lantern,
-		Material = MAT.Neon,
-		CanCollide = false,
-	})
-	if withLight then
-		pointLight(glow, COL.Lantern, 0.7, 16)
+-- A tiered voxel cloud body (tops at y = 0, V studs per voxel). spec:
+--   Tiers = { { R = studs | SX =, SZ =, Round = studs, H = levels }, ... } from the top tier down
+--   Puffs = { { x, y, z, rx, ry, rz } (studs, relative to the top centre) } soft bulges (shaded)
+--   Rim = { same } puffs that rise above the walking surface; Carve = fn(x, y, z) -> remove voxel?
+function VX.Cloud(spec)
+	local V = spec.V or 3
+	local g = Voxel.NewGrid(16)
+	local y = 0
+	for i, t in ipairs(spec.Tiers) do
+		local key = t.Key or TIER_KEYS[math.min(i, #TIER_KEYS)]
+		local h = t.H or 1
+		if t.R then
+			VX.Disc(g, 0, 0, t.R / V, y - h + 1, y, key)
+		else
+			VX.RoundRect(g, (t.X or 0) / V, (t.Z or 0) / V, t.SX / V, t.SZ / V, (t.Round or 6) / V, y - h + 1, y, key)
+		end
+		y = y - h
 	end
-end
-
--- Plump cloud cushion for cosy corners: a uniform ball sunk into the floor so only a soft dome
--- shows (balls are always built with equal sides, which Roblox keeps as a true sphere).
-local function cushion(parent, pos, size, color)
-	return ball(parent, pos + Vector3.new(0, size * 0.2, 0), size, {
-		Name = "Cushion",
-		Color = color,
-		CanCollide = false,
-	})
-end
-
--- Pedestal with three spinning, bobbing golden cloud tokens (decorative, NOT tagged).
-local function tokenShowcase(parent, ground, title, sub)
-	local pedestal = disc(parent, ground + Vector3.new(0, 0.6, 0), 6.2, 1.2, {
-		Name = "TokenPedestal",
-		Color = COL.Top,
-		CastShadow = true,
-	})
-	disc(parent, ground + Vector3.new(0, 1.25, 0), 5.0, 0.1, {
-		Name = "PedestalGlow",
-		Color = COL.Gold,
-		Material = MAT.Neon,
-		CanCollide = false,
-	})
-	local specs = {
-		{ x = 0, y = 5.4, d = 4.0, bob = 2.4, spin = 5 },
-		{ x = -3.9, y = 4.2, d = 2.6, bob = 1.9, spin = 4 },
-		{ x = 3.9, y = 4.2, d = 2.6, bob = 2.9, spin = 6 },
-	}
-	for _, spec in ipairs(specs) do
-		local pos = ground + Vector3.new(spec.x, spec.y, 0)
-		local coin = mk(parent, {
-			Name = "ShowcaseToken",
-			Shape = Enum.PartType.Cylinder,
-			Size = Vector3.new(0.7, spec.d, spec.d),
-			CFrame = CFrame.new(pos),
-			Color = COL.Gold,
-			Material = MAT.Neon,
-			CanCollide = false,
-		})
-		later(function()
-			loopTween(coin, spec.spin, { Orientation = Vector3.new(0, 360, 0) }, Enum.EasingStyle.Linear, false)
-			loopTween(coin, spec.bob, { Position = pos + Vector3.new(0, 0.7, 0) }, Enum.EasingStyle.Sine, true)
-		end)
+	for _, p in ipairs(spec.Puffs or {}) do
+		Voxel.Shape(g, { Kind = "Ellipsoid", Center = { p[1] / V, p[2] / V, p[3] / V }, Radius = { p[4] / V, p[5] / V, p[6] / V }, Key = "Puff", KeepExisting = true })
 	end
-	emitter(pedestal, {
-		Color = ColorSequence.new(COL.TextGold),
-		Rate = 4,
-		Lifetime = NumberRange.new(2, 3),
-		Speed = NumberRange.new(1.5, 3),
-		Size = popSize(0.6),
-		EmissionDirection = DISC_UP,
-	})
-
-	-- Info card floating over the pedestal.
-	local gui = newBillboard(pedestal, 17, 5.4, 11, 110)
-	gui.Name = "TokenInfo"
-	fitLabel(gui, title or "Cloud Tokens", "Title", COL.TextGold, "Title", 0, 0, 1, 0.6)
-	fitLabel(gui, sub or "Collect them on the way up!", "Body", COL.Text, "Sub", 0, 0.6, 1, 0.4)
-end
-
--- A cluster of glass crystals (tilted translucent spires) around a small cloud mound.
-local function crystalCluster(parent, rng, ground)
-	ball(parent, ground + Vector3.new(0, 0.3, 0), 6.5, {
-		Name = "CrystalMound",
-		Color = COL.Puff,
-		CanCollide = false,
-	})
-	local tints = {
-		Color3.fromRGB(120, 150, 226),
-		Color3.fromRGB(160, 130, 224),
-		Color3.fromRGB(110, 190, 206),
-		Color3.fromRGB(196, 140, 210),
-	}
-	for i = 1, 5 do
-		local a = (i - 1) * (math.pi * 2 / 5) + rng:Float(-0.3, 0.3)
-		local rr = rng:Float(0.8, 2.2)
-		local h = rng:Float(4.5, 8.5)
-		local tilt = math.rad(rng:Float(8, 18))
-		local pos = ground + Vector3.new(math.cos(a) * rr, h * 0.5 + 0.8, math.sin(a) * rr)
-		mk(parent, {
-			Name = "Crystal",
-			CFrame = CFrame.new(pos) * CFrame.Angles(math.cos(a) * tilt, rng:Float(0, 3), math.sin(a) * tilt),
-			Size = Vector3.new(rng:Float(1.1, 1.7), h, rng:Float(1.1, 1.7)),
-			Color = tints[(i - 1) % #tints + 1],
-			Material = MAT.Glass,
-			Transparency = 0.2,
-			Reflectance = 0.1,
-			CanCollide = false,
-		})
+	for _, p in ipairs(spec.Rim or {}) do
+		Voxel.Shape(g, { Kind = "Ellipsoid", Center = { p[1] / V, p[2] / V, p[3] / V }, Radius = { p[4] / V, p[5] / V, p[6] / V }, Key = "Rim", KeepExisting = true })
 	end
-	local glow = ball(parent, ground + Vector3.new(0, 1.8, 0), 1.4, {
-		Name = "CrystalCore",
-		Color = Color3.fromRGB(150, 170, 240),
-		Material = MAT.Neon,
-		CanCollide = false,
+	if spec.Carve then
+		local remove = {}
+		for k in pairs(g.Cells) do
+			local x, yy, z = Voxel.Unpack(k)
+			if spec.Carve(x * V, yy * V, z * V) then
+				remove[#remove + 1] = k
+			end
+		end
+		for _, k in ipairs(remove) do
+			g.Cells[k] = nil
+			g.Count = g.Count - 1
+		end
+	end
+	Voxel.Shade(g, { Only = { Puff = true, Rim = true }, Smooth = 2, Seed = spec.Seed or 1 })
+	Voxel.Remap(g, {
+		Puff = "Cloud",
+		Puff_Light = "CloudLight",
+		Puff_Dark = "Mist",
+		Rim = "Cloud",
+		Rim_Light = "CloudLight",
+		Rim_Dark = "CloudShade",
 	})
-	pointLight(glow, Color3.fromRGB(150, 170, 240), 0.9, 16)
-	emitter(glow, {
-		Color = ColorSequence.new(Color3.fromRGB(180, 196, 250)),
-		Rate = 4,
-		Lifetime = NumberRange.new(2, 3),
-		Speed = NumberRange.new(1, 2),
-	})
+	return g
 end
 
--- A little brass stargazing telescope on a pedestal. `facing` = direction it points (flat).
-local function telescope(parent, ground, facing)
-	disc(parent, ground + Vector3.new(0, 1.0, 0), 1.4, 2.0, { Name = "ScopeStand", Color = COL.Post })
-	local dir = Vector3.new(facing.X, 0.55, facing.Z).Unit
-	local from = ground + Vector3.new(0, 2.6, 0)
-	local mid = from + dir * 1.8
-	mk(parent, {
-		Name = "ScopeTube",
-		Shape = Enum.PartType.Cylinder,
-		Size = Vector3.new(3.6, 0.9, 0.9),
-		CFrame = CFrame.lookAt(mid, mid + dir) * CFrame.Angles(0, math.rad(90), 0),
-		Color = COL.GoldDark,
-		Material = MAT.Metal,
-		CanCollide = false,
-	})
-	ball(parent, from + dir * 3.7, 0.7, {
-		Name = "ScopeLens",
-		Color = COL.Water,
-		Material = MAT.Glass,
-		CanCollide = false,
+-- Builds a cloud spec at a CFrame whose position is the top centre of the cloud.
+function VX.CloudModel(spec, cf, parent, name, collide)
+	local V = spec.V or 3
+	local g = VX.Cloud(spec)
+	return VX.Build(g, {
+		V = V,
+		Name = name or "Cloud",
+		CF = cf * CFrame.new(0, -V / 2, 0),
+		Collide = collide,
+		MaxParts = spec.MaxParts,
+		Parent = parent,
 	})
 end
 
 ----------------------------------------------------------------------
--- Layout numbers (derived once from Config.Lobby / Config.Difficulties)
+-- Prop templates (sculpted once, cloned everywhere)
 ----------------------------------------------------------------------
 
-local ROAD_W = 12 -- ring road width
-local SPOKE_W = 10 -- plaza <-> ring road
-local SPUR_W = 8 -- ring road <-> spot island
-local ARCH_Z = 40 -- rainbow arch plane: z = ORIGIN.Z + ARCH_Z
-local ARCH_R = 30
+local Props = {}
 
-local SPOT_DY = { 2, 4, 1, 3, 4, 2, 3, 1, 4, 2, 3, 4, 1, 3, 2, 4 }
-
-local DECOR_SPECS = {
-	{ Name = "Sunset Perch", Dy = 2, Radius = 14, Features = { "Bench", "Tree", "Flowers" } },
-	{ Name = "Lily Pond", Dy = 0, Radius = 14, Features = { "Pond", "Tree", "Flowers" } },
-	{ Name = "Token Garden", Dy = 3, Radius = 14, Features = { "Tokens", "Bench", "Flowers" } },
-	{ Name = "Crystal Cove", Dy = 1, Radius = 14, Features = { "Crystals", "Lanterns", "Bench" } },
-	{ Name = "Moonflower Meadow", Dy = 2, Radius = 14, Features = { "Bench", "Tree", "Flowers", "Flowers" } },
-	{ Name = "Quiet Cove", Dy = -1, Radius = 14, Features = { "Pond", "Bench", "Telescope" } },
-	{ Name = "Lantern Grove", Dy = 1, Radius = 14, Features = { "Tree", "Tree", "Bench" } },
-}
-
-local function clamp(v, lo, hi)
-	if v < lo then
-		return lo
-	elseif v > hi then
-		return hi
-	end
-	return v
+-- Detailed voxel trees (~18 studs, ~1.1-stud voxels). kind: "Round" (green, red fruit), "Blossom" (pink), "Pine".
+-- Shapes are written in 1.4-stud units and scaled by S, so the voxels get finer without the tree changing size.
+function Props.Tree(kind)
+	return template("Tree" .. kind, function()
+		local S = 1.3
+		local function v(x, y, z)
+			return { x * S, y * S, z * S }
+		end
+		local g = Voxel.NewGrid(16)
+		local leaf = (kind == "Blossom") and "Blossom" or ((kind == "Pine") and "Pine" or "Leaf")
+		-- trunk with a slight bend, flared roots and two branch stubs into the canopy
+		Voxel.Shape(g, { Kind = "Curve", Points = { v(0, 0, 0), v(0.3, 2.4, 0), v(-0.2, 4.6, 0.2), v(0, 6.4, 0) }, Radius = 1.05 * S, RadiusB = 0.6 * S, Key = "Bark" })
+		Voxel.Shape(g, { Kind = "Capsule", A = v(0, 0.3, 0), B = v(1.5, 0, 0.5), Radius = 0.55 * S, RadiusB = 0.25 * S, Key = "Bark" })
+		Voxel.Shape(g, { Kind = "Capsule", A = v(0, 0.3, 0), B = v(-1.1, 0, -1.1), Radius = 0.55 * S, RadiusB = 0.25 * S, Key = "Bark" })
+		Voxel.Shape(g, { Kind = "Capsule", A = v(0, 0.3, 0), B = v(-0.4, 0, 1.4), Radius = 0.5 * S, RadiusB = 0.25 * S, Key = "Bark" })
+		if kind == "Pine" then
+			-- three stacked, shrinking cone tiers
+			Voxel.Shape(g, { Kind = "Cone", A = v(0, 3.2, 0), B = v(0, 8.6, 0), Radius = 4.6 * S, RadiusB = 1.2 * S, Key = leaf })
+			Voxel.Shape(g, { Kind = "Cone", A = v(0, 6.6, 0), B = v(0, 11.4, 0), Radius = 3.7 * S, RadiusB = 0.8 * S, Key = leaf })
+			Voxel.Shape(g, { Kind = "Cone", A = v(0, 9.6, 0), B = v(0, 14.2, 0), Radius = 2.6 * S, RadiusB = 0, Key = leaf })
+		else
+			Voxel.Shape(g, { Kind = "Curve", Points = { v(0, 5.4, 0), v(1.8, 7, 0.6) }, Radius = 0.45 * S, Key = "Bark" })
+			Voxel.Shape(g, { Kind = "Curve", Points = { v(0, 5.8, 0), v(-1.6, 7.2, -0.8) }, Radius = 0.45 * S, Key = "Bark" })
+			Voxel.Shape(g, { Kind = "Ellipsoid", Center = v(0, 8.3, 0), Radius = { 3.8 * S, 3.0 * S, 3.8 * S }, Key = leaf })
+			Voxel.Shape(g, { Kind = "Ellipsoid", Center = v(2.3, 7.1, 1.1), Radius = { 2.4 * S, 2.1 * S, 2.4 * S }, Key = leaf })
+			Voxel.Shape(g, { Kind = "Ellipsoid", Center = v(-2.1, 7.3, -1.4), Radius = { 2.5 * S, 2.1 * S, 2.5 * S }, Key = leaf })
+			Voxel.Shape(g, { Kind = "Ellipsoid", Center = v(-0.8, 7.0, 2.3), Radius = { 2.2 * S, 2.0 * S, 2.2 * S }, Key = leaf })
+			Voxel.Shape(g, { Kind = "Ellipsoid", Center = v(0.4, 10.6, -0.4), Radius = { 2.3 * S, 1.8 * S, 2.3 * S }, Key = leaf })
+		end
+		Voxel.Shade(g, { Smooth = 2, Noise = 0.05, Seed = 7 })
+		local accent, onlyKey, chance = nil, nil, 0
+		if kind == "Blossom" then
+			accent, onlyKey, chance = "BlossomWhite", "Blossom_Light", 0.18 -- pale petals on the lit side
+		elseif kind == "Round" then
+			accent, onlyKey, chance = "Flower5", "Leaf", 0.05 -- small red fruit
+		end
+		if accent then
+			Voxel.Shape(g, {
+				Kind = "Ellipsoid",
+				Center = v(0, 8.3, 0),
+				Radius = { 5 * S, 4.5 * S, 5 * S },
+				Op = "Paint",
+				OnlyKeys = { [onlyKey] = true },
+				Pattern = function(x, y, z)
+					if hash3(x, y, z, 5) < chance then
+						return accent
+					end
+					return false
+				end,
+			})
+		end
+		local V = 1.4 / S
+		return VX.Build(g, { V = V, Name = kind .. "Tree", CF = CFrame.new(0, V / 2, 0), Collide = true, MaxParts = 54 })
+	end)
 end
+
+-- Lamp post (~9 studs) with a warm neon lantern. Built from crafted blocks.
+function Props.Lamp()
+	return template("Lamp", function()
+		local m = Instance.new("Model")
+		m.Name = "Lamp"
+		box(m, "LampBase", CFrame.new(0, 0.5, 0), Vector3.new(1.8, 1, 1.8), C.StoneDark, { Collide = true })
+		box(m, "LampPole", CFrame.new(0, 4, 0), Vector3.new(0.6, 6.2, 0.6), C.Iron, { Collide = true })
+		box(m, "LampCollar", CFrame.new(0, 7.2, 0), Vector3.new(1.2, 0.4, 1.2), C.IronLight)
+		box(m, "LampGlass", CFrame.new(0, 8.1, 0), Vector3.new(1.1, 1.4, 1.1), C.Lamp, { Material = MAT.Neon })
+		box(m, "LampRoof", CFrame.new(0, 9, 0), Vector3.new(1.7, 0.45, 1.7), C.Iron)
+		box(m, "LampTip", CFrame.new(0, 9.45, 0), Vector3.new(0.6, 0.45, 0.6), C.GoldDark)
+		return m
+	end)
+end
+
+-- Wooden bench (plain parts, no Seat: running past must never sit you down). Faces -Z.
+function Props.Bench()
+	return template("Bench", function()
+		local m = Instance.new("Model")
+		m.Name = "Bench"
+		box(m, "Seat", CFrame.new(0, 1.55, -0.45), Vector3.new(5.6, 0.4, 1), C.PlankLight, { Collide = true })
+		box(m, "Seat", CFrame.new(0, 1.55, 0.55), Vector3.new(5.6, 0.4, 1), C.Plank, { Collide = true })
+		box(m, "Back", CFrame.new(0, 2.55, 1.05), Vector3.new(5.6, 0.7, 0.3), C.PlankLight)
+		box(m, "Back", CFrame.new(0, 3.35, 1.05), Vector3.new(5.6, 0.7, 0.3), C.Plank)
+		box(m, "Frame", CFrame.new(-2.4, 1.6, 0.25), Vector3.new(0.4, 3.2, 2.2), C.Iron, { Collide = true })
+		box(m, "Frame", CFrame.new(2.4, 1.6, 0.25), Vector3.new(0.4, 3.2, 2.2), C.Iron, { Collide = true })
+		return m
+	end)
+end
+
+-- Raised wooden flower bed (6 x 3) with leaves and flower pixels. variant picks the flower colours.
+function Props.FlowerBed(variant)
+	return template("FlowerBed" .. variant, function()
+		local g = Voxel.NewGrid(4)
+		for x = -3, 2 do
+			for z = -2, 1 do
+				local edge = x == -3 or x == 2 or z == -2 or z == 1
+				Voxel.Set(g, x, 0, z, edge and "PlankDark" or "Soil")
+				if not edge then
+					local h = hash3(x, variant, z, 3)
+					if h < 0.45 then
+						Voxel.Set(g, x, 1, z, "Flower" .. (((variant + x + z) % 3 == 0) and variant or (variant % #FLOWERS + 1)))
+					else
+						Voxel.Set(g, x, 1, z, "Leaf")
+					end
+				end
+			end
+		end
+		return VX.Build(g, { V = 1, Name = "FlowerBed", CF = CFrame.new(0.5, 0.5, 0.5), Collide = true, MaxParts = 16 })
+	end)
+end
+
+-- A small voxel cloud puff (supports under bridges). size: "S" | "M".
+function Props.Puff(size)
+	return template("Puff" .. size, function()
+		local s = (size == "M") and 1.35 or 1
+		local spec = {
+			V = 3,
+			Tiers = { { R = 6 * s, H = 1 }, { R = 4.5 * s, H = 1 } },
+			Puffs = {
+				{ 5 * s, -1, 2 * s, 5 * s, 4 * s, 5 * s },
+				{ -5 * s, -2, -1 * s, 5.5 * s, 4.5 * s, 5 * s },
+				{ 0, -4, 0, 6 * s, 5 * s, 6 * s },
+			},
+			MaxParts = 12,
+			Seed = 3,
+		}
+		return VX.CloudModel(spec, CFrame.new(), nil, "CloudPuff", false)
+	end)
+end
+
+-- Bunting: a sagging rope with stepped voxel pennants in the given colours between two points.
+local function bunting(parent, a, b, colors, sag)
+	local m = newModel(parent, "Bunting")
+	local span = b - a
+	local len = span.Magnitude
+	if len < 2 then
+		return m
+	end
+	sag = sag or math.min(2, len * 0.06)
+	local dir = span.Unit
+	local count = math.max(2, math.floor(len / 4))
+	local pieces = 3
+	local knots = {}
+	for i = 0, pieces do
+		local t = i / pieces
+		knots[i] = a + span * t - Vector3.new(0, sag * 4 * t * (1 - t), 0)
+	end
+	for i = 1, pieces do
+		local p, prev = knots[i], knots[i - 1]
+		local mid = (p + prev) * 0.5
+		box(m, "Rope", CFrame.lookAt(mid, p), Vector3.new(0.18, 0.18, (p - prev).Magnitude + 0.1), C.PlankDark, { Shadow = false })
+	end
+	local flat = Vector3.new(dir.X, 0, dir.Z)
+	if flat.Magnitude < 1e-3 then
+		flat = Vector3.new(1, 0, 0)
+	end
+	for i = 1, count do
+		-- on the straight rope piece (not the parabola through its knots), so every pennant hangs from it
+		local t = (i - 0.5) / count
+		local k = math.min(pieces - 1, math.floor(t * pieces))
+		local p = knots[k]:Lerp(knots[k + 1], t * pieces - k)
+		local color = colors[(i - 1) % #colors + 1]
+		local cf = CFrame.lookAt(p, p + flat) * CFrame.Angles(0, math.rad(90), 0)
+		box(m, "Pennant", cf * CFrame.new(0, -0.4, 0), Vector3.new(0.12, 0.8, 1.3), color, { Shadow = false })
+		box(m, "Pennant", cf * CFrame.new(0, -1.05, 0), Vector3.new(0.12, 0.6, 0.6), color, { Shadow = false })
+	end
+	return m
+end
+
+-- Tall banner pole with a hanging cloth in `color` (and a gold finial). cf at ground level.
+local function bannerPole(parent, cf, color)
+	local m = newModel(parent, "Banner")
+	box(m, "Pole", cf * CFrame.new(0, 5.5, 0), Vector3.new(0.5, 11, 0.5), C.Iron, { Collide = true })
+	box(m, "Finial", cf * CFrame.new(0, 11.3, 0), Vector3.new(0.9, 0.7, 0.9), C.Gold)
+	box(m, "Bar", cf * CFrame.new(0.9, 10.5, 0), Vector3.new(2.4, 0.3, 0.3), C.Iron)
+	box(m, "Cloth", cf * CFrame.new(1.2, 8.2, 0), Vector3.new(2, 4.2, 0.15), color, { Shadow = false })
+	box(m, "ClothTip", cf * CFrame.new(1.2, 5.75, 0), Vector3.new(1, 0.7, 0.15), color, { Shadow = false })
+	return m
+end
+
+-- A wooden notice board with a small roof; returns the face part for the SurfaceGui. cf: ground, faces -Z.
+local function noticeBoard(parent, cf, width, height, name)
+	local m = newModel(parent, name or "NoticeBoard")
+	local postH = height + 3.4
+	for _, s in ipairs({ -1, 1 }) do
+		box(m, "Post", cf * CFrame.new(s * (width / 2 + 0.5), postH / 2, 0), Vector3.new(1, postH, 1), C.PlankDark, { Collide = true })
+		box(m, "PostFoot", cf * CFrame.new(s * (width / 2 + 0.5), 0.4, 0), Vector3.new(1.6, 0.8, 1.6), C.StoneDark, { Collide = true })
+	end
+	box(m, "Frame", cf * CFrame.new(0, 2.4 + height / 2, 0.15), Vector3.new(width + 0.6, height + 0.6, 0.6), C.Plank, { Collide = true })
+	local face = box(m, "Face", cf * CFrame.new(0, 2.4 + height / 2, -0.2), Vector3.new(width, height, 0.2), C.Navy)
+	box(m, "Roof", cf * CFrame.new(0, postH + 0.25, 0), Vector3.new(width + 3, 0.5, 2.4), C.PlankDark)
+	box(m, "RoofTop", cf * CFrame.new(0, postH + 0.75, 0), Vector3.new(width + 1.6, 0.5, 1.4), C.Rose)
+	return face, m
+end
+
+----------------------------------------------------------------------
+-- Layout (derived once from Config.Lobby / Config.Difficulties)
+----------------------------------------------------------------------
 
 local function computeLayout()
 	local diffs = Config.Difficulties
 	local n = #diffs
 	local L = {}
 
-	-- Portals fan out over the +Z half of the plaza: the first (easiest) at angle 0 (+X, the left
-	-- hand of a player looking at +Z), the last (hardest) at 180. The middle one is dead ahead.
-	local step = 90
-	if n > 1 then
-		step = 180 / (n - 1)
-	end
-	L.PortalStep = step
+	-- Portals fan out over the +Z half of the plaza: the first (easiest) at angle 0 (+X), the last at 180.
+	L.PortalStep = (n > 1) and (180 / (n - 1)) or 90
 	L.PortalAngles = {}
 	for i = 1, n do
-		if n > 1 then
-			L.PortalAngles[i] = (i - 1) * step
-		else
-			L.PortalAngles[i] = 90
-		end
+		L.PortalAngles[i] = (n > 1) and ((i - 1) * L.PortalStep) or 90
 	end
-
-	-- Spokes (plaza -> ring road) leave BETWEEN the portals, plus one beyond each end.
-	L.SpokeAngles = {}
-	for i = 1, n - 1 do
-		L.SpokeAngles[#L.SpokeAngles + 1] = L.PortalAngles[i] + step / 2
-	end
-	L.SpokeAngles[#L.SpokeAngles + 1] = (L.PortalAngles[n] + step / 2) % 360
-	L.SpokeAngles[#L.SpokeAngles + 1] = (L.PortalAngles[1] - step / 2) % 360
+	L.MidAngle = L.PortalAngles[math.ceil(n / 2)] or 90
+	L.PromFrom = (L.PortalAngles[1] or 0) - 14
+	L.PromTo = (L.PortalAngles[n] or 180) + 14
 
 	-- Shop island.
-	local off = LOBBY.ShopOffset
-	L.ShopCenter = Vector3.new(ORIGIN.X + off.X, TOP + off.Y, ORIGIN.Z + off.Z)
+	local off = LOBBY.ShopOffset or Vector3.new(0, 0, -150)
+	L.ShopCenter = Vector3.new(OX + off.X, TOP, OZ + off.Z)
 	L.ShopDist = math.max(1, math.sqrt(off.X * off.X + off.Z * off.Z))
 	L.ShopAngle = math.deg(atan2(off.Z, off.X)) % 360
-	L.ShopR = clamp(L.ShopDist - SURF_R - 2, 24, 36)
+	L.ShopR = clamp(L.ShopDist - PLAZA_R - 4, 18, 34)
+	L.FountainX = math.cos(math.rad(L.ShopAngle)) * G.FountainD
+	L.FountainZ = math.sin(math.rad(L.ShopAngle)) * G.FountainD
 
-	-- Spot islands: sized from the available arc, then the ring road radius follows.
-	local count = math.max(1, SPOT_COUNT)
-	local spacingDeg = 320 / math.max(1, count - 1)
-	local spacingStuds = SPOT_R * math.rad(spacingDeg)
-	L.IslandR = clamp(math.floor(spacingStuds * 0.25 + 0.5), 12, 20)
-	L.RingR = SPOT_R - L.IslandR - 27
-
-	-- Where the ring road meets the shop island's rim (law of cosines), as an angle off the shop axis.
-	local cosDelta = (L.RingR * L.RingR + L.ShopDist * L.ShopDist - L.ShopR * L.ShopR) / (2 * L.RingR * L.ShopDist)
-	local delta = math.deg(math.acos(clamp(cosDelta, -1, 1)))
-	local dock = math.max(2, delta - 5.5) -- the road ends a little INSIDE the shop island
-	L.RingFrom = L.ShopAngle + dock
-	L.RingTo = L.ShopAngle + 360 - dock
-
-	local first = L.ShopAngle + delta + 10
-	local last = L.ShopAngle + 360 - delta - 10
-	L.SpotAngles = {}
-	for i = 1, count do
-		if count == 1 then
-			L.SpotAngles[i] = (first + last) / 2
-		else
-			L.SpotAngles[i] = first + (i - 1) * (last - first) / (count - 1)
+	-- Home plots sit between the junctions of the ring street; spokes join every other junction.
+	L.PlotAngles = {}
+	for i = 1, SPOT_COUNT do
+		L.PlotAngles[i] = (i - 1) * G.Step + G.HalfStep
+	end
+	L.Junctions = {}
+	L.SpokeAngles = {}
+	for j = 0, SPOT_COUNT - 1 do
+		local a = j * G.Step
+		local info = { Angle = a, Index = j }
+		L.Junctions[#L.Junctions + 1] = info
+		if j % 2 == 1 and angleDiff(a, L.ShopAngle) > 14 and not nearAny(a, L.PortalAngles, 8) then
+			info.Spoke = true
+			L.SpokeAngles[#L.SpokeAngles + 1] = a
 		end
 	end
 
-	-- Decor islands: one behind every portal plus one beyond each end.
-	L.DecorAngles = {}
-	for i = 1, n do
-		L.DecorAngles[#L.DecorAngles + 1] = L.PortalAngles[i]
+	-- Gardens (and the reserved Storm Altar site) hang off even junctions inside the ring.
+	local function pickEven(target)
+		local best, bestD = nil, 1e9
+		for _, info in ipairs(L.Junctions) do
+			local d = angleDiff(info.Angle, target)
+			if not info.Spoke and not info.Garden and not info.Altar and d < bestD and angleDiff(info.Angle, L.ShopAngle) > 30 then
+				best, bestD = info, d
+			end
+		end
+		return best
 	end
-	L.DecorAngles[#L.DecorAngles + 1] = (L.PortalAngles[n] + step) % 360
-	L.DecorAngles[#L.DecorAngles + 1] = (L.PortalAngles[1] - step) % 360
+	L.Gardens = {}
+	local specs = {
+		{ Target = L.MidAngle - 45, Name = "Blossom Garden", Kind = "Blossom" },
+		{ Target = L.MidAngle + 45, Name = "Lily Pond", Kind = "Pond" },
+	}
+	for _, spec in ipairs(specs) do
+		local j = pickEven(spec.Target)
+		if j then
+			j.Garden = true
+			L.Gardens[#L.Gardens + 1] = { Angle = j.Angle, Name = spec.Name, Kind = spec.Kind }
+		end
+	end
+	local altar = pickEven(L.ShopAngle + 45)
+	if altar then
+		altar.Altar = true
+		L.AltarAngle = altar.Angle
+	end
 
-	-- Gaps in the plaza's soft rim: spokes and the shop neck.
-	L.PlazaOpenings = {}
+	-- Exits through the plaza's soft cloud rim: spokes and the shop boardwalk.
+	L.RimGaps = {}
 	for _, a in ipairs(L.SpokeAngles) do
-		L.PlazaOpenings[#L.PlazaOpenings + 1] = a
+		L.RimGaps[#L.RimGaps + 1] = a
 	end
-	L.PlazaOpenings[#L.PlazaOpenings + 1] = L.ShopAngle
+	L.RimGaps[#L.RimGaps + 1] = L.ShopAngle
+
+	-- Plaza path segments (plaza-local studs): { ax, az, dx, dz, len, half, kind }.
+	local segs = {}
+	local function segAB(ax, az, bx, bz, half, kind)
+		local dx, dz = bx - ax, bz - az
+		local len = math.max(0.01, math.sqrt(dx * dx + dz * dz))
+		segs[#segs + 1] = { ax = ax, az = az, dx = dx / len, dz = dz / len, len = len, half = half, kind = kind }
+	end
+	local function seg(angle, r0, r1, half, kind)
+		local d = dirOf(angle)
+		segAB(d.X * r0, d.Z * r0, d.X * r1, d.Z * r1, half, kind)
+	end
+	for _, a in ipairs(L.PortalAngles) do
+		seg(a, G.CourtR - 1, G.PromIn + 1, G.PathHalf, "Stone")
+	end
+	seg(L.ShopAngle, G.CourtR - 1, PLAZA_R + 1, G.BoardHalf, "Plank")
+	for _, a in ipairs(L.SpokeAngles) do
+		local e = dirOf(a)
+		if angleIn(a, L.PromFrom, L.PromTo) then
+			seg(a, G.PromOut - 1, PLAZA_R + 1, G.StubHalf, "Sand")
+		elseif angleDiff(a, L.ShopAngle) <= 30 then
+			-- the spokes beside the shop branch off the fountain roundabout
+			segAB(L.FountainX, L.FountainZ, e.X * (PLAZA_R + 1), e.Z * (PLAZA_R + 1), G.StubHalf, "Sand")
+		else
+			-- start at the nearer end of the promenade (short paths, no long diagonals across the lawn)
+			local endA = (angleDiff(a, L.PromFrom) < angleDiff(a, L.PromTo)) and (L.PromFrom + 4) or (L.PromTo - 4)
+			local s0 = dirOf(endA)
+			segAB(s0.X * PORTAL_R, s0.Z * PORTAL_R, e.X * (PLAZA_R + 1), e.Z * (PLAZA_R + 1), G.StubHalf, "Sand")
+		end
+	end
+	L.PlazaSegs = segs
 	return L
 end
 
 ----------------------------------------------------------------------
--- Mascot monument (the Cloudy Dragon)
+-- Plaza: ground (layered voxel tiles), cloud body, decor
 ----------------------------------------------------------------------
 
--- Pedestal + sign always; the dragon itself is built by PetBuilder when that shared module exists
--- (contract in ARCHITECTURE_V2.md) and silently skipped otherwise. Faces `lookTarget`.
-local function mascotMonument(parent, ground, lookTarget)
-	disc(parent, ground + Vector3.new(0, 0.8, 0), 10, 1.6, { Name = "MascotPedestal", Color = COL.Side, CastShadow = true })
-	disc(parent, ground + Vector3.new(0, 1.7, 0), 8.6, 0.2, {
-		Name = "MascotPedestalGlow",
-		Color = COL.Gold,
-		Material = MAT.Neon,
-		CanCollide = false,
-	})
-	local cap = disc(parent, ground + Vector3.new(0, 1.95, 0), 7.4, 0.3, { Name = "MascotPedestalTop", Color = COL.Top })
-	local topY = ground.Y + 2.1
-	emitter(cap, {
-		Color = ColorSequence.new(COL.TextGold, COL.Top),
-		Rate = 6,
-		Lifetime = NumberRange.new(2, 3.5),
-		Speed = NumberRange.new(2, 4),
-		Size = popSize(0.7),
-		EmissionDirection = DISC_UP,
-	})
+local BORDER_KEY = { Stone = "StoneEdge", Sand = "SandDark", Plank = "PlankDark" }
 
-	local ok, model = pcall(function()
+local function segDist(px, pz, s)
+	local rx, rz = px - s.ax, pz - s.az
+	local t = rx * s.dx + rz * s.dz
+	if t < 0 or t > s.len then
+		return math.huge, t
+	end
+	return math.abs(-rx * s.dz + rz * s.dx), t
+end
+
+-- Keys of the plaza ground layers at a cell centre (plaza-local studs):
+-- l1 lawn patches / flowers, l2 borders (just below the surface), l3 surfaces, l4 inlays.
+local function plazaCell(x, z, L)
+	local r = math.sqrt(x * x + z * z)
+	if r > PLAZA_R - 0.5 then
+		return nil
+	end
+	local ang = math.deg(atan2(z, x)) % 360
+	local l1, l2, l3
+	local n = vnoise(x + 400, z + 400, 46, 11)
+	if r > PLAZA_R - 3.5 then
+		n = 0.5 -- lawn only at the very edge (no patch faces flush with the lawn's edge)
+	end
+	if n < 0.21 then
+		l1 = "GrassDark"
+	elseif n > 0.79 then
+		l1 = "GrassLight"
+	end
+	-- court
+	if r <= G.CourtR + 1 then
+		l2 = "StoneEdge"
+		if r <= G.CourtR - 1 then
+			l3 = "Stone"
+		end
+	end
+	-- promenade on the portal ring
+	if r >= G.PromIn - 1 and r <= G.PromOut + 1 and angleIn(ang, L.PromFrom - 1.2, L.PromTo + 1.2) then
+		l2 = l2 or "StoneEdge"
+		if r >= G.PromIn + 1 and r <= G.PromOut - 1 and angleIn(ang, L.PromFrom, L.PromTo) then
+			l3 = l3 or "Stone"
+		end
+	end
+	-- fountain roundabout
+	local fx, fz = x - L.FountainX, z - L.FountainZ
+	local fr = math.sqrt(fx * fx + fz * fz)
+	if fr <= 16 then
+		l2 = l2 or "StoneEdge"
+		if fr <= 14 then
+			l3 = l3 or "Stone"
+		end
+	end
+	-- paths
+	for _, s in ipairs(L.PlazaSegs) do
+		local d, t = segDist(x, z, s)
+		if d <= s.half then
+			l2 = l2 or BORDER_KEY[s.kind]
+			-- (the surface stops one cell before the island's edge, its border runs on: no two layers end flush)
+			if d <= s.half - 2 and not l3 and r <= PLAZA_R - 2.5 then
+				if s.kind == "Plank" then
+					l3 = (math.floor(t / 4) % 2 == 0) and "Plank" or "PlankLight"
+				else
+					l3 = s.kind
+				end
+			end
+		end
+	end
+	-- flower pixels on open lawn: a scattered meadow near the rim and a few denser patches
+	if not l2 and not l3 then
+		local h = hash3(math.floor(x), 0, math.floor(z), 21)
+		local meadow = vnoise(x + 900, z + 900, 26, 5) > 0.84
+		if r < PLAZA_R - 3.5 and ((r > 101 and r < 111 and h < 0.035) or (meadow and h < 0.08)) then
+			l1 = "Flower" .. (math.floor(hash3(math.floor(x), 1, math.floor(z), 4) * #FLOWERS) + 1)
+		end
+	end
+	return l1, l2, l3
+end
+
+-- The court medallion (1-stud inlay cells): a golden sun at the spawn, a coloured arrow pointing at every
+-- portal, and a pale ring around them.
+local function courtInlay(x, z, L)
+	local r = math.sqrt(x * x + z * z)
+	if r <= 3.6 then
+		return "Gold"
+	elseif r <= 4.8 then
+		return "GoldDark"
+	elseif r >= 16.4 and r <= 17.9 then
+		return "StoneLight"
+	end
+	for i, pa in ipairs(L.PortalAngles) do
+		local dx, dz = math.cos(math.rad(pa)), math.sin(math.rad(pa))
+		local t = x * dx + z * dz
+		local d = math.abs(-x * dz + z * dx)
+		if t >= 8.5 and t <= 14.5 and d <= (14.6 - t) * 0.55 then
+			return "Diff" .. i
+		end
+	end
+	-- short sun rays between the arrows
+	if r >= 5.6 and r <= 7.6 then
+		local a = (math.deg(atan2(z, x)) - L.MidAngle) % 45
+		if a < 7 or a > 38 then
+			return "GoldDark"
+		end
+	end
+	return nil
+end
+
+local function plazaKind(x, z, L)
+	local r = math.sqrt(x * x + z * z)
+	if r > PLAZA_R - 6 then
+		return "edge"
+	end
+	local _, l2, l3 = plazaCell(x, z, L)
+	if l2 or l3 then
+		return "path"
+	end
+	return "lawn"
+end
+
+-- Is a circle (plaza-local) free lawn, away from paths, the rim and other decor?
+local function plazaFree(x, z, radius, L)
+	for _, o in ipairs({ { 0, 0 }, { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 }, { 0.7, 0.7 }, { -0.7, 0.7 }, { 0.7, -0.7 }, { -0.7, -0.7 } }) do
+		if plazaKind(x + o[1] * radius, z + o[2] * radius, L) ~= "lawn" then
+			return false
+		end
+	end
+	for _, rsv in ipairs(reserved) do
+		local dx, dz = x - rsv[1], z - rsv[2]
+		local need = radius + rsv[3]
+		if dx * dx + dz * dz < need * need then
+			return false
+		end
+	end
+	return true
+end
+
+local function reserve(x, z, radius)
+	reserved[#reserved + 1] = { x, z, radius }
+end
+
+-- Places a prop on the plaza lawn when the spot is free; returns the world ground position or nil.
+local function plazaSpot(angle, radius, clearance, L, force)
+	local d = dirOf(angle)
+	local x, z = d.X * radius, d.Z * radius
+	if not force and not plazaFree(x, z, clearance, L) then
+		warn(string.format("[LobbyBuilder] plaza decor skipped at %.0f deg r=%.0f (not free)", angle, radius))
+		return nil
+	end
+	reserve(x, z, clearance)
+	return Vector3.new(OX + x, TOP, OZ + z), x, z
+end
+
+local function buildPlazaGround(f, L)
+	local cell = 2
+	local n = math.ceil(PLAZA_R / cell)
+	local grids = { Voxel.NewGrid(1), Voxel.NewGrid(1), Voxel.NewGrid(1), Voxel.NewGrid(1), Voxel.NewGrid(1) }
+	local r2 = (PLAZA_R - 0.5) * (PLAZA_R - 0.5)
+	for i = -n, n do
+		for k = -n, n do
+			local x, z = i * cell, k * cell
+			if x * x + z * z <= r2 then
+				Voxel.Set(grids[1], i, 0, k, "Grass")
+				local l1, l2, l3 = plazaCell(x, z, L)
+				if l1 then
+					Voxel.Set(grids[2], i, 0, k, l1)
+				end
+				if l2 then
+					Voxel.Set(grids[3], i, 0, k, l2)
+				end
+				if l3 then
+					Voxel.Set(grids[4], i, 0, k, l3)
+				end
+			end
+		end
+	end
+	-- the medallion uses finer 1-stud cells
+	local inlay = grids[5]
+	local ci = math.ceil(G.CourtR)
+	for i = -ci, ci do
+		for k = -ci, ci do
+			local key = courtInlay(i, k, L)
+			if key then
+				Voxel.Set(inlay, i, 0, k, key)
+			end
+		end
+	end
+	-- top surfaces: lawn -0.4, patches -0.3, borders -0.1, paths 0, inlays +0.1 (walkable steps, no z-fight;
+	-- bridge decks that dock into the ground sit at -0.2)
+	local tops = { -0.4, -0.3, -0.1, 0, 0.1 }
+	local names = { "Lawn", "LawnPatches", "PathBorders", "Paths", "Inlays" }
+	for li = 1, 5 do
+		local cellSize = (li == 5) and 1 or cell
+		VX.Build(grids[li], {
+			V = cellSize,
+			Name = names[li],
+			CF = CFrame.new(OX, TOP + tops[li] - cellSize / 2, OZ),
+			Collide = true,
+			Shadow = false,
+			Parent = f,
+		})
+	end
+end
+
+-- The plaza's cloud body: tiered, with lumpy side puffs and a soft rim of clouds around the lawn.
+local function buildPlazaBody(f, L)
+	local rng = Util.NewRng(SEED + 2)
+	local R = PLAZA_R
+	local puffs = {}
+	for i = 1, 6 do
+		local a = (i - 1) / 6 * math.pi * 2 + rng:Float(-0.2, 0.2)
+		local tier = rng:Int(1, 2)
+		local tr = ({ R - 8, R - 30 })[tier]
+		local ty = ({ -7, -14 })[tier]
+		local s = rng:Float(12, 17)
+		puffs[#puffs + 1] = { math.cos(a) * tr, ty, math.sin(a) * tr, s, s * 0.7, s }
+	end
+	for i = 1, 3 do
+		local a = rng:Float(0, math.pi * 2)
+		local d = rng:Float(10, 40)
+		puffs[#puffs + 1] = { math.cos(a) * d, -26, math.sin(a) * d, rng:Float(16, 24), rng:Float(8, 11), rng:Float(16, 24) }
+	end
+	-- the exits through the rim: unit direction + half width kept clear (path + border + a little air)
+	local exits = {}
+	for _, a in ipairs(L.RimGaps) do
+		local d = dirOf(a)
+		local half = ((angleDiff(a, L.ShopAngle) < 1) and G.BoardHalf or G.StubHalf) + 2.5
+		exits[#exits + 1] = { d.X, d.Z, half }
+	end
+	-- rim puffs: one right beside every exit, the arcs between exits filled evenly (<= ~30 degrees apart)
+	local rim = {}
+	local gaps = {}
+	for _, a in ipairs(L.RimGaps) do
+		gaps[#gaps + 1] = a % 360
+	end
+	table.sort(gaps)
+	local function addRim(adeg)
+		local a = math.rad(adeg)
+		local rr = R + rng:Float(-1, 1.5)
+		local s = rng:Float(8.5, 11)
+		rim[#rim + 1] = { math.cos(a) * rr, rng:Float(-1, 1.5), math.sin(a) * rr, s, s * 0.62, s }
+	end
+	if #gaps == 0 then
+		gaps[1] = 0
+	end
+	for i, g0 in ipairs(gaps) do
+		local g1 = gaps[i % #gaps + 1]
+		local span = (g1 - g0) % 360
+		if span == 0 then
+			span = 360
+		end
+		local from, to = g0 + 9, g0 + span - 9
+		if to > from then
+			local n = math.max(1, math.ceil((to - from) / 30))
+			for k = 0, n do
+				addRim(from + (to - from) * k / n)
+			end
+		end
+	end
+	local spec = {
+		V = 3,
+		Tiers = {
+			{ R = R + 3, H = 1 },
+			{ R = R - 6, H = 2 },
+			{ R = R - 28, H = 2 },
+			{ R = R - 62, H = 3 },
+		},
+		Puffs = puffs,
+		Rim = rim,
+		-- keep the walking area clear: nothing of the body may rise above the lawn inside the rim, nor over an
+		-- exit (the spoke bridges and the shop neck dock there)
+		Carve = function(x, y, z)
+			if y <= 0 then
+				return false
+			end
+			if (x * x + z * z) < (R - 6) * (R - 6) then
+				return true
+			end
+			for _, ex in ipairs(exits) do
+				local along = x * ex[1] + z * ex[2]
+				if along > R - 24 and math.abs(-x * ex[2] + z * ex[1]) < ex[3] then
+					return true
+				end
+			end
+			return false
+		end,
+		Seed = 4,
+		MaxParts = 360,
+	}
+	-- top of tier 1 sits 1.2 under the lawn surface; rim puffs rise up to ~5 studs above the lawn
+	VX.CloudModel(spec, CFrame.new(OX, TOP - 1.2, OZ), f, "PlazaCloud", true)
+end
+
+-- Fountain on the roundabout: stone basin, translucent water, two tiers with falling water, spray, and
+-- Nimbus the Cloudy Dragon (PetBuilder) perched on top when the pet modules are available.
+local function buildFountain(f, centre, lookTarget)
+	local m = newModel(f, "Fountain")
+	local g = Voxel.NewGrid(16)
+	VX.Ring(g, 0, 0, 7.6, 9.6, 0, 1, "Stone")
+	VX.Ring(g, 0, 0, 7.2, 10.1, 2, 2, "StoneLight")
+	VX.Disc(g, 0, 0, 7.6, 0, 0, "WaterDeep")
+	VX.Disc(g, 0, 0, 7.6, 1, 1, "Water")
+	VX.Disc(g, 0, 0, 1.7, 1, 4, "Stone")
+	VX.Disc(g, 0, 0, 4.3, 4, 4, "StoneLight")
+	VX.Ring(g, 0, 0, 3.4, 4.3, 5, 5, "StoneLight")
+	VX.Disc(g, 0, 0, 3.3, 5, 5, "Water")
+	VX.Disc(g, 0, 0, 1.1, 6, 8, "Stone")
+	VX.Disc(g, 0, 0, 2.5, 8, 8, "StoneLight")
+	VX.Ring(g, 0, 0, 1.7, 2.5, 9, 9, "StoneLight")
+	VX.Disc(g, 0, 0, 1.6, 9, 9, "Water")
+	-- falling water from both bowls
+	for _, d in ipairs({ { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }) do
+		VX.Fill(g, d[1] * 5, d[1] * 5, 2, 4, d[2] * 5, d[2] * 5, "Water")
+		VX.Fill(g, d[1] * 3, d[1] * 3, 6, 8, d[2] * 3, d[2] * 3, "Water")
+	end
+	-- gold trim studs on the rim
+	for i = 0, 7 do
+		local a = i / 8 * math.pi * 2
+		Voxel.Set(g, math.floor(math.cos(a) * 8.6 + 0.5), 2, math.floor(math.sin(a) * 8.6 + 0.5), "Gold")
+	end
+	Voxel.Shade(g, { Only = { Stone = true, StoneLight = true }, Smooth = 1, Seed = 2 })
+	local water = VX.Split(g, { Water = true })
+	local cf = CFrame.new(centre.X, TOP + 0.5, centre.Z)
+	VX.Build(g, { V = 1, Name = "Basin", CF = cf, Collide = true, Parent = m, MaxParts = 64 })
+	VX.Build(water, { V = 1, Name = "Water", CF = cf, Collide = false, Parent = m })
+
+	local spray = anchorPart(m, "Spray", centre + Vector3.new(0, 10.6, 0))
+	emitter(spray, {
+		Color = ColorSequence.new(rgb(206, 236, 255), rgb(150, 208, 250)),
+		Rate = 26,
+		Lifetime = NumberRange.new(0.9, 1.4),
+		Speed = NumberRange.new(5, 8),
+		SpreadAngle = Vector2.new(24, 24),
+		Acceleration = Vector3.new(0, -18, 0),
+		Size = popSize(0.55),
+		LightEmission = 0.3,
+	})
+	pointLight(spray, rgb(170, 220, 255), 0.6, 18)
+
+	-- Nimbus on top (optional)
+	local ok, err = pcall(function()
 		local builderModule = Shared:FindFirstChild("PetBuilder")
 		local catalogModule = Shared:FindFirstChild("PetCatalog")
 		if not builderModule or not catalogModule then
-			return nil
+			return
 		end
 		local PetBuilder = require(builderModule)
 		local PetCatalog = require(catalogModule)
-		local def = PetCatalog.Get("cloudy_dragon")
-		if not def then
-			return nil
+		local def = PetCatalog.Get and PetCatalog.Get("cloudy_dragon")
+		if not def or type(PetBuilder.Build) ~= "function" then
+			return
 		end
-		local scale = 5
-		local height = 3
-		if PetBuilder.GetHeight then
-			height = PetBuilder.GetHeight(def)
+		local pet = PetBuilder.Build(def, { Scale = 2.6, Detail = "Low" })
+		if not pet then
+			return
 		end
-		local m = PetBuilder.Build(def, { Scale = scale })
-		-- The PrimaryPart (Body) is not the vertical middle of the pet: the feet hang below it and the head
-		-- and wings rise far above it. Measure the real extents (as SpotService does) so the lowest part
-		-- floats 1.5 studs over the pedestal; fall back to "pivot = middle of the box" if that fails.
-		local y = topY + height * scale * 0.5 + 1.5
-		local bottom = nil
-		local okBox = pcall(function()
-			m:PivotTo(CFrame.new(0, 0, 0))
-			local boxCf, boxSize = m:GetBoundingBox()
-			bottom = m:GetPivot().Position.Y - (boxCf.Position.Y - boxSize.Y * 0.5)
-		end)
-		if okBox and type(bottom) == "number" and bottom == bottom and bottom > -50 and bottom < 100 then
-			y = topY + 1.5 + bottom
+		pet.Name = "NimbusStatue"
+		local topY = TOP + 9.4 -- perched on the top bowl's rim (its stone top is TOP + 10)
+		pet:PivotTo(CFrame.new(0, 0, 0))
+		local boxCf, boxSize = pet:GetBoundingBox()
+		local bottom = pet:GetPivot().Position.Y - (boxCf.Position.Y - boxSize.Y * 0.5)
+		if type(bottom) ~= "number" or bottom ~= bottom or bottom < -50 or bottom > 100 then
+			bottom = 2
 		end
-		m.Name = "CloudyDragonStatue"
-		m:PivotTo(CFrame.lookAt(Vector3.new(ground.X, y, ground.Z), Vector3.new(lookTarget.X, y, lookTarget.Z)))
-		m.Parent = parent
-		return m
-	end)
-	if ok and model then
-		for _, d in ipairs(model:GetDescendants()) do
+		local y = topY + bottom + 0.6
+		pet:PivotTo(flatLook(Vector3.new(centre.X, y, centre.Z), lookTarget))
+		for _, d in ipairs(pet:GetDescendants()) do
 			if d:IsA("BasePart") then
-				partCount = partCount + 1
+				d.Anchored = true
+				d.CanCollide = false
+				d.CanTouch = false
+				d.CanQuery = false
 			end
 		end
-	elseif not ok then
-		warn("[LobbyBuilder] mascot statue skipped: " .. tostring(model))
+		pet.Parent = m
+	end)
+	if not ok then
+		warn("[LobbyBuilder] fountain statue skipped: " .. tostring(err))
 	end
-
-	-- Small plaque card in front of the pedestal.
-	local toward = Vector3.new(lookTarget.X - ground.X, 0, lookTarget.Z - ground.Z)
-	if toward.Magnitude > 0.001 then
-		toward = toward.Unit
-	else
-		toward = Vector3.new(0, 0, 1)
-	end
-	-- Centre 2.0 up: the card spans 0.2 .. 3.8, in front of the pedestal and just under the statue's
-	-- feet (they float at 3.6), so it never covers the dragon.
-	local anchor = anchorPart(parent, "MascotPlaqueAnchor", ground + Vector3.new(0, 2.0, 0) + toward * 6.5)
-	local gui = newBillboard(anchor, 11, 3.6, 0, 120)
-	gui.Name = "MascotPlaque"
-	local card = cardPanel(gui, COL.Gold, 0.16)
-	fitLabel(card, "Cloudy Dragon", "Title", COL.TextGold, "Name", 0.05, 0.06, 0.9, 0.55)
-	fitLabel(card, "Hatch winged pets in the shop", "Body", COL.Text, "Sub", 0.05, 0.64, 0.9, 0.28)
+	return m
 end
 
-----------------------------------------------------------------------
--- Plaza
-----------------------------------------------------------------------
+-- Voxel rainbow arch over the main path, with the welcome sign standing on its crown.
+local function buildArch(f, L)
+	local m = newModel(f, "WelcomeArch")
+	local angle = L.MidAngle
+	local base = polar(angle, 54, TOP)
+	local cf = flatLook(base, base + dirOf(angle)) -- local -Z = along the path, away from the court
+	local V = 1.5
+	local g = Voxel.NewGrid(16)
+	Voxel.Shape(g, {
+		Kind = "Torus",
+		Center = { 0, 0, 0 },
+		Radius = 9.5,
+		Thickness = 2.6,
+		Arc = { 0, math.pi },
+		Rotation = CFrame.Angles(-math.pi / 2, 0, 0),
+		Bias = 0.1,
+		Key = "Rainbow1",
+		Pattern = function(x, y, z)
+			if math.abs(z) > 0.6 then
+				return false
+			end
+			local d = math.sqrt(x * x + y * y)
+			local band = clamp(math.floor((12.2 - d) / (5.2 / 6)) + 1, 1, 6)
+			return "Rainbow" .. band
+		end,
+	})
+	-- remove everything under the ground line, then cloud puffs hug both feet
+	local remove = {}
+	for k in pairs(g.Cells) do
+		local _, y = Voxel.Unpack(k)
+		if y < 0 then
+			remove[#remove + 1] = k
+		end
+	end
+	for _, k in ipairs(remove) do
+		g.Cells[k] = nil
+		g.Count = g.Count - 1
+	end
+	for _, s in ipairs({ -1, 1 }) do
+		Voxel.Shape(g, { Kind = "Ellipsoid", Center = { s * 9.5, 1, 0 }, Radius = { 3.4, 2.4, 2.6 }, Key = "Puff" })
+		Voxel.Shape(g, { Kind = "Ellipsoid", Center = { s * 11.2, 0.4, 0.6 }, Radius = { 2.2, 1.7, 2 }, Key = "Puff" })
+		Voxel.Shape(g, { Kind = "Ellipsoid", Center = { s * 7.8, 0.2, -0.5 }, Radius = { 2, 1.5, 1.8 }, Key = "Puff" })
+	end
+	Voxel.Shade(g, { Only = { Puff = true }, Smooth = 2, Seed = 6 })
+	Voxel.Remap(g, { Puff = "Cloud", Puff_Light = "CloudLight", Puff_Dark = "CloudShade" })
+	VX.Build(g, {
+		V = V,
+		Name = "Rainbow",
+		CF = cf * CFrame.new(0, V / 2, 0),
+		Collide = true,
+		Parent = m,
+		MaxParts = 96,
+		Keep = { "Rainbow1", "Rainbow2", "Rainbow3", "Rainbow4", "Rainbow5", "Rainbow6" },
+	})
+	for _, s in ipairs({ -1, 1 }) do
+		reserve(base.X - OX + cf.RightVector.X * s * 14, base.Z - OZ + cf.RightVector.Z * s * 14, 6)
+	end
+
+	-- welcome sign standing on the crown, readable from the spawn (front) and from the portals (back)
+	local crownY = 12.4 * V
+	local boardCf = cf * CFrame.new(0, crownY + 3.4, 0) * CFrame.Angles(0, math.pi, 0)
+	box(m, "SignPostL", cf * CFrame.new(-4.5, crownY + 0.6, 0), Vector3.new(0.9, 2, 0.6), C.PlankDark)
+	box(m, "SignPostR", cf * CFrame.new(4.5, crownY + 0.6, 0), Vector3.new(0.9, 2, 0.6), C.PlankDark)
+	box(m, "SignFrame", boardCf, Vector3.new(19.4, 6.4, 0.8), C.Plank)
+	local board = box(m, "WelcomeSign", boardCf, Vector3.new(18.4, 5.4, 1.0), C.Navy, { Shadow = true })
+	-- 920 x 270 px canvas: the name 2 studs tall, the two script lines 0.72 stud
+	for _, face in ipairs({ Enum.NormalId.Front, Enum.NormalId.Back }) do
+		local gui = surfaceGui(board, face)
+		local panel = signPanel(gui, C.TextGold)
+		signText(panel, "~ welcome to the clouds ~", "Script", 36, C.TextGold, "Welcome", 0.04, 0.05, 0.92, 0.17)
+		local title = signText(panel, Config.GameName, "Title", 100, rgb(255, 255, 255), "Title", 0.03, 0.23, 0.94, 0.44)
+		textGradient(title, {
+			{ 0, rgb(255, 236, 160) },
+			{ 0.5, rgb(255, 255, 255) },
+			{ 1, rgb(180, 220, 255) },
+		}, 90)
+		signText(panel, Config.Tagline or "", "Script", 36, C.Text, "Tagline", 0.04, 0.72, 0.92, 0.17)
+		gui.Parent = board
+	end
+	return m
+end
+
+-- "How to play" and "Guide" notice boards on both sides of the main path, facing the spawn.
+local function buildBoards(f, L)
+	local function spotFor(angle)
+		local pos = plazaSpot(angle, 42, 6, L)
+		if not pos then
+			return nil
+		end
+		return faceCentre(pos - Vector3.new(0, LAWN, 0)) -- the board's face (-Z, the Front face) looks at the centre
+	end
+	-- 550 x 400 px canvas (11 x 8 studs): a 1.04-stud header, five 0.6-stud rows, a 0.6-stud footer
+	local howCf = spotFor(L.MidAngle - L.PortalStep * 0.5)
+	if howCf then
+		local face = noticeBoard(f, howCf, 11, 8, "HowToBoard")
+		local gui = surfaceGui(face, Enum.NormalId.Front)
+		local panel = signPanel(gui)
+		signText(panel, "HOW TO PLAY", "Title", 52, C.Gold, "Header", 0.04, 0.025, 0.92, 0.14)
+		local rows = {
+			{ "W A S D", "Move around" },
+			{ "SHIFT", "Hold to run" },
+			{ "Q", "Dash over wide gaps" },
+			{ "SPACE", "Jump" },
+			{ "1 - 4", "Use items (in a climb)" },
+		}
+		for i, row in ipairs(rows) do
+			keyRow(panel, 0.18 + (i - 1) * 0.12, 0.105, row[1], row[2])
+		end
+		signText(panel, "Step into a glowing PORTAL to climb with friends!", "Body", SIGN_INFO, C.TextGold, "Footer", 0.05, 0.785, 0.9, 0.19, nil, true)
+		gui.Parent = face
+	end
+	local guideCf = spotFor(L.MidAngle + L.PortalStep * 0.5)
+	if guideCf then
+		local face = noticeBoard(f, guideCf, 11, 8, "GuideBoard")
+		local gui = surfaceGui(face, Enum.NormalId.Front)
+		local panel = signPanel(gui, rgb(150, 200, 255))
+		signText(panel, "CLOUD GUIDE", "Title", 52, C.Gold, "Header", 0.04, 0.025, 0.92, 0.14)
+		local lines = {
+			{ "TOKENS", "Collect " .. GLYPH.Cloud .. " on climbs" },
+			{ "SHOP", "Spin roulettes for pets" },
+			{ "PETS", "Pets give you perks" },
+			{ "HOME", "Homes: the outer ring" },
+			{ "FRIENDS", "Chat with plaza pets" },
+		}
+		for i, line in ipairs(lines) do
+			keyRow(panel, 0.18 + (i - 1) * 0.12, 0.105, line[1], line[2])
+		end
+		signText(panel, "Harder portals pay more tokens!", "Body", SIGN_INFO, C.TextGold, "Footer", 0.05, 0.81, 0.9, 0.13)
+		gui.Parent = face
+	end
+end
+
+-- Plaza decor: fountain, arch, boards, NPC spots, trees, lamps, benches, flower beds, bunting, banners.
+local function buildPlazaDecor(f, L)
+	local diffColors = {}
+	for i, d in ipairs(Config.Difficulties) do
+		diffColors[i] = d.Color
+	end
+	reserve(L.FountainX, L.FountainZ, 15)
+	reserve(0, 0, G.CourtR + 2)
+
+	local fountainPos = Vector3.new(OX + L.FountainX, TOP, OZ + L.FountainZ)
+	local okF, errF = pcall(buildFountain, f, fountainPos, Vector3.new(OX, TOP, OZ))
+	if not okF then
+		warn("[LobbyBuilder] fountain failed: " .. tostring(errF))
+	end
+	local okA, errA = pcall(buildArch, f, L)
+	if not okA then
+		warn("[LobbyBuilder] arch failed: " .. tostring(errA))
+	end
+	local okB, errB = pcall(buildBoards, f, L)
+	if not okB then
+		warn("[LobbyBuilder] boards failed: " .. tostring(errB))
+	end
+
+	-- NPC spots (NpcService builds the pets): on the lawn next to the walkways, facing them.
+	L.NpcSpots = {}
+	local step = L.PortalStep
+	local npcPlan = {
+		{ L.PortalAngles[1] + step * 0.5, 58 },
+		{ L.PortalAngles[#L.PortalAngles] - step * 0.5, 58 },
+		{ L.ShopAngle - 20, 42 },
+		{ L.ShopAngle + 20, 42 },
+		{ L.ShopAngle - 45, 50 },
+		{ L.ShopAngle + 45, 50 },
+	}
+	for _, plan in ipairs(npcPlan) do
+		local pos = plazaSpot(plan[1], plan[2], 5, L, false)
+		if not pos then
+			pos = plazaSpot(plan[1], plan[2] + 8, 5, L, true)
+		end
+		local look
+		if math.abs(angleDiff(plan[1], L.ShopAngle) - 20) < 1 then
+			-- beside the boardwalk: face across it
+			local d = dirOf(L.ShopAngle)
+			local toPath = Vector3.new(OX, TOP, OZ) + d * plan[2] - pos
+			look = pos + Vector3.new(toPath.X, 0, toPath.Z)
+		else
+			look = Vector3.new(OX, TOP, OZ)
+		end
+		L.NpcSpots[#L.NpcSpots + 1] = flatLook(pos, look)
+	end
+
+	-- Trees on the south lawns.
+	local trees = {
+		{ L.ShopAngle - 45, 86, "Blossom" },
+		{ L.ShopAngle + 45, 86, "Round" },
+		{ L.ShopAngle - 79, 62, "Round" },
+		{ L.ShopAngle + 79, 62, "Blossom" },
+		{ L.ShopAngle - 31, 100, "Pine" },
+		{ L.ShopAngle + 31, 100, "Pine" },
+	}
+	for i, t in ipairs(trees) do
+		local pos = plazaSpot(t[1], t[2], 6, L)
+		if pos then
+			place(Props.Tree(t[3]), CFrame.new(pos - Vector3.new(0, LAWN, 0)) * CFrame.Angles(0, math.rad(i * 77), 0), f, t[3] .. "Tree")
+		end
+	end
+
+	-- Lamps around the court (with light) and at every exit through the rim.
+	local lampTpl = Props.Lamp()
+	-- (the pair flanking the main path stays clear of the sight lines to the two notice boards)
+	local courtLamps = {
+		L.PortalAngles[1] + step * 0.5,
+		L.MidAngle - 12.5,
+		L.MidAngle + 12.5,
+		L.PortalAngles[#L.PortalAngles] - step * 0.5,
+		L.ShopAngle - 45,
+		L.ShopAngle + 45,
+	}
+	local lampTops = {}
+	for _, a in ipairs(courtLamps) do
+		local pos = plazaSpot(a, G.CourtR + 5, 1.5, L)
+		if pos then
+			pos = pos - Vector3.new(0, LAWN, 0) -- (decor stands on the lawn layer)
+			local lamp = place(lampTpl, CFrame.new(pos), f, "CourtLamp")
+			local glass = lamp and lamp:FindFirstChild("LampGlass")
+			if glass then
+				pointLight(glass, C.Lamp, 0.9, 18)
+			end
+			lampTops[#lampTops + 1] = { Angle = a, Pos = pos + Vector3.new(0, 7.4, 0) }
+		end
+	end
+	for _, a in ipairs(L.RimGaps) do
+		local half = (angleDiff(a, L.ShopAngle) < 1) and G.BoardHalf or G.StubHalf
+		local skip = angleIn(a, L.PromFrom, L.PromTo) -- banners mark the exits on the promenade side
+		local side = dirOf(a + 90)
+		local pos = polar(a, PLAZA_R - 6, TOP - LAWN) + side * (half + 1.8)
+		if not skip then
+			place(lampTpl, CFrame.new(pos), f, "ExitLamp")
+		end
+		if angleDiff(a, L.ShopAngle) < 1 then
+			local pos2 = polar(a, PLAZA_R - 6, TOP - LAWN) - side * (half + 1.8)
+			local lamp2 = place(lampTpl, CFrame.new(pos2), f, "ExitLamp")
+			local glass = lamp2 and lamp2:FindFirstChild("LampGlass")
+			if glass then
+				pointLight(glass, C.Lamp, 0.8, 16)
+			end
+		end
+	end
+
+	-- Bunting between neighbouring court lamps (in the difficulty colours), open towards the shop.
+	table.sort(lampTops, function(a, b)
+		return (a.Angle % 360) < (b.Angle % 360)
+	end)
+	for i = 1, #lampTops do
+		local a, b = lampTops[i], lampTops[i % #lampTops + 1]
+		if a ~= b and angleDiff(a.Angle, b.Angle) <= 70 then
+			bunting(f, a.Pos, b.Pos, diffColors, 1.2)
+		end
+	end
+
+	-- Benches facing the court.
+	local benchTpl = Props.Bench()
+	local benches = {
+		{ L.PortalAngles[1] + step * 0.5, 44 },
+		{ L.PortalAngles[#L.PortalAngles] - step * 0.5, 44 },
+	}
+	for _, b in ipairs(benches) do
+		local pos = plazaSpot(b[1], b[2], 3.5, L)
+		if pos then
+			place(benchTpl, faceCentre(pos - Vector3.new(0, LAWN, 0)), f, "Bench")
+		end
+	end
+
+	-- Flower beds near the promenade, between the portal paths.
+	for i = 1, #L.PortalAngles - 1 do
+		local a = (L.PortalAngles[i] + L.PortalAngles[i + 1]) / 2
+		local pos = plazaSpot(a, G.PromIn - 7, 4, L)
+		if pos then
+			place(Props.FlowerBed((i - 1) % #FLOWERS + 1), faceCentre(pos - Vector3.new(0, LAWN, 0)), f, "FlowerBed")
+		end
+	end
+
+	-- Banners flank every spoke exit on the promenade side, in the colours of the neighbouring portals.
+	for _, a in ipairs(L.SpokeAngles) do
+		if angleIn(a, L.PromFrom, L.PromTo) then
+			local left, right = nil, nil
+			for i, pa in ipairs(L.PortalAngles) do
+				if pa < a and (not left or pa > L.PortalAngles[left]) then
+					left = i
+				end
+				if pa > a and (not right or pa < L.PortalAngles[right]) then
+					right = i
+				end
+			end
+			for _, s in ipairs({ -1, 1 }) do
+				local idx = (s < 0) and (left or right) or (right or left)
+				local color = diffColors[idx or 1] or C.Rose
+				local pos = polar(a, G.PromOut + 3, TOP - LAWN) + dirOf(a + 90) * (s * (G.StubHalf + 2.2))
+				bannerPole(f, faceCentre(pos) * CFrame.Angles(0, (s < 0) and math.pi or 0, 0), color)
+			end
+		end
+	end
+
+	-- Fireflies and sparkle dust over the lawns.
+	local flies = anchorPart(f, "Fireflies", Vector3.new(OX, TOP + 6, OZ), Vector3.new(PLAZA_R * 1.7, 10, PLAZA_R * 1.7))
+	emitter(flies, {
+		Color = ColorSequence.new(rgb(255, 236, 150), rgb(190, 240, 170)),
+		Rate = 10,
+		Lifetime = NumberRange.new(5, 8),
+		Speed = NumberRange.new(0.3, 1),
+		SpreadAngle = Vector2.new(180, 180),
+		Size = popSize(0.45),
+	})
+end
 
 local function buildPlaza(root, L)
 	local f = newFolder(root, "Plaza")
-	local rng = Util.NewRng(SEED + 1)
-	local ox, oz = ORIGIN.X, ORIGIN.Z
-	local diffs = Config.Difficulties
-
-	-- Walkable top disc.
-	disc(f, Vector3.new(ox, TOP - 3, oz), SURF_R * 2, 6, {
-		Name = "PlazaTop",
-		Color = COL.Top,
-		CastShadow = true,
-	})
-
-	-- Inverted-cone underside: shrinking, slightly translucent tiers hidden behind puffs.
-	local tiers = {
-		{ r = SURF_R * 0.9, th = 6, y = -9, color = COL.Side, trans = 0.04, puffs = 8 },
-		{ r = SURF_R * 0.68, th = 7, y = -15.5, color = COL.Side:Lerp(COL.Shadow, 0.4), trans = 0.1, puffs = 6 },
-		{ r = SURF_R * 0.44, th = 8, y = -23, color = COL.Shadow, trans = 0.18, puffs = 4 },
-		{ r = SURF_R * 0.22, th = 9, y = -31.5, color = COL.Dusk, trans = 0.3, puffs = 2 },
-	}
-	for _, tier in ipairs(tiers) do
-		disc(f, Vector3.new(ox, TOP + tier.y, oz), tier.r * 2, tier.th, {
-			Name = "PlazaTier",
-			Color = tier.color,
-			Transparency = tier.trans,
-			CanCollide = false,
-		})
-		for i = 1, tier.puffs do
-			local a = (i - 1) * (math.pi * 2 / tier.puffs) + rng:Float(-0.3, 0.3)
-			local d = rng:Float(tier.th * 1.2, tier.th * 1.9)
-			ball(f, Vector3.new(ox + math.cos(a) * tier.r * 0.93, TOP + tier.y + rng:Float(-1, 1.5), oz + math.sin(a) * tier.r * 0.93), d, {
-				Name = "UnderPuff",
-				Color = tier.color:Lerp(COL.Top, 0.3),
-				Transparency = tier.trans,
-				CanCollide = false,
-			})
-		end
+	buildPlazaGround(f, L)
+	local okBody, errBody = pcall(buildPlazaBody, f, L)
+	if not okBody then
+		warn("[LobbyBuilder] plaza cloud failed: " .. tostring(errBody))
 	end
-
-	-- Soft puffy rim (open where the spokes and the shop neck leave the plaza).
-	rimPuffs(f, rng, Vector3.new(ox, TOP, oz), SURF_R + 0.5, 34, 8, 12, 0.2, 1.2, COL.Puff, L.PlazaOpenings, 8)
-
-	-- Muted pastel patches on the ground so the plaza is not one flat sheet. Patches share one
-	-- height, so candidates that would overlap an earlier patch are rejected (no z-fighting).
-	local patchColors = {
-		COL.Top:Lerp(Color3.fromRGB(214, 150, 166), 0.22),
-		COL.Top:Lerp(Color3.fromRGB(224, 176, 120), 0.2),
-		COL.Top:Lerp(Color3.fromRGB(120, 160, 220), 0.22),
-		COL.Top:Lerp(Color3.fromRGB(130, 190, 160), 0.2),
-	}
-	local placed = {}
-	local attempts = 0
-	while #placed < 10 and attempts < 80 do
-		attempts = attempts + 1
-		local ang = rng:Float(0, 360)
-		local rr = rng:Float(20, 100)
-		local d = rng:Float(6, 13)
-		local pos = polar(ang, rr, TOP + 0.03)
-		local clear = true
-		for _, p in ipairs(placed) do
-			local dx, dz = pos.X - p.x, pos.Z - p.z
-			local minDist = (d + p.d) / 2 + 0.5
-			if dx * dx + dz * dz < minDist * minDist then
-				clear = false
-				break
-			end
-		end
-		if clear then
-			placed[#placed + 1] = { x = pos.X, z = pos.Z, d = d }
-			disc(f, pos, d, 0.06, {
-				Name = "GroundPatch",
-				Color = rng:Pick(patchColors),
-				CanCollide = false,
-			})
-		end
+	local okDecor, errDecor = pcall(buildPlazaDecor, f, L)
+	if not okDecor then
+		warn("[LobbyBuilder] plaza decor failed: " .. tostring(errDecor))
 	end
-
-	-- Central medallion: gold rim, cloud field, muted rainbow dots, golden core.
-	local layers = {
-		{ d = 27, color = COL.GoldDark },
-		{ d = 25.4, color = COL.Side },
-		{ d = 19, color = COL.Top:Lerp(COL.Gold, 0.18) },
-		{ d = 17.6, color = COL.Gold },
-		{ d = 16.6, color = COL.Path },
-	}
-	local stack = 0
-	for _, layer in ipairs(layers) do
-		disc(f, Vector3.new(ox, TOP + stack + 0.05, oz), layer.d, 0.1, {
-			Name = "Medallion",
-			Color = layer.color,
-			CanCollide = false,
-		})
-		stack = stack + 0.1
-	end
-	for i = 1, 6 do
-		disc(f, polar(i * 60, 6.4, TOP + stack + 0.05), 3.2, 0.1, {
-			Name = "MedallionDot",
-			Color = RAINBOW[i],
-			CanCollide = false,
-		})
-	end
-	disc(f, Vector3.new(ox, TOP + stack + 0.1, oz), 5.4, 0.2, {
-		Name = "MedallionCore",
-		Color = COL.Gold,
-		Material = MAT.Neon,
-		CanCollide = false,
-	})
-
-	-- Paths from the medallion to every portal pad, with lamp posts alongside.
-	for i, deg in ipairs(L.PortalAngles) do
-		local a = math.rad(deg)
-		local dir = Vector3.new(math.cos(a), 0, math.sin(a))
-		local tangent = Vector3.new(-math.sin(a), 0, math.cos(a))
-		local pcf = CFrame.lookAt(polar(deg, 49, TOP + 0.08), polar(deg, 50, TOP + 0.08))
-		local edgeColor = diffs[i].Color
-		block(f, pcf, Vector3.new(6.4, 0.16, 66), { Name = "Path", Color = COL.Path, CanCollide = false })
-		block(f, pcf * CFrame.new(-3.45, 0.02, 0), Vector3.new(0.5, 0.2, 66), { Name = "PathEdge", Color = edgeColor, CanCollide = false })
-		block(f, pcf * CFrame.new(3.45, 0.02, 0), Vector3.new(0.5, 0.2, 66), { Name = "PathEdge", Color = edgeColor, CanCollide = false })
-		local base = Vector3.new(ox, TOP, oz)
-		lampPost(f, base + dir * 32 + tangent * 5.4, true)
-		lampPost(f, base + dir * 62 - tangent * 5.4, false)
-	end
-
-	-- Benches ring the medallion, facing it (placed between the paths).
-	local benchAngles = { 22.5, 67.5, 112.5, 157.5, 202.5, 247.5, 292.5, 337.5 }
-	for _, deg in ipairs(benchAngles) do
-		local pos = polar(deg, 27, TOP)
-		bench(f, CFrame.lookAt(pos, Vector3.new(ox, TOP, oz)))
-	end
-
-	-- Lantern trees: a grove on the south side (clear of the shop neck) and two flanking the paths.
-	local treeSpots = { { 250, 72 }, { 290, 72 }, { 206, 86 }, { 334, 86 }, { 225, 52 }, { 315, 52 } }
-	for i, spot in ipairs(treeSpots) do
-		lanternTree(f, rng, polar(spot[1], spot[2], TOP), rng:Float(1.0, 1.2), BLOSSOMS[(i - 1) % #BLOSSOMS + 1], i <= 2)
-	end
-
-	-- Flower beds near the boards, the grove and the benches.
-	local flowerSpots = { { 33, 66 }, { 147, 66 }, { 210, 64 }, { 330, 64 }, { 255, 42 }, { 285, 42 }, { 15, 34 }, { 165, 34 } }
-	for _, spot in ipairs(flowerSpots) do
-		flowerPatch(f, rng, polar(spot[1], spot[2], TOP), 4, 3)
-	end
-
-	-- Path to the shop (south) with lamps, the mascot monument on it, and two small ponds.
-	local shopDir = Vector3.new(math.cos(math.rad(L.ShopAngle)), 0, math.sin(math.rad(L.ShopAngle)))
-	local shopTan = perpendicular(shopDir)
-	local spcf = CFrame.lookAt(polar(L.ShopAngle, 66, TOP + 0.08), polar(L.ShopAngle, 67, TOP + 0.08))
-	block(f, spcf, Vector3.new(8, 0.16, 96), { Name = "ShopPath", Color = COL.Path, CanCollide = false })
-	block(f, spcf * CFrame.new(-4.25, 0.02, 0), Vector3.new(0.5, 0.2, 96), { Name = "ShopPathEdge", Color = COL.Gold, CanCollide = false })
-	block(f, spcf * CFrame.new(4.25, 0.02, 0), Vector3.new(0.5, 0.2, 96), { Name = "ShopPathEdge", Color = COL.Gold, CanCollide = false })
-	local plazaBase = Vector3.new(ox, TOP, oz)
-	lampPost(f, plazaBase + shopDir * 30 + shopTan * 6.2, true)
-	lampPost(f, plazaBase + shopDir * 30 - shopTan * 6.2, false)
-	lampPost(f, plazaBase + shopDir * 84 + shopTan * 6.2, false)
-	lampPost(f, plazaBase + shopDir * 84 - shopTan * 6.2, true)
-	mascotMonument(f, polar(L.ShopAngle, 50, TOP), plazaBase)
-	pond(f, rng, polar(L.ShopAngle - 35, 80, TOP), 6)
-	pond(f, rng, polar(L.ShopAngle + 35, 80, TOP), 6)
-
-	-- Lobby fireflies drifting over the whole plaza.
-	local flies = anchorPart(f, "Fireflies", Vector3.new(ox, TOP + 9, oz), Vector3.new(150, 16, 150))
-	emitter(flies, {
-		Color = ColorSequence.new(Color3.fromRGB(236, 224, 150), Color3.fromRGB(176, 228, 160)),
-		Rate = 14,
-		Lifetime = NumberRange.new(5, 9),
-		Speed = NumberRange.new(0.3, 1.2),
-		SpreadAngle = Vector2.new(180, 180),
-		Acceleration = Vector3.new(0, 0.2, 0),
-		Size = NumberSequence.new({
-			NumberSequenceKeypoint.new(0, 0),
-			NumberSequenceKeypoint.new(0.2, 0.5),
-			NumberSequenceKeypoint.new(0.5, 0.25),
-			NumberSequenceKeypoint.new(0.8, 0.5),
-			NumberSequenceKeypoint.new(1, 0),
-		}),
-	})
+	return f
 end
 
 ----------------------------------------------------------------------
--- Signs: wooden frame + navy board with SurfaceGui text
-----------------------------------------------------------------------
-
--- Two posts, a framed board and cloud puffs at the base. Returns the board part
--- (its Front face looks along `cf`'s look vector). `cf` is at ground level facing the viewers.
-local function signStructure(parent, cf, width, height, postHeight)
-	local boardY = postHeight - height * 0.5 - 1.2
-	local postX = width * 0.5 + 1.9
-
-	for _, side in ipairs({ -1, 1 }) do
-		local postPos = (cf * CFrame.new(side * postX, postHeight * 0.5, 0.2)).Position
-		disc(parent, postPos, 1.5, postHeight, { Name = "SignPost", Color = COL.WoodDark, Material = MAT.Wood })
-		local basePos = (cf * CFrame.new(side * postX, 0, 0.2)).Position
-		ball(parent, basePos + Vector3.new(0, 1.3, 0), 4.6, { Name = "SignPuff", Color = COL.Puff })
-		local lanternPos = (cf * CFrame.new(side * postX, postHeight + 0.9, 0.2)).Position
-		local lantern = ball(parent, lanternPos, 2.0, {
-			Name = "SignLantern",
-			Color = COL.Lantern,
-			Material = MAT.Neon,
-			CanCollide = false,
-		})
-		pointLight(lantern, COL.Lantern, 0.8, 18)
-	end
-
-	-- Backing frame (slightly bigger, behind) and the board itself.
-	block(parent, cf * CFrame.new(0, boardY, 0.25), Vector3.new(width + 2, height + 1.8, 1.0), {
-		Name = "SignFrame",
-		Color = COL.WoodLight,
-		Material = MAT.WoodPlanks,
-	})
-	local board = block(parent, cf * CFrame.new(0, boardY, -0.3), Vector3.new(width, height, 0.8), {
-		Name = "SignBoard",
-		Color = COL.Navy,
-		CastShadow = true,
-	})
-
-	-- Muted rainbow trim along the bottom edge of the board.
-	local stripW = width / 6
-	for i = 1, 6 do
-		local x = (i - 3.5) * stripW
-		block(parent, cf * CFrame.new(x, boardY - height * 0.5 + 0.3, -0.75), Vector3.new(stripW, 0.5, 0.2), {
-			Name = "SignTrim",
-			Color = RAINBOW[i],
-			CanCollide = false,
-		})
-	end
-	return board
-end
-
--- A key-cap chip + a description, laid out in rows of a sign panel.
-local function keyRow(parent, y, rowH, keyText, descText)
-	local chip = Instance.new("Frame")
-	chip.Name = "KeyChip"
-	chip.Size = UDim2.new(0.3, 0, rowH, 0)
-	chip.Position = UDim2.new(0.06, 0, y, 0)
-	chip.BackgroundColor3 = COL.Slate
-	chip.BorderSizePixel = 0
-	local corner = Instance.new("UICorner")
-	corner.CornerRadius = UDim.new(0, 14)
-	corner.Parent = chip
-	local stroke = Instance.new("UIStroke")
-	stroke.Color = COL.TextGold
-	stroke.Thickness = 2
-	stroke.Transparency = 0.3
-	stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-	stroke.Parent = chip
-	chip.Parent = parent
-
-	fitLabel(chip, keyText, "Heading", COL.TextGold, "Key", 0.04, 0.08, 0.92, 0.84)
-	fitLabel(parent, descText, "Body", COL.Text, "Desc", 0.4, y, 0.56, rowH, Enum.TextXAlignment.Left)
-end
-
-local function buildHowToBoard(root, L)
-	local f = newFolder(root, "HowToBoard")
-	local mid = L.PortalAngles[#L.PortalAngles] - L.PortalStep / 2
-	local ground = polar(mid, 60, TOP)
-	local cf = CFrame.lookAt(ground, Vector3.new(ORIGIN.X, TOP, ORIGIN.Z))
-	local board = signStructure(f, cf, 22, 16, 21)
-
-	local gui = surfaceGui(board, 40)
-	local panel = signPanel(gui)
-	fitLabel(panel, "HOW TO PLAY", "Title", COL.Gold, "Header", 0.04, 0.03, 0.92, 0.14)
-
-	keyRow(panel, 0.2, 0.1, "W A S D", "Move around")
-	keyRow(panel, 0.32, 0.1, "SHIFT", "Hold to run")
-	keyRow(panel, 0.44, 0.1, "Q", "Dash over wide gaps")
-	keyRow(panel, 0.56, 0.1, "SPACE", "Jump")
-	keyRow(panel, 0.68, 0.1, "1 - 4", "Use items (in a climb)")
-
-	local footer = makeLabel("Stand in a glowing portal to form a party, then climb together!", "Body", {
-		Scaled = true,
-		Color = COL.TextGold,
-		Props = {
-			Position = UDim2.new(0.05, 0, 0.81, 0),
-			Size = UDim2.new(0.9, 0, 0.15, 0),
-			TextWrapped = true,
-		},
-	})
-	footer.Parent = panel
-	gui.Parent = board
-end
-
--- Second board: how pets, spots and the shop fit together.
-local function buildGuideBoard(root, L)
-	local f = newFolder(root, "GuideBoard")
-	local mid = L.PortalAngles[1] + L.PortalStep / 2
-	local ground = polar(mid, 60, TOP)
-	local cf = CFrame.lookAt(ground, Vector3.new(ORIGIN.X, TOP, ORIGIN.Z))
-	local board = signStructure(f, cf, 22, 16, 21)
-
-	local gui = surfaceGui(board, 40)
-	local panel = signPanel(gui)
-	fitLabel(panel, "PETS & SPOTS", "Title", COL.Gold, "Header", 0.04, 0.03, 0.92, 0.14)
-
-	keyRow(panel, 0.2, 0.1, "PETS", "Winged friends follow you")
-	keyRow(panel, 0.32, 0.1, "SHOP", "Spin roulettes for pets")
-	keyRow(panel, 0.44, 0.1, "RARITY", "Pricier = rarer pets")
-	keyRow(panel, 0.56, 0.1, "SPOT", "Your cloud home, saved")
-	keyRow(panel, 0.68, 0.1, "MENU", "Bag, pets, stats at left")
-
-	local footer = makeLabel("Collect cloud tokens in every climb to afford bigger roulettes.", "Body", {
-		Scaled = true,
-		Color = COL.TextGold,
-		Props = {
-			Position = UDim2.new(0.05, 0, 0.81, 0),
-			Size = UDim2.new(0.9, 0, 0.15, 0),
-			TextWrapped = true,
-		},
-	})
-	footer.Parent = panel
-	gui.Parent = board
-end
-
-----------------------------------------------------------------------
--- Rainbow arch (muted) with the welcome board hanging from it
-----------------------------------------------------------------------
-
-local function buildArch(root)
-	local f = newFolder(root, "RainbowArch")
-	local rng = Util.NewRng(SEED + 2)
-	local cx, cz = ORIGIN.X, ORIGIN.Z + ARCH_Z
-	local centre = Vector3.new(cx, TOP - 1, cz)
-	local segments = 14
-	local bandH = 1.25
-
-	-- Six concentric bands (red outermost), each made of thin rotated blocks.
-	for band = 1, 6 do
-		local r = ARCH_R - (band - 1) * bandH
-		local len = r * math.pi / segments * 1.12
-		for k = 0, segments - 1 do
-			local phi = (k + 0.5) * math.pi / segments
-			local pos = centre + Vector3.new(math.cos(phi) * r, math.sin(phi) * r, 0)
-			block(f, CFrame.new(pos) * CFrame.Angles(0, 0, phi + math.pi / 2), Vector3.new(len, bandH, 3.2), {
-				Name = "RainbowBand" .. band,
-				Color = RAINBOW[band],
-				CanCollide = false,
-			})
-		end
-	end
-
-	-- A cloud bank at each foot of the arch, sparkling gently.
-	local footR = ARCH_R - 2.7
-	for _, sx in ipairs({ -1, 1 }) do
-		local parts = cloudCluster(f, rng, Vector3.new(cx + sx * footR, TOP - 0.5, cz), 7, { Puffs = 4 })
-		emitter(parts[1], {
-			Color = ColorSequence.new(Color3.fromRGB(236, 214, 170), COL.Top),
-			Rate = 5,
-			Lifetime = NumberRange.new(2, 3.5),
-			Speed = NumberRange.new(2, 4),
-			Size = popSize(0.8),
-			EmissionDirection = DISC_UP, -- parts[1] is the disc() CloudBase
-		})
-	end
-
-	-- Welcome board crowning the arch (so it never hides the gates behind it). Its front faces the
-	-- plaza centre (-Z); two short posts stand on the apex.
-	local boardW, boardH = 20, 6.8
-	local boardY = TOP + 33.6
-	local board = block(f, CFrame.new(cx, boardY, cz), Vector3.new(boardW, boardH, 0.8), {
-		Name = "WelcomeBoard",
-		Color = COL.Navy,
-		CanCollide = false,
-		CastShadow = true,
-	})
-	block(f, CFrame.new(cx, boardY, cz + 0.15), Vector3.new(boardW + 1.2, boardH + 1.2, 0.8), {
-		Name = "WelcomeFrame",
-		Color = COL.WoodLight,
-		Material = MAT.WoodPlanks,
-		CanCollide = false,
-	})
-	for _, side in ipairs({ -1, 1 }) do
-		block(f, CFrame.new(cx + side * 6.5, TOP + 29.7, cz), Vector3.new(0.9, 2.8, 1.2), {
-			Name = "WelcomePost",
-			Color = COL.WoodDark,
-			Material = MAT.Wood,
-			CanCollide = false,
-		})
-		local lantern = ball(f, Vector3.new(cx + side * (boardW / 2 + 1.6), boardY + boardH / 2 - 0.4, cz), 1.4, {
-			Name = "WelcomeLantern",
-			Color = COL.Lantern,
-			Material = MAT.Neon,
-			CanCollide = false,
-		})
-		if side == 1 then
-			pointLight(lantern, COL.Lantern, 0.8, 22)
-		end
-	end
-
-	local gui = surfaceGui(board, 40)
-	local panel = signPanel(gui)
-
-	fitLabel(panel, "~ welcome to the clouds ~", "Script", COL.TextGold, "Welcome", 0, 0.05, 1, 0.16)
-
-	local titleText = string.upper(Config.GameName)
-	local shadow = makeLabel(titleText, "Title", {
-		Scaled = true,
-		Color = COL.Ink,
-		Stroke = 1,
-		Props = { Size = UDim2.new(0.92, 0, 0.5, 0), Position = UDim2.new(0.052, 0, 0.245, 0), TextTransparency = 0.2 },
-	})
-	shadow.Parent = panel
-
-	local title = makeLabel(titleText, "Title", {
-		Scaled = true,
-		Stroke = 1,
-		Props = { Size = UDim2.new(0.92, 0, 0.5, 0), Position = UDim2.new(0.04, 0, 0.22, 0) },
-	})
-	textGradient(title, {
-		{ 0, Color3.fromRGB(240, 160, 190) },
-		{ 0.35, Color3.fromRGB(240, 214, 130) },
-		{ 0.7, Color3.fromRGB(150, 224, 190) },
-		{ 1, Color3.fromRGB(130, 190, 240) },
-	}, 8)
-	title.Parent = panel
-
-	fitLabel(panel, Config.Tagline, "Script", COL.Text, "Tagline", 0.04, 0.76, 0.92, 0.17)
-	gui.Parent = board
-end
-
-----------------------------------------------------------------------
--- Portal gates
+-- Portal gates (Model Portal_<Id>)
 ----------------------------------------------------------------------
 
 local MAX_STARS = 5
+local gateBoxCache = nil
 
-local function buildPortal(root, rng, diff, angleDeg)
-	local f = newFolder(root, "Portal_" .. diff.Id)
-	local a = math.rad(angleDeg)
-	local outward = Vector3.new(math.cos(a), 0, math.sin(a))
-	local tangent = Vector3.new(-math.sin(a), 0, math.cos(a))
-	local color = diff.Color
-	local pale = color:Lerp(COL.Top, 0.45)
-	local deep = color:Lerp(COL.Ink, 0.3)
+local function gatePalette(color)
+	return {
+		Stone = C.StoneLight,
+		StoneDark = C.Stone,
+		Frame = C.CloudLight,
+		Puff = C.Cloud,
+		Trim = color,
+		Glow = { Color = color, Material = MAT.Neon },
+		Swirl = { Color = color:Lerp(rgb(255, 255, 255), 0.35), Material = MAT.Neon, Transparency = 0.62 },
+		Gem = { Color = C.Gold, Material = MAT.Neon },
+	}
+end
 
-	----------------------------------------------------------------
-	-- Pad (the party "ready pad") + invisible Zone
-	----------------------------------------------------------------
-	local padGround = polar(angleDeg, PORTAL_R, TOP)
-	local padCF = CFrame.lookAt(padGround, padGround - outward)
-
-	local plate = block(f, padCF * CFrame.new(0, 0.2, 0), Vector3.new(14, 0.4, 14), {
-		Name = "PadPlate",
-		Color = pale,
-	})
-	local edgeProps = { Name = "PadEdge", Color = color, Material = MAT.Neon, CanCollide = false }
-	block(f, padCF * CFrame.new(0, 0.42, -6.75), Vector3.new(14, 0.14, 0.5), edgeProps)
-	block(f, padCF * CFrame.new(0, 0.42, 6.75), Vector3.new(14, 0.14, 0.5), edgeProps)
-	block(f, padCF * CFrame.new(-6.75, 0.42, 0), Vector3.new(0.5, 0.14, 14), edgeProps)
-	block(f, padCF * CFrame.new(6.75, 0.42, 0), Vector3.new(0.5, 0.14, 14), edgeProps)
-
-	local emblem = disc(f, padGround + Vector3.new(0, 0.45, 0), 9.5, 0.1, {
-		Name = "PadEmblem",
-		Color = color,
-		Transparency = 0.35,
-		CanCollide = false,
-	})
-	disc(f, padGround + Vector3.new(0, 0.5, 0), 5, 0.1, {
-		Name = "PadEmblemCore",
-		Color = COL.Top,
-		Transparency = 0.5,
-		CanCollide = false,
-	})
-	emitter(plate, {
-		Color = ColorSequence.new(color, pale),
-		Rate = 5,
-		Lifetime = NumberRange.new(1.8, 2.8),
-		Speed = NumberRange.new(2, 4),
-		Size = popSize(0.6),
-	})
-
-	-- Four little glowing pylons mark the pad corners.
-	for _, sx in ipairs({ -1, 1 }) do
-		for _, sz in ipairs({ -1, 1 }) do
-			local corner = (padCF * CFrame.new(sx * 7.2, 0, sz * 7.2)).Position
-			disc(f, corner + Vector3.new(0, 1.2, 0), 0.8, 2.4, { Name = "PadPylon", Color = COL.Puff })
-			ball(f, corner + Vector3.new(0, 2.8, 0), 1.4, {
-				Name = "PadPylonGlow",
-				Color = color,
-				Material = MAT.Neon,
-				CanCollide = false,
-			})
-		end
+-- The gate is sculpted and merged once; every portal builds the same boxes with its own palette.
+local function gateBoxes()
+	if gateBoxCache then
+		return gateBoxCache
 	end
-
-	-- Invisible detection zone: 14 x 6 x 14, floor flush with the pad surface.
-	local zonePos = padGround + Vector3.new(0, 3.4, 0)
-	local zone = block(f, CFrame.lookAt(zonePos, zonePos - outward), Vector3.new(14, 6, 14), {
-		Name = "Zone_" .. diff.Id,
-		Transparency = 1,
-		CanCollide = false,
+	local g = Voxel.NewGrid(24)
+	VX.RoundRect(g, 0, 0, 22, 5, 1.5, 0, 0, "StoneDark")
+	VX.RoundRect(g, 0, 0, 20, 4, 1.2, 1, 1, "Stone")
+	for _, s in ipairs({ -1, 1 }) do
+		VX.RoundRect(g, s * 9, 0, 3, 3.4, 0.8, 2, 10, "Stone")
+		VX.RoundRect(g, s * 9, 0, 4, 4.2, 1, 11, 11, "Trim")
+		VX.Fill(g, s * 9, s * 9, 12, 13, 0, 0, "Glow")
+		VX.Fill(g, s * 9, s * 9, 3, 3, -2, -2, "Trim")
+	end
+	local ringRot = CFrame.Angles(math.pi / 2, 0, 0)
+	Voxel.Shape(g, { Kind = "Torus", Center = { 0, 11, 0 }, Radius = 7.6, Thickness = 1.6, Rotation = ringRot, Key = "Frame" })
+	Voxel.Shape(g, { Kind = "Torus", Center = { 0, 11, 0 }, Radius = 5.9, Thickness = 0.5, Rotation = ringRot, Key = "Glow" })
+	Voxel.Shape(g, { Kind = "Ellipsoid", Center = { 0, 11, 0 }, Radius = { 5.3, 5.3, 0.2 }, Key = "Swirl", KeepExisting = true })
+	-- the outer band of the frame takes the difficulty colour
+	Voxel.Shape(g, {
+		Kind = "Torus",
+		Center = { 0, 11, 0 },
+		Radius = 7.6,
+		Thickness = 2.2,
+		Rotation = ringRot,
+		Op = "Paint",
+		OnlyKeys = { Frame = true },
+		Key = "Trim",
+		Pattern = function(x, y, z)
+			local dy = y - 11
+			if math.sqrt(x * x + dy * dy) >= 8.6 then
+				return "Trim"
+			end
+			return false
+		end,
 	})
-	zone:SetAttribute("PortalId", diff.Id)
-
-	later(function()
-		loopTween(emblem, 1.7, { Transparency = 0.72 }, Enum.EasingStyle.Sine, true)
-	end)
-
-	----------------------------------------------------------------
-	-- Gate: neon ring + puffy cloud frame + swirling energy
-	----------------------------------------------------------------
-	local ringY = 9.4
-	local ringR = 7.6
-	local gateGround = padGround + outward * 8.5
-	local gateCenter = gateGround + Vector3.new(0, ringY, 0)
-	local gateCF = CFrame.lookAt(gateCenter, gateCenter - outward)
-
-	local ringSegs = 20
-	local segLen = 2 * ringR * math.sin(math.pi / ringSegs) * 1.12
-	for k = 0, ringSegs - 1 do
-		local phi = (k + 0.5) * (math.pi * 2 / ringSegs)
-		local segColor = color
-		if k % 2 == 1 then
-			segColor = color:Lerp(COL.Top, 0.3)
-		end
-		block(f, gateCF * CFrame.new(math.cos(phi) * ringR, math.sin(phi) * ringR, 0) * CFrame.Angles(0, 0, phi + math.pi / 2), Vector3.new(segLen, 1.0, 1.6), {
-			Name = "GateRing",
-			Color = segColor,
-			Material = MAT.Neon,
-			CanCollide = false,
-		})
-	end
-
-	local frameCount = 10
-	for k = 0, frameCount - 1 do
-		local phi = (k + rng:Float(-0.2, 0.2)) * (math.pi * 2 / frameCount)
-		local fr = ringR + 1.9
-		local puffPos = (gateCF * CFrame.new(math.cos(phi) * fr, math.sin(phi) * fr, rng:Float(-0.3, 0.3))).Position
-		ball(f, puffPos, rng:Float(2.7, 3.4), {
-			Name = "GateCloud",
-			Color = COL.Puff:Lerp(pale, rng:Float(0, 0.3)),
-			CanCollide = false,
-		})
-	end
-
-	-- Swirl: translucent energy discs facing the plaza + three rotating sparkle arms.
-	local faceCF = gateCF * CFrame.Angles(0, math.rad(90), 0)
-	local swirl = mk(f, {
-		Name = "GateSwirl",
-		Shape = Enum.PartType.Cylinder,
-		Size = Vector3.new(0.3, 14.8, 14.8),
-		CFrame = faceCF,
-		Color = deep,
-		Material = MAT.Neon,
-		Transparency = 0.74,
-		CanCollide = false,
+	-- keystone with a gold gem facing the plaza
+	VX.RoundRect(g, 0, 0, 4, 3, 0.8, 19, 20, "Trim")
+	Voxel.Set(g, 0, 20, -2, "Gem")
+	Voxel.Set(g, 0, 19, -2, "Gem")
+	Voxel.Shade(g, { Skip = { Glow = true, Swirl = true, Gem = true }, Smooth = 1, Seed = 8 })
+	-- LOD folds shade variants only (Keep: the coloured keys differ per portal)
+	gateBoxCache = Voxel.Merge(g, {
+		Palette = gatePalette(rgb(120, 180, 140)),
+		MaxParts = 105,
+		Keep = { "Stone", "StoneDark", "Frame", "Trim", "Glow", "Swirl", "Gem" },
 	})
-	mk(f, {
-		Name = "GateSwirlCore",
-		Shape = Enum.PartType.Cylinder,
-		Size = Vector3.new(0.3, 9.5, 9.5),
-		CFrame = faceCF,
-		Color = color,
-		Material = MAT.Neon,
-		Transparency = 0.72,
-		CanCollide = false,
-	})
-	local glow = pointLight(swirl, color, 1.2, 30)
-	emitter(swirl, {
-		Color = ColorSequence.new(pale, color),
-		Rate = 8,
-		Lifetime = NumberRange.new(1.5, 2.5),
-		Speed = NumberRange.new(0.3, 0.9),
-		Size = popSize(1.0),
-	})
+	return gateBoxCache
+end
 
-	local arm = anchorPart(f, "SwirlArm", gateCenter, Vector3.new(1, 1, 1))
-	arm.CFrame = gateCF
-	for k = 0, 2 do
-		local ang = k * (math.pi * 2 / 3)
-		local att = Instance.new("Attachment")
-		att.Position = Vector3.new(math.cos(ang) * 5.4, math.sin(ang) * 5.4, 0)
-		att.Parent = arm
-		emitter(att, {
-			Color = ColorSequence.new(pale, color),
-			Rate = 12,
-			Lifetime = NumberRange.new(1.3, 1.9),
-			Speed = NumberRange.new(0, 0.4),
-			Size = popSize(1.3),
-			RotSpeed = NumberRange.new(-90, 90),
-		})
-	end
-
-	later(function()
-		-- 3-fold symmetric arms: turning 120 degrees and restarting is visually seamless.
-		loopTween(arm, 1.8, { CFrame = gateCF * CFrame.Angles(0, 0, math.rad(120)) }, Enum.EasingStyle.Linear, false)
-		loopTween(swirl, 2.2, { Transparency = 0.86 }, Enum.EasingStyle.Sine, true)
-		loopTween(glow, 2.2, { Brightness = 2.0 }, Enum.EasingStyle.Sine, true)
-	end)
-
-	-- Star row above the ring: a gold diamond per star, dim stone ones up to the maximum.
-	local stars = clamp(diff.Stars or 1, 0, MAX_STARS)
-	for s = 1, MAX_STARS do
-		local gx = ((MAX_STARS + 1) / 2 - s) * 3.2 -- gate +X is the viewer's left: lit stars first
-		local lit = s <= stars
-		local gemColor = COL.StarOff
-		local gemMat = MAT.SmoothPlastic
-		if lit then
-			gemColor = COL.Gold
-			gemMat = MAT.Neon
-		end
-		block(f, gateCF * CFrame.new(gx, ringR + 3.4, 0) * CFrame.Angles(0, 0, math.rad(45)), Vector3.new(1.7, 1.7, 0.8), {
-			Name = lit and "DifficultyGem" or "DifficultyGemOff",
-			Color = gemColor,
-			Material = gemMat,
-			CanCollide = false,
-		})
-	end
-
-	-- Cloud pillars flanking the gate, each topped with a glowing lantern in the portal colour.
-	for _, side in ipairs({ -1, 1 }) do
-		local base = gateGround + tangent * (12.4 * side)
-		ball(f, base + Vector3.new(0, 3.0, 0), 6.4, { Name = "PillarPuff", Color = COL.Puff })
-		ball(f, base + Vector3.new(0, 7.2, 0), 5.0, { Name = "PillarPuff", Color = COL.Puff, CanCollide = false })
-		ball(f, base + Vector3.new(0, 10.3, 0), 3.8, { Name = "PillarPuff", Color = COL.Puff:Lerp(pale, 0.3), CanCollide = false })
-		ball(f, base + Vector3.new(0, 12.9, 0), 1.8, {
-			Name = "PillarGlow",
-			Color = color,
-			Material = MAT.Neon,
-			CanCollide = false,
-		})
-	end
-
-	----------------------------------------------------------------
-	-- Billboard: title, stars, player count, status, blurb
-	----------------------------------------------------------------
-	local cardW, cardH = 24, 15
-	local anchor = anchorPart(
-		f,
-		"BillboardAnchor",
-		gateCenter + Vector3.new(0, ringR + 3.4 + 1.2 + 1.2 + cardH / 2, 0),
-		Vector3.new(1, 1, 1)
-	)
-	local gui = newBillboard(anchor, cardW, cardH, 0, 230)
-	gui.Name = "PortalBillboard"
-
-	local card = cardPanel(gui, color, 0.16)
-	local titleLabel = fitLabel(card, diff.DisplayName or diff.Id, "Title", color:Lerp(COL.Text, 0.35), "TitleLabel", 0.04, 0.03, 0.92, 0.25)
-
-	local starLabel = fitLabel(card, "", "Heading", COL.TextGold, "StarLabel", 0.04, 0.29, 0.92, 0.12)
+-- The portal's pixel tag (World text rule): name, stars + "0/4 players", a status pill. Returns the PortalInfo
+-- GUI fields (Billboard + the four labels); PortalService rebuilds the same tag with the live party state.
+local function portalTag(anchor, diff, stars, lift)
+	local color = diff.Color or C.TextGold
+	local gui = newTag(anchor, "PortalBillboard", 380, 150, lift, 120)
+	local plate = tagPlate(gui, color:Lerp(C.Text, 0.15), 200, nil, 3)
+	local title = tagText(plate, "TitleLabel", diff.DisplayName or diff.Id, "Title", 32, color:Lerp(C.Text, 0.6), 1)
+	local row = plainFrame(plate, "InfoRow", { AutomaticSize = Enum.AutomaticSize.XY, LayoutOrder = 2 })
+	listLayout(row, Enum.FillDirection.Horizontal, 12)
+	local starLabel = tagText(row, "StarLabel", "", "Heading", 21, C.TextGold, 1)
 	starLabel.RichText = true
 	starLabel.Text = starRow(stars, MAX_STARS)
-
-	local countLabel = fitLabel(card, "0 / " .. tostring(Config.Match.MaxPlayers) .. " players", "Display", COL.Text, "CountLabel", 0.04, 0.43, 0.92, 0.19)
-	local statusLabel = fitLabel(card, "Waiting for players" .. ELLIPSIS, "Body", COL.TextGold, "StatusLabel", 0.04, 0.63, 0.92, 0.15)
-	fitLabel(card, diff.Blurb or "", "Script", COL.TextDim, "BlurbLabel", 0.05, 0.8, 0.9, 0.15)
-
+	local countLabel = tagText(row, "CountLabel", "0/" .. tostring(Config.Match.MaxPlayers) .. " players", "Heading", 21, C.Text, 2)
+	local _, statusLabel = tagPill(plate, "StatusPill", "Step in to play", "Display", 24, color:Lerp(C.Navy, 0.25), 3)
+	statusLabel.Name = "StatusLabel"
 	return {
-		Id = diff.Id,
-		Zone = zone,
-		Center = zone.Position,
 		Billboard = gui,
-		TitleLabel = titleLabel,
+		TitleLabel = title,
 		CountLabel = countLabel,
 		StatusLabel = statusLabel,
 		StarLabel = starLabel,
 	}
 end
 
--- Bare-minimum portal used only if the full builder above ever throws: the gameplay contract
--- (zone + labels) must survive even when the scenery does not.
-local function fallbackPortal(root, diff, angleDeg)
-	local f = newFolder(root, "PortalFallback_" .. diff.Id)
-	local ground = polar(angleDeg, PORTAL_R, TOP)
-	local zone = block(f, CFrame.new(ground + Vector3.new(0, 3.4, 0)), Vector3.new(14, 6, 14), {
-		Name = "Zone_" .. diff.Id,
+local function buildPortal(parent, diff, angleDeg)
+	local model = newModel(parent, "Portal_" .. diff.Id)
+	local outward = dirOf(angleDeg)
+	local color = diff.Color
+	local padGround = polar(angleDeg, PORTAL_R, TOP)
+	local padCF = flatLook(padGround, padGround - outward) -- local -Z = towards the plaza centre
+
+	-- Ready pad: a tiled 14 x 14 voxel plate, 0.3 above the promenade.
+	local pg = Voxel.NewGrid(14)
+	for i = -7, 6 do
+		for k = -7, 6 do
+			local ring = math.min(i + 7, 6 - i, k + 7, 6 - k)
+			local di = math.abs(i + 0.5) + math.abs(k + 0.5)
+			local key = "Stone"
+			if ring == 0 then
+				key = "Trim"
+			elseif ring == 1 then
+				key = "StoneLight"
+			elseif di <= 2.5 then
+				key = "Glow"
+			end
+			Voxel.Set(pg, i, 0, k, key)
+		end
+	end
+	local pad = VX.Build(pg, {
+		V = 1,
+		Name = "Pad",
+		CF = padCF * CFrame.new(0.5, 0.3 - 0.5, 0.5),
+		Collide = true,
+		Parent = model,
+		Pal = {
+			Stone = C.Stone,
+			StoneLight = C.StoneLight,
+			Trim = color,
+			TrimSoft = color:Lerp(C.StoneLight, 0.55),
+			Glow = { Color = color, Material = MAT.Neon },
+		},
+	})
+	if pad and pad.PrimaryPart then
+		model.PrimaryPart = pad.PrimaryPart
+	end
+
+	-- Invisible detection zone: 14 x 6 x 14, floor flush with the pad surface.
+	local zonePos = padGround + Vector3.new(0, 0.3 + 3, 0)
+	local zone = box(model, "Zone_" .. diff.Id, flatLook(zonePos, zonePos - outward), Vector3.new(14, 6, 14), color, {
 		Transparency = 1,
-		CanCollide = false,
+		Shadow = false,
 	})
 	zone:SetAttribute("PortalId", diff.Id)
-	block(f, CFrame.new(ground + Vector3.new(0, 0.2, 0)), Vector3.new(14, 0.4, 14), { Name = "PadPlate", Color = diff.Color })
-	local anchor = anchorPart(f, "BillboardAnchor", ground + Vector3.new(0, 14, 0))
-	local gui = newBillboard(anchor, 20, 9, 0, 200)
-	local card = cardPanel(gui, diff.Color, 0.2)
-	local titleLabel = fitLabel(card, diff.DisplayName or diff.Id, "Title", COL.Text, "TitleLabel", 0.04, 0.04, 0.92, 0.36)
-	local countLabel = fitLabel(card, "0 / " .. tostring(Config.Match.MaxPlayers) .. " players", "Display", COL.Text, "CountLabel", 0.04, 0.42, 0.92, 0.3)
-	local statusLabel = fitLabel(card, "Waiting for players" .. ELLIPSIS, "Body", COL.TextGold, "StatusLabel", 0.04, 0.74, 0.92, 0.22)
-	return {
-		Id = diff.Id,
-		Zone = zone,
-		Center = zone.Position,
-		Billboard = gui,
-		TitleLabel = titleLabel,
-		CountLabel = countLabel,
-		StatusLabel = statusLabel,
-	}
-end
 
-----------------------------------------------------------------------
--- Roads: ring road, spokes, shop neck, spot ramps
-----------------------------------------------------------------------
+	-- Lanterns on the two front corners of the pad.
+	for _, sx in ipairs({ -1, 1 }) do
+		local base = padCF * CFrame.new(sx * 7.9, 0, -7.9)
+		box(model, "LanternPost", base * CFrame.new(0, 1.6, 0), Vector3.new(0.7, 3.2, 0.7), C.Iron, { Collide = true })
+		box(model, "LanternCap", base * CFrame.new(0, 3.35, 0), Vector3.new(1.1, 0.3, 1.1), C.Iron)
+		box(model, "LanternGlow", base * CFrame.new(0, 3.95, 0), Vector3.new(0.9, 0.9, 0.9), color, { Material = MAT.Neon })
+	end
 
-local RING_TOP = TOP - 0.16 -- ring road surface (below every surface it docks into)
-local SPOKE_TOP = TOP - 0.08 -- spokes and the shop neck sit between plaza and ring
-
-local function spotDy(index)
-	return SPOT_DY[(index - 1) % #SPOT_DY + 1]
-end
-
--- A cloud walkway between two top-surface points: sand-coloured plank + soft cloud body underneath.
-local function walkway(parent, a, b, width, name, bodyDrop)
-	slab(parent, a, b, width, 1.2, { Name = name, Color = COL.Path })
-	local drop = Vector3.new(0, 1.2, 0)
-	slab(parent, a - drop, b - drop, math.max(2, width - 3), bodyDrop or 2.4, {
-		Name = name .. "Body",
-		Color = COL.Side,
-		CanCollide = false,
+	-- Gate behind the pad (sculpted voxels in the difficulty colour).
+	local gateBase = padGround + outward * 9.5
+	local gateCF = flatLook(gateBase, gateBase - outward)
+	local gate = Instance.new("Model")
+	gate.Name = "Gate"
+	Voxel.BuildBoxes(gateBoxes(), {
+		VoxelSize = 1,
+		Palette = gatePalette(color),
+		CFrame = gateCF * CFrame.new(0, 0.5, 0),
+		Model = gate,
+		CanCollide = true,
+		CanQuery = true,
 	})
-end
+	for _, d in ipairs(gate:GetChildren()) do
+		if d:IsA("BasePart") and (d.Name == "Swirl" or d.Name == "Puff" or d.Name == "Gem") then
+			d.CanCollide = false
+			d.CanQuery = false
+		end
+	end
+	gate.Parent = model
 
-local function buildRoads(root, L)
-	local f = newFolder(root, "Roads")
-	local rng = Util.NewRng(SEED + 3)
-	local ringR = L.RingR
+	-- Swirl light + sparkles drifting out towards the pad.
+	local core = box(model, "SwirlCore", gateCF * CFrame.new(0, 11.5, 0), Vector3.new(9, 9, 0.4), color, { Transparency = 1, Shadow = false })
+	pointLight(core, color, 1.3, 28)
+	emitter(core, {
+		Color = ColorSequence.new(color:Lerp(rgb(255, 255, 255), 0.5), color),
+		Rate = 12,
+		Lifetime = NumberRange.new(1.4, 2.2),
+		Speed = NumberRange.new(1.5, 3.5),
+		EmissionDirection = Enum.NormalId.Front,
+		SpreadAngle = Vector2.new(30, 30),
+		Size = popSize(0.9),
+	})
 
-	-- Ring road: short flat planks following the circle; both ends dock INTO the shop island.
-	local arc = L.RingTo - L.RingFrom
-	local segCount = math.max(1, math.ceil(arc / 7.5))
-	local segStep = arc / segCount
-	local len = 2 * ringR * math.sin(math.rad(segStep / 2)) + 1.8
-	for i = 0, segCount - 1 do
-		local theta = L.RingFrom + (i + 0.5) * segStep
-		local a = math.rad(theta)
-		local centre = polar(theta, ringR, RING_TOP)
-		local tangent = Vector3.new(-math.sin(a), 0, math.cos(a))
-		local radial = Vector3.new(math.cos(a), 0, math.sin(a))
-		slab(f, centre - tangent * (len / 2), centre + tangent * (len / 2), ROAD_W, 1.2, {
-			Name = "RingRoad",
-			Color = COL.Path,
+	-- Star gems above the keystone: lit gold for the difficulty, dim stone up to five, set on a gold crest bar
+	-- that a short post carries from the keystone (the keystone's top is 21 studs up)
+	local stars = clamp(diff.Stars or 1, 0, MAX_STARS)
+	box(model, "StarPost", gateCF * CFrame.new(0, 21.6, 0), Vector3.new(0.8, 1.3, 0.6), C.GoldDark, { Shadow = false })
+	box(model, "StarBar", gateCF * CFrame.new(0, 22.45, 0), Vector3.new((MAX_STARS - 1) * 2.6 + 1.2, 0.5, 0.5), C.GoldDark, { Shadow = false })
+	for s = 1, MAX_STARS do
+		local gx = ((MAX_STARS + 1) / 2 - s) * 2.6 -- gate +X is the viewer's left: lit stars first
+		local lit = s <= stars
+		box(model, lit and "StarGem" or "StarGemOff", gateCF * CFrame.new(gx, 23.6, 0) * CFrame.Angles(0, 0, math.rad(45)), Vector3.new(1.5, 1.5, 0.8), lit and C.Gold or C.StarOff, {
+			Material = lit and MAT.Neon or MAT.SmoothPlastic,
+			Shadow = false,
 		})
-		local bodyPos = centre - Vector3.new(0, 2.6, 0)
-		block(f, CFrame.lookAt(bodyPos, bodyPos + tangent), Vector3.new(ROAD_W - 3, 2.8, len), {
-			Name = "RingBody",
-			Color = COL.Side,
-			CanCollide = false,
-		})
-		-- One soft puff per plank, alternating inner / outer edge (skipped where the road runs
-		-- underneath the shop island, so no puff pokes through the shop floor).
-		local side = 1
-		if i % 2 == 1 then
-			side = -1
-		end
-		local puffPos = centre + radial * (side * (ROAD_W / 2 - 0.6)) - Vector3.new(0, 1.9, 0)
-		local puffSize = rng:Float(4.2, 6)
-		local sdx = puffPos.X - L.ShopCenter.X
-		local sdz = puffPos.Z - L.ShopCenter.Z
-		local clearOfShop = L.ShopR + puffSize * 0.5 + 1
-		if sdx * sdx + sdz * sdz > clearOfShop * clearOfShop then
-			ball(f, puffPos, puffSize, {
-				Name = "RingPuff",
-				Color = COL.Puff:Lerp(COL.Side, rng:Float(0, 0.4)),
-				CanCollide = false,
-			})
-		end
 	end
 
-	-- Lamp posts on the ring road, between the spot ramps.
-	for j = 1, #L.SpotAngles - 1 do
-		local mid = (L.SpotAngles[j] + L.SpotAngles[j + 1]) / 2
-		local side = 1
-		if j % 2 == 0 then
-			side = -1
-		end
-		lampPost(f, polar(mid, ringR + side * (ROAD_W / 2 - 0.9), RING_TOP), j % 3 == 0)
-	end
+	-- Billboard: a pixel tag above the star gems (PortalService rebuilds it with the live party state).
+	local cardH = 15
+	local anchor = anchorPart(model, "BillboardAnchor", gateBase + Vector3.new(0, 25.2 + cardH / 2, 0))
+	local tag = portalTag(anchor, diff, stars, 1.2 - cardH / 2) -- bottom edge 26.4 studs up, just over the gems
+	tag.Id = diff.Id
+	tag.Zone = zone
+	tag.Center = zone.Position
+	tag.Model = model
+	return tag
+end
 
-	-- Spokes: plaza rim -> ring road (between the portals, so nothing blocks them).
-	for _, deg in ipairs(L.SpokeAngles) do
-		local p0 = polar(deg, SURF_R - 6, SPOKE_TOP)
-		local p1 = polar(deg, ringR, SPOKE_TOP)
-		walkway(f, p0, p1, SPOKE_W, "Spoke")
-		local dir = p1 - p0
-		local perp = perpendicular(dir)
-		for k = 1, 4 do
-			local t = 0.14 + (k - 1) * 0.2
-			for _, s in ipairs({ -1, 1 }) do
-				ball(f, p0 + dir * t + perp * (s * (SPOKE_W / 2 - 0.2)) - Vector3.new(0, 1.3 + rng:Float(0, 0.6), 0), rng:Float(3.2, 4.6), {
-					Name = "SpokePuff",
-					Color = COL.Puff:Lerp(COL.Side, rng:Float(0, 0.4)),
-					CanCollide = false,
-				})
-			end
-		end
-		-- A lantern on each side where the spoke leaves the plaza.
-		local gate = polar(deg, SURF_R + 3, SPOKE_TOP)
-		lampPost(f, gate + perp * (SPOKE_W / 2 - 0.8), false)
-		lampPost(f, gate - perp * (SPOKE_W / 2 - 0.8), false)
+-- Bare-minimum portal used only if the full builder throws: the gameplay contract (zone + labels) must
+-- survive even when the scenery does not.
+local function fallbackPortal(parent, diff, angleDeg)
+	local old = parent:FindFirstChild("Portal_" .. diff.Id)
+	if old then
+		old:Destroy()
 	end
-
-	-- Ramp from the ring road up (or down) to every spot island.
-	for i, deg in ipairs(L.SpotAngles) do
-		local dy = spotDy(i)
-		local p0 = polar(deg, ringR + 3, RING_TOP + 0.06)
-		local p1 = polar(deg, SPOT_R - L.IslandR + 2.5, TOP + dy - 0.08)
-		walkway(f, p0, p1, SPUR_W, "SpotRamp", 2.2)
-		local dir = p1 - p0
-		local perp = perpendicular(dir)
-		for _, s in ipairs({ -1, 1 }) do
-			ball(f, p0 + dir * 0.5 + perp * (s * (SPUR_W / 2 - 0.2)) - Vector3.new(0, 1.3, 0), rng:Float(2.8, 3.8), {
-				Name = "RampPuff",
-				Color = COL.Puff:Lerp(COL.Side, rng:Float(0, 0.4)),
-				CanCollide = false,
-			})
-		end
-	end
+	local model = newModel(parent, "Portal_" .. diff.Id)
+	local ground = polar(angleDeg, PORTAL_R, TOP)
+	local zone = box(model, "Zone_" .. diff.Id, CFrame.new(ground + Vector3.new(0, 3.3, 0)), Vector3.new(14, 6, 14), diff.Color, { Transparency = 1, Shadow = false })
+	zone:SetAttribute("PortalId", diff.Id)
+	local pad = box(model, "PadPlate", CFrame.new(ground + Vector3.new(0, 0, 0)), Vector3.new(14, 0.6, 14), C.Stone, { Collide = true })
+	box(model, "PadGlow", CFrame.new(ground + Vector3.new(0, 0.35, 0)), Vector3.new(4, 0.1, 4), diff.Color, { Material = MAT.Neon })
+	model.PrimaryPart = pad
+	local anchor = anchorPart(model, "BillboardAnchor", ground + Vector3.new(0, 14, 0))
+	local tag = portalTag(anchor, diff, clamp(diff.Stars or 1, 0, MAX_STARS), 0)
+	tag.Id = diff.Id
+	tag.Zone = zone
+	tag.Center = zone.Position
+	tag.Model = model
+	return tag
 end
 
 ----------------------------------------------------------------------
--- Spot islands (one personal cloud home each)
+-- Shop island: four gacha-style roulette machines, the item stall, a rarity board, a token statue
 ----------------------------------------------------------------------
 
-local function buildSpot(parent, index, angle, L)
-	local dy = spotDy(index)
-	local accent = ACCENTS[(index - 1) % #ACCENTS + 1]
-	local f = newFolder(parent, string.format("Spot_%02d", index))
-	local rng = Util.NewRng(SEED + 200 + index)
-	local R = L.IslandR
-	local a = math.rad(angle)
-	local out = Vector3.new(math.cos(a), 0, math.sin(a))
-	local c = polar(angle, SPOT_R, TOP + dy) -- centre of the island's walking surface
-	local base = CFrame.lookAt(c, c + out) -- local -Z points away from the plaza
-
-	-- Position / CFrame in island-local terms: x across, y up, depth = studs away from the plaza.
-	local function at(x, y, depth)
-		return (base * CFrame.new(x, y, -depth)).Position
-	end
-	local function frame(x, y, depth)
-		return base * CFrame.new(x, y, -depth)
-	end
-
-	-- Island body.
-	local topPart = disc(f, c - Vector3.new(0, 1.5, 0), R * 2, 3, {
-		Name = "SpotTop",
-		Color = COL.Top:Lerp(accent, 0.1),
-		CastShadow = true,
-	})
-	islandBody(f, rng, c, R, 3, accent, 2)
-	rimPuffs(f, rng, c, R - 0.4, 7, 5, 8, 0.2, 0.9, COL.Puff, { angle + 180 }, 40)
-	emitter(topPart, {
-		Color = ColorSequence.new(Color3.fromRGB(236, 224, 150), Color3.fromRGB(176, 228, 160)),
-		Rate = 2,
-		Lifetime = NumberRange.new(5, 8),
-		Speed = NumberRange.new(0.3, 1),
-		SpreadAngle = Vector2.new(180, 180),
-		Size = popSize(0.4),
-	})
-
-	-- Home pad: this is where the owner stands and respawns.
-	disc(f, at(0, 0.12, -1), 13.8, 0.24, { Name = "HomePadRing", Color = accent, CanCollide = false })
-	disc(f, at(0, 0.25, -1), 13, 0.5, { Name = "HomePad", Color = COL.Top:Lerp(accent, 0.4) })
-	disc(f, at(0, 0.54, -1), 9.6, 0.08, { Name = "HomePadInner", Color = COL.Top:Lerp(accent, 0.65), CanCollide = false })
-	cushion(f, at(3.4, 0.5, -4), 2.8, accent:Lerp(COL.Top, 0.45))
-	cushion(f, at(-3.9, 0.5, -3.2), 2.4, accent:Lerp(COL.Top, 0.55))
-
-	-- Showcase podium for the owner's best pet.
-	local podiumTop = at(0, 2.3, 9)
-	disc(f, at(0, 0.9, 9), 6.6, 1.8, { Name = "PodiumBase", Color = COL.Side })
-	disc(f, at(0, 1.9, 9), 6.4, 0.2, { Name = "PodiumGlow", Color = accent, Material = MAT.Neon, CanCollide = false })
-	local podiumCap = disc(f, at(0, 2.05, 9), 5.6, 0.5, { Name = "PodiumTop", Color = COL.Top:Lerp(accent, 0.25) })
-	emitter(podiumCap, {
-		Color = ColorSequence.new(accent:Lerp(COL.Top, 0.4)),
-		Rate = 3,
-		Lifetime = NumberRange.new(2, 3),
-		Speed = NumberRange.new(1, 2),
-		Size = popSize(0.5),
-		EmissionDirection = DISC_UP,
-	})
-
-	-- Nameplate sign: two posts, a beam, an accent banner and the billboard above.
-	local signDepth = 15
-	for _, s in ipairs({ -1, 1 }) do
-		disc(f, at(s * 7.2, 4.5, signDepth), 0.7, 9, { Name = "SignPost", Color = COL.WoodDark, Material = MAT.Wood })
-		ball(f, at(s * 7.2, 1.0, signDepth), 3.4, { Name = "SignTuft", Color = COL.Puff, CanCollide = false })
-	end
-	block(f, frame(0, 8.8, signDepth), Vector3.new(16.4, 0.7, 0.8), { Name = "SignBeam", Color = COL.Wood, Material = MAT.WoodPlanks })
-	block(f, frame(0, 6.4, signDepth - 0.1), Vector3.new(7, 4, 0.25), { Name = "SignBanner", Color = accent, CanCollide = false })
-
-	local anchor = anchorPart(f, "NameplateAnchor", at(0, 13.2, signDepth), Vector3.new(1, 1, 1))
-	local gui = newBillboard(anchor, 20, 6.4, 0, 150)
-	gui.Name = "Nameplate"
-	local card = cardPanel(gui, accent, 0.14)
-
-	local badge = Instance.new("Frame")
-	badge.Name = "Badge"
-	badge.Position = UDim2.new(0.03, 0, 0.14, 0)
-	badge.Size = UDim2.new(0.16, 0, 0.72, 0)
-	badge.BackgroundColor3 = accent
-	badge.BorderSizePixel = 0
-	local badgeCorner = Instance.new("UICorner")
-	badgeCorner.CornerRadius = UDim.new(0.3, 0)
-	badgeCorner.Parent = badge
-	badge.Parent = card
-	fitLabel(badge, tostring(index), "Display", COL.Ink, "Number", 0.05, 0.1, 0.9, 0.8)
-
-	local nameLabel = fitLabel(card, "Free spot", "Title", COL.Text, "NameLabel", 0.22, 0.06, 0.74, 0.54)
-	local subLabel = fitLabel(card, "Step in to claim", "Body", COL.TextGold, "SubLabel", 0.22, 0.6, 0.74, 0.3)
-
-	-- Cosy corners: bench, lantern, flowers.
-	local padPos = at(0, 0, -1)
-	local benchPos = at(-11, 0, 3)
-	bench(f, CFrame.lookAt(benchPos, Vector3.new(padPos.X, benchPos.Y, padPos.Z)))
-	lampPost(f, at(11.5, 0, 1), true)
-	flowerPatch(f, rng, at(-12, 0, 11), 2.8, 3)
-	flowerPatch(f, rng, at(12.5, 0, 10), 2.8, 3)
-
-	-- Variety: every third home also gets a blossom tree behind the pad.
-	if index % 3 == 0 then
-		lanternTree(f, rng, at(-13.5, 0, -8), 0.9, BLOSSOMS[index % #BLOSSOMS + 1], false)
-	end
-
-	f:SetAttribute("SpotIndex", index)
-	local spawnPos = at(0, 3.7, -1)
-	return {
-		Index = index,
-		Folder = f,
-		Center = c,
-		SpawnCFrame = CFrame.lookAt(spawnPos, Vector3.new(podiumTop.X, spawnPos.Y, podiumTop.Z)),
-		NameLabel = nameLabel,
-		SubLabel = subLabel,
-		PodiumCFrame = CFrame.lookAt(podiumTop, podiumTop + out),
-	}
-end
-
--- Bare-minimum spot (see fallbackPortal): a disc, a podium and the two labels.
-local function fallbackSpot(parent, index, angle, L)
-	local f = newFolder(parent, string.format("SpotFallback_%02d", index))
-	local dy = spotDy(index)
-	local a = math.rad(angle)
-	local out = Vector3.new(math.cos(a), 0, math.sin(a))
-	local c = polar(angle, SPOT_R, TOP + dy)
-	disc(f, c - Vector3.new(0, 1.5, 0), L.IslandR * 2, 3, { Name = "SpotTop", Color = COL.Top })
-	disc(f, c + Vector3.new(0, 1.0, 0) + out * 8, 5, 2, { Name = "PodiumBase", Color = COL.Side })
-	local anchor = anchorPart(f, "NameplateAnchor", c + Vector3.new(0, 12, 0) + out * 12)
-	local gui = newBillboard(anchor, 18, 6, 0, 140)
-	local card = cardPanel(gui, COL.TextGold, 0.2)
-	local nameLabel = fitLabel(card, "Free spot", "Title", COL.Text, "NameLabel", 0.05, 0.06, 0.9, 0.55)
-	local subLabel = fitLabel(card, "Step in to claim", "Body", COL.TextGold, "SubLabel", 0.05, 0.62, 0.9, 0.3)
-	local podiumTop = c + Vector3.new(0, 2.0, 0) + out * 8
-	local spawnPos = c + Vector3.new(0, 3.7, 0) - out * 1
-	return {
-		Index = index,
-		Folder = f,
-		Center = c,
-		SpawnCFrame = CFrame.lookAt(spawnPos, Vector3.new(podiumTop.X, spawnPos.Y, podiumTop.Z)),
-		NameLabel = nameLabel,
-		SubLabel = subLabel,
-		PodiumCFrame = CFrame.lookAt(podiumTop, podiumTop + out),
-	}
-end
-
-----------------------------------------------------------------------
--- Decor islands (small gardens behind the portals)
-----------------------------------------------------------------------
-
-local function buildDecorIsland(parent, spec, angle, seedIndex, L)
-	local f = newFolder(parent, "Decor_" .. spec.Name)
-	local rng = Util.NewRng(SEED + 300 + seedIndex)
-	local R = spec.Radius
-	local dist = L.RingR - ROAD_W / 2 - 5 - R
-	local c = polar(angle, dist, TOP + spec.Dy)
-
-	local topPart = disc(f, c - Vector3.new(0, 2, 0), R * 2, 4, {
-		Name = "IslandTop",
-		Color = COL.Top,
-		CastShadow = true,
-	})
-	islandBody(f, rng, c, R, 4, COL.Dusk, 2)
-	rimPuffs(f, rng, c, R - 0.4, 6, 5, 7, 0.2, 0.9, COL.Puff, { angle }, 24)
-
-	-- Short plank from the ring road's inner edge onto the island.
-	local p0 = polar(angle, L.RingR - 3, RING_TOP + 0.06)
-	local p1 = polar(angle, dist + R - 2.5, TOP + spec.Dy - 0.08)
-	walkway(f, p0, p1, 6, "DecorPlank", 2.0)
-
-	-- Features, kept off the plank's landing.
-	local placer = newPlacer(rng)
-	placer.Reserve(math.cos(math.rad(angle)) * (R - 2), math.sin(math.rad(angle)) * (R - 2), 6)
-	local inner = angle + 180
-	for _, feature in ipairs(spec.Features) do
-		if feature == "Bench" then
-			local x, z = placer.Find(3.6, R * 0.35, R * 0.65, inner - 90, inner + 90)
-			if x then
-				local pos = c + Vector3.new(x, 0, z)
-				bench(f, CFrame.lookAt(pos, pos + Vector3.new(x, 0, z).Unit))
-			end
-		elseif feature == "Tree" then
-			local x, z = placer.Find(4.2, R * 0.3, R * 0.65, 0, 360)
-			if x then
-				lanternTree(f, rng, c + Vector3.new(x, 0, z), rng:Float(0.9, 1.1), rng:Pick(BLOSSOMS), true)
-			end
-		elseif feature == "Pond" then
-			local x, z = placer.Find(5.4, 0, R * 0.4, 0, 360)
-			if x then
-				pond(f, rng, c + Vector3.new(x, 0, z), rng:Float(3.2, 3.8))
-			end
-		elseif feature == "Flowers" then
-			local x, z = placer.Find(4.2, R * 0.2, R * 0.7, 0, 360)
-			if x then
-				flowerPatch(f, rng, c + Vector3.new(x, 0, z), 3.4, 4)
-			end
-		elseif feature == "Tokens" then
-			local x, z = placer.Find(6.5, 0, R * 0.2, 0, 360)
-			if x then
-				tokenShowcase(f, c + Vector3.new(x, 0, z))
-			end
-		elseif feature == "Crystals" then
-			local x, z = placer.Find(5, 0, R * 0.3, 0, 360)
-			if x then
-				crystalCluster(f, rng, c + Vector3.new(x, 0, z))
-			end
-		elseif feature == "Lanterns" then
-			for _ = 1, 2 do
-				local x, z = placer.Find(1.5, R * 0.35, R * 0.7, 0, 360)
-				if x then
-					lampPost(f, c + Vector3.new(x, 0, z), true)
-				end
-			end
-		elseif feature == "Telescope" then
-			local x, z = placer.Find(2.5, R * 0.4, R * 0.7, inner - 70, inner + 70)
-			if x then
-				telescope(f, c + Vector3.new(x, 0, z), Vector3.new(x, 0, z))
-			end
-		end
-	end
-
-	-- topPart's centre is 2 below the walking surface, so 22 puts the tag's centre 20 studs above it: its
-	-- bottom edge (18.2) clears the tallest blossom crown (about 14.2) instead of sitting inside the canopy.
-	nameTag(topPart, spec.Name, 22, 110)
-end
-
-----------------------------------------------------------------------
--- Shop island: four roulette machines, the item stall, a rarity guide
-----------------------------------------------------------------------
-
--- Size (studs) of the name + price card floating above every roulette machine; the machines are
--- spaced from MACHINE_CARD_W so neighbouring cards never overlap.
+-- Size (studs) of the name + price card floating above every roulette machine.
 local MACHINE_CARD_W = 14
 local MACHINE_CARD_H = 7.6
+local machineBoxCache = nil
+
+-- Pixel tag of a roulette machine: the name in the roulette colour + a gold price. The machines stand ~15 studs
+-- apart, so the tags hide beyond 60 studs (constant-size tags of neighbours would overlap on screen from afar).
+local function machineTag(anchor, roulette, lift)
+	local color = roulette.Color or C.Rose
+	local gui = newTag(anchor, "PriceBillboard", 320, 110, lift, 60)
+	local plate = tagPlate(gui, color, 160)
+	tagText(plate, "NameLabel", roulette.DisplayName or roulette.Id, "Title", 26, color:Lerp(C.Text, 0.55), 1)
+	tagText(plate, "PriceLabel", priceText(roulette.Price or 0), "Display", 24, C.TextGold, 2)
+	return gui
+end
 
 -- Rarities (in Config order) that a roulette can actually pay out.
 local function oddsRarities(roulette)
@@ -2230,510 +2217,1181 @@ local function oddsRarities(roulette)
 	return list
 end
 
--- A chunky roulette machine. `cf` sits on the ground; its LookVector points at the customer.
--- Returns { Id, PromptPart, Center, Model }.
+local function machinePalette(roulette)
+	local color = roulette.Color or C.Rose
+	local pal = {
+		Base = C.Iron,
+		Body = color,
+		Trim = C.Gold,
+		Seg1 = color:Lerp(rgb(255, 255, 255), 0.45),
+		Seg2 = C.Cream,
+		Rim = C.GoldDark,
+		Hub = C.Gold,
+		Dark = rgb(42, 46, 70),
+		Glass = { Color = rgb(214, 236, 255), Material = MAT.Glass, Transparency = 0.55 },
+		Bulb = { Color = C.Lamp, Material = MAT.Neon },
+		Knob = rgb(236, 88, 100),
+		Iron = C.IronLight,
+	}
+	local rarities = oddsRarities(roulette)
+	for i = 1, 4 do
+		local r = rarities[(i - 1) % math.max(1, #rarities) + 1]
+		pal["Egg" .. i] = (r and r.Color) or color
+	end
+	return pal
+end
+
+-- The machine is sculpted and merged once; each roulette builds it with its own colours. Front = -Z.
+-- Two resolutions: the cabinet, wheel and lever in fine half-stud voxels, the glass dome in 1-stud voxels
+-- (translucent voxels cannot hide behind each other, so a coarse dome keeps the part count sane).
+local function machineBoxes()
+	if machineBoxCache then
+		return machineBoxCache
+	end
+	local g = Voxel.NewGrid(28)
+	VX.RoundRect(g, 0, 0, 18, 14, 3, 0, 1, "Base")
+	VX.RoundRect(g, 0, 0, 15, 11, 2, 2, 2, "Trim")
+	VX.RoundRect(g, 0, 0, 14, 10, 2, 3, 10, "Body")
+	VX.RoundRect(g, 0, 0, 15, 11, 2, 11, 11, "Trim")
+	VX.RoundRect(g, 0, 0, 8, 8, 2, 12, 13, "Trim")
+	-- the prize wheel on the front: eight coloured segments, a gold rim and hub, a red pointer on top
+	local wy = 7
+	for x = -4, 4 do
+		for y = 3, 11 do
+			local dy = y - wy
+			local d = math.sqrt(x * x + dy * dy)
+			if d <= 3.7 then
+				local key
+				if d <= 1.0 then
+					key = "Hub"
+				elseif d >= 2.9 then
+					key = "Rim"
+				else
+					local seg = math.floor((atan2(dy, x) + math.pi) / (math.pi / 4))
+					key = (seg % 2 == 0) and "Seg1" or "Seg2"
+				end
+				Voxel.Set(g, x, y, -6, key)
+			end
+		end
+	end
+	Voxel.Set(g, 0, 11, -6, "Knob")
+	Voxel.Set(g, 0, 11, -7, "Knob")
+	-- prize chute + gold tray, marquee bulbs on the top band
+	VX.Fill(g, -2, 2, 3, 3, -6, -6, "Dark")
+	VX.Fill(g, -2, 2, 2, 2, -7, -6, "Trim")
+	for _, x in ipairs({ -6, -3, 3, 6 }) do
+		Voxel.Set(g, x, 11, -6, "Bulb")
+	end
+	-- lever on the right side
+	Voxel.Shape(g, { Kind = "Capsule", A = { 7.4, 6, 0 }, B = { 9, 12, 0 }, Radius = 0.6, Key = "Iron" })
+	Voxel.Shape(g, { Kind = "Ellipsoid", Center = { 9, 13.2, 0 }, Radius = 1.3, Key = "Knob" })
+	Voxel.Shade(g, {
+		Skip = { Bulb = true, Seg1 = true, Seg2 = true, Hub = true, Rim = true, Dark = true, Knob = true },
+		Smooth = 1,
+		Seed = 12,
+	})
+
+	-- the glass dome full of pet eggs (1-stud voxels), sitting on the neck
+	local d = Voxel.NewGrid(8)
+	Voxel.Shape(d, { Kind = "Ellipsoid", Center = { 0, 9.4, 0 }, Radius = { 3.1, 2.9, 3.1 }, Key = "Glass" })
+	local eggs = { { -1.2, 8.1, -0.9 }, { 1.2, 8.2, 0.7 }, { 0.2, 9.8, -1.3 }, { -0.9, 10, 1.1 }, { 1.4, 9.9, -0.2 }, { -0.1, 8.4, 1.6 } }
+	for i, e in ipairs(eggs) do
+		Voxel.Shape(d, { Kind = "Ellipsoid", Center = e, Radius = { 0.75, 0.95, 0.75 }, Key = "Egg" .. ((i - 1) % 4 + 1), Bias = 0.15 })
+	end
+	VX.RoundRect(d, 0, 0, 3, 3, 0.8, 12, 12, "Trim")
+	Voxel.Set(d, 0, 13, 0, "Bulb")
+	local pal = machinePalette(Config.Roulettes[1] or { Color = C.Rose })
+	-- LOD only folds shade variants (the coloured keys differ per roulette, so they are kept as they are)
+	local keep = { "Body", "Trim", "Seg1", "Seg2", "Rim", "Hub", "Glass", "Egg1", "Egg2", "Egg3", "Egg4", "Bulb", "Knob", "Base", "Iron", "Dark" }
+	machineBoxCache = {
+		Fine = Voxel.Merge(g, { Palette = pal, MaxParts = 70, Keep = keep }),
+		Dome = Voxel.Merge(d, { Palette = pal, Keep = keep }),
+	}
+	return machineBoxCache
+end
+
+-- A gacha roulette machine (Model Roulette_<Id>). `cf` sits on the ground; LookVector = towards the customer.
 local function buildMachine(parent, cf, roulette)
-	local model = Instance.new("Model")
-	model.Name = "Machine_" .. roulette.Id
-	model.Parent = parent
-
-	local color = roulette.Color
-	local deep = color:Lerp(COL.Ink, 0.45)
-	local light = color:Lerp(COL.Top, 0.4)
-	local function at(x, y, z)
-		return (cf * CFrame.new(x, y, z)).Position
+	local model = newModel(parent, "Roulette_" .. roulette.Id)
+	local body = Instance.new("Model")
+	body.Name = "Machine"
+	-- the sculpt's front (-Z) faces along cf.LookVector (the customer)
+	local boxes = machineBoxes()
+	local pal = machinePalette(roulette)
+	Voxel.BuildBoxes(boxes.Fine, { VoxelSize = 0.5, Palette = pal, CFrame = cf * CFrame.new(0, 0.25, 0), Model = body, CanCollide = true, CanQuery = true })
+	Voxel.BuildBoxes(boxes.Dome, { VoxelSize = 1, Palette = pal, CFrame = cf * CFrame.new(0, 0.5, 0), Model = body, CanCollide = true, CanQuery = true })
+	body.Parent = model
+	local cabinet = nil
+	for _, d in ipairs(body:GetChildren()) do
+		if d:IsA("BasePart") and d.Name == "Body" and (not cabinet or d.Size.Magnitude > cabinet.Size.Magnitude) then
+			cabinet = d
+		end
 	end
-	local function frame(x, y, z)
-		return cf * CFrame.new(x, y, z)
-	end
-
-	-- Plinth + cabinet.
-	disc(model, at(0, 0.15, 0), 11, 0.3, { Name = "PlinthRim", Color = deep })
-	disc(model, at(0, 0.6, 0), 10, 0.6, { Name = "Plinth", Color = COL.Slate })
-	local cabinet = block(model, frame(0, 2.7, 0), Vector3.new(7.2, 3.6, 5), {
-		Name = "Cabinet",
-		Color = COL.Slate,
-		CastShadow = true,
-	})
-	local panel = block(model, frame(0, 2.9, -2.55), Vector3.new(5.6, 2.2, 0.2), {
-		Name = "FrontPanel",
-		Color = deep,
-		CanCollide = false,
-	})
-	block(model, frame(0, 1.5, -2.55), Vector3.new(1.8, 0.28, 0.2), {
-		Name = "CoinSlot",
-		Color = COL.GoldDark,
-		Material = MAT.Metal,
-		CanCollide = false,
-	})
-	block(model, frame(0, 1.15, -3.0), Vector3.new(3.4, 0.5, 1.2), { Name = "Tray", Color = deep, CanCollide = false })
-
-	-- "? ? ?" on the front panel: the pet is a mystery.
-	local gui = surfaceGui(panel, 50)
-	local bg = Instance.new("Frame")
-	bg.Name = "Face"
-	bg.Size = UDim2.new(1, 0, 1, 0)
-	bg.BackgroundTransparency = 1
-	bg.Parent = gui
-	fitLabel(bg, "? ? ?", "Title", light, "Mystery", 0.05, 0.08, 0.9, 0.84)
-	gui.Parent = panel
-
-	-- Glass dome with the wheel inside; two bars spin like roulette spokes.
-	local dome = ball(model, at(0, 6.5, 0), 6.8, {
-		Name = "Dome",
-		Color = light,
-		Material = MAT.Glass,
-		Transparency = 0.45,
-		Reflectance = 0.1,
-		CanCollide = false,
-	})
-	faceDisc(model, frame(0, 6.5, -0.3), 4.0, 0.4, { Name = "WheelBack", Color = deep, CanCollide = false })
-	faceDisc(model, frame(0, 6.5, -0.6), 3.6, 0.2, { Name = "WheelRing", Color = color, CanCollide = false })
-	faceDisc(model, frame(0, 6.5, -0.75), 2.2, 0.2, { Name = "WheelInner", Color = light, CanCollide = false })
-	ball(model, at(0, 6.5, -0.95), 0.9, { Name = "WheelHub", Color = COL.Gold, CanCollide = false })
-	for k = 0, 1 do
-		local barCF = frame(0, 6.5, -0.9) * CFrame.Angles(0, 0, math.rad(k * 90))
-		local bar = block(model, barCF, Vector3.new(3.4, 0.3, 0.15), {
-			Name = "WheelBar",
-			Color = COL.TextGold,
-			Material = MAT.Neon,
-			CanCollide = false,
-		})
-		later(function()
-			loopTween(bar, 1.6, { CFrame = barCF * CFrame.Angles(0, 0, math.rad(90)) }, Enum.EasingStyle.Linear, false)
-		end)
-	end
-	pointLight(dome, color, 0.9, 20)
-	emitter(dome, {
-		Color = ColorSequence.new(light, COL.Top),
-		Rate = 4,
+	local glow = anchorPart(model, "DomeGlow", (cf * CFrame.new(0, 9.5, 0)).Position)
+	pointLight(glow, roulette.Color or C.Lamp, 0.9, 18)
+	emitter(glow, {
+		Color = ColorSequence.new((roulette.Color or C.Rose):Lerp(rgb(255, 255, 255), 0.4), C.TextGold),
+		Rate = 3,
 		Lifetime = NumberRange.new(1.5, 2.5),
 		Speed = NumberRange.new(1, 2.5),
 		SpreadAngle = Vector2.new(180, 180),
-		Size = popSize(0.6),
+		Size = popSize(0.5),
 	})
-	ball(model, at(0, 10.1, 0), 0.9, { Name = "Finial", Color = COL.Gold, CanCollide = false })
 
-	-- One gem per rarity this roulette can pay out (higher price = rarer gems).
-	local rarities = oddsRarities(roulette)
-	for i, rarity in ipairs(rarities) do
-		ball(model, at((i - (#rarities + 1) / 2) * 1.0, 4.1, -2.55), 0.7, {
-			Name = "RarityGem",
-			Color = rarity.Color,
-			Material = MAT.Neon,
-			CanCollide = false,
-		})
-	end
-
-	-- Lever and corner lamps.
-	local leverCF = frame(4.6, 3.6, 0) * CFrame.Angles(0, 0, math.rad(35))
-	mk(model, {
-		Name = "LeverRod",
-		Shape = Enum.PartType.Cylinder,
-		Size = Vector3.new(2.6, 0.3, 0.3),
-		CFrame = leverCF,
-		Color = COL.GoldDark,
-		Material = MAT.Metal,
-		CanCollide = false,
-	})
-	ball(model, (leverCF * CFrame.new(1.3, 0, 0)).Position, 0.95, { Name = "LeverKnob", Color = color, CanCollide = false })
-	for _, sx in ipairs({ -1, 1 }) do
-		for _, sz in ipairs({ -1, 1 }) do
-			ball(model, at(sx * 3.2, 4.65, sz * 1.9), 0.45, {
-				Name = "CabinetLamp",
-				Color = COL.Lantern,
-				Material = MAT.Neon,
-				CanCollide = false,
-			})
-		end
-	end
-
-	-- Big readable name + price billboard.
-	-- The name may wrap onto two lines (so it can be big); the price gets the bottom half.
-	local anchor = anchorPart(model, "PriceAnchor", at(0, 10.8 + MACHINE_CARD_H * 0.5, 0))
-	local bb = newBillboard(anchor, MACHINE_CARD_W, MACHINE_CARD_H, 0, 140)
-	bb.Name = "PriceBillboard"
-	local card = cardPanel(bb, color, 0.12)
-	local nameLabel = fitLabel(card, roulette.DisplayName or roulette.Id, "Title", light, "NameLabel", 0.05, 0.05, 0.9, 0.46)
-	nameLabel.TextWrapped = true
-	fitLabel(card, priceText(roulette.Price or 0), "Display", COL.TextGold, "PriceLabel", 0.05, 0.54, 0.9, 0.4)
+	-- Name + price tag standing on the dome.
+	local anchor = anchorPart(model, "PriceAnchor", (cf * CFrame.new(0, 14.2 + MACHINE_CARD_H * 0.5, 0)).Position)
+	machineTag(anchor, roulette, 0.5 - MACHINE_CARD_H * 0.5)
 
 	-- Invisible spot in front where PetService hangs the ProximityPrompt.
-	local prompt = block(model, frame(0, 2.0, -5.3), Vector3.new(5, 4, 3), {
-		Name = "PromptPart",
-		Transparency = 1,
-		CanCollide = false,
-		CanTouch = false,
-	})
-
-	model.PrimaryPart = cabinet
+	local prompt = box(model, "PromptPart", cf * CFrame.new(0, 2, -5.4), Vector3.new(5, 4, 3), roulette.Color or C.Rose, { Transparency = 1, Shadow = false })
+	prompt.CanQuery = false
+	model.PrimaryPart = cabinet or prompt
 	return {
 		Id = roulette.Id,
 		PromptPart = prompt,
-		Center = cabinet.Position,
+		Center = (cf * CFrame.new(0, 3.5, 0)).Position,
 		Model = model,
 	}
 end
 
 local function fallbackMachine(parent, cf, roulette)
-	local model = Instance.new("Model")
-	model.Name = "MachineFallback_" .. roulette.Id
-	model.Parent = parent
-	local cabinet = block(model, cf * CFrame.new(0, 3, 0), Vector3.new(7, 6, 5), { Name = "Cabinet", Color = roulette.Color })
+	local old = parent:FindFirstChild("Roulette_" .. roulette.Id)
+	if old then
+		old:Destroy()
+	end
+	local model = newModel(parent, "Roulette_" .. roulette.Id)
+	local cabinet = box(model, "Cabinet", cf * CFrame.new(0, 3, 0), Vector3.new(7, 6, 5), roulette.Color or C.Rose, { Collide = true })
 	local anchor = anchorPart(model, "PriceAnchor", (cf * CFrame.new(0, 10, 0)).Position)
-	local bb = newBillboard(anchor, 12, 5, 0, 120)
-	local card = cardPanel(bb, roulette.Color, 0.2)
-	fitLabel(card, roulette.DisplayName or roulette.Id, "Title", COL.Text, "NameLabel", 0.04, 0.05, 0.92, 0.45)
-	fitLabel(card, priceText(roulette.Price or 0), "Display", COL.TextGold, "PriceLabel", 0.04, 0.52, 0.92, 0.4)
-	local prompt = block(model, cf * CFrame.new(0, 2, -5), Vector3.new(5, 4, 3), {
-		Name = "PromptPart",
-		Transparency = 1,
-		CanCollide = false,
-		CanTouch = false,
-	})
+	machineTag(anchor, roulette, -2.5)
+	local prompt = box(model, "PromptPart", cf * CFrame.new(0, 2, -5), Vector3.new(5, 4, 3), C.Cloud, { Transparency = 1, Shadow = false })
 	model.PrimaryPart = cabinet
 	return { Id = roulette.Id, PromptPart = prompt, Center = cabinet.Position, Model = model }
 end
 
--- Cosy market stall with striped awning and three displayed items. Front = -Z of `cf`.
+-- Striped market stall with goods on the shelf (Model ItemShop). Front (-Z of the sculpt) faces the customer.
 local function buildItemStall(parent, cf)
-	local model = Instance.new("Model")
-	model.Name = "ItemShop"
-	model.Parent = parent
-	local function frame(x, y, z)
-		return cf * CFrame.new(x, y, z)
-	end
-	local function at(x, y, z)
-		return (cf * CFrame.new(x, y, z)).Position
-	end
-
-	local rose = Color3.fromRGB(206, 120, 136)
-	local cream = Color3.fromRGB(216, 206, 186)
-	local sage = Color3.fromRGB(116, 176, 140)
-	local sky = Color3.fromRGB(108, 150, 206)
-
-	local counter = block(model, frame(0, 1.7, 0), Vector3.new(9, 3.4, 3.2), {
-		Name = "Counter",
-		Color = COL.Wood,
-		Material = MAT.WoodPlanks,
-		CastShadow = true,
-	})
-	block(model, frame(0, 3.55, 0), Vector3.new(9.6, 0.3, 3.8), { Name = "CounterTop", Color = cream })
-	local stripeColors = { rose, sage, sky }
-	for i = 1, 3 do
-		block(model, frame((i - 2) * 2.9, 1.7, -1.65), Vector3.new(1.5, 2.8, 0.15), {
-			Name = "CounterStripe",
-			Color = stripeColors[i],
-			CanCollide = false,
-		})
-	end
-
-	-- Back wall, shelf and the displayed goods.
-	block(model, frame(0, 3.6, 1.85), Vector3.new(9.2, 7.2, 0.4), { Name = "BackWall", Color = COL.WoodDark, Material = MAT.WoodPlanks })
-	block(model, frame(0, 5.0, 1.2), Vector3.new(8.2, 0.3, 1.2), { Name = "Shelf", Color = COL.WoodLight, Material = MAT.WoodPlanks, CanCollide = false })
-	-- Heal cloud: a plump green cloud with a pale cross.
-	ball(model, at(-2.6, 5.95, 1.2), 1.6, { Name = "ItemHeal", Color = Color3.fromRGB(146, 208, 170), CanCollide = false })
-	block(model, frame(-2.6, 5.95, 0.4), Vector3.new(0.9, 0.28, 0.2), { Name = "ItemHealCross", Color = cream, CanCollide = false })
-	block(model, frame(-2.6, 5.95, 0.4), Vector3.new(0.28, 0.9, 0.2), { Name = "ItemHealCross", Color = cream, CanCollide = false })
-	-- Shield bubble: a glassy blue bubble.
-	ball(model, at(0, 5.95, 1.2), 1.9, {
-		Name = "ItemShield",
-		Color = Color3.fromRGB(110, 170, 230),
-		Material = MAT.Glass,
-		Transparency = 0.3,
-		CanCollide = false,
-	})
-	ball(model, at(0, 5.95, 1.2), 0.8, { Name = "ItemShieldCore", Color = Color3.fromRGB(190, 220, 250), CanCollide = false })
-	-- Phoenix feather: a flame-coloured plume.
-	block(model, frame(2.6, 6.0, 1.2) * CFrame.Angles(0, 0, math.rad(-20)), Vector3.new(0.55, 2.3, 0.2), {
-		Name = "ItemFeather",
-		Color = Color3.fromRGB(226, 130, 70),
-		CanCollide = false,
-	})
-	ball(model, at(2.95, 7.2, 1.2), 0.8, { Name = "ItemFeatherTip", Color = COL.Gold, Material = MAT.Neon, CanCollide = false })
-
-	-- Posts and the striped awning, sloping down towards the customers.
-	for _, sx in ipairs({ -1, 1 }) do
-		disc(model, at(sx * 4.4, 4.0, 1.6), 0.5, 8, { Name = "AwningPostBack", Color = COL.WoodDark, Material = MAT.Wood })
-		disc(model, at(sx * 4.6, 3.3, -2.6), 0.5, 6.6, { Name = "AwningPostFront", Color = COL.WoodDark, Material = MAT.Wood })
-		local lamp = ball(model, at(sx * 4.6, 7.0, -2.6), 1.0, {
-			Name = "StallLamp",
-			Color = COL.Lantern,
-			Material = MAT.Neon,
-			CanCollide = false,
-		})
-		if sx == 1 then
-			pointLight(lamp, COL.Lantern, 0.8, 16)
+	local model = newModel(parent, "ItemShop")
+	local g = Voxel.NewGrid(14)
+	VX.RoundRect(g, 0, 0, 10, 3, 0.6, 0, 2, "Wood")
+	VX.RoundRect(g, 0, 0, 11, 4, 0.8, 3, 3, "Top")
+	for x = -4, 4 do
+		for y = 0, 2 do
+			Voxel.Set(g, x, y, -2, (math.floor((x + 4) / 1) % 2 == 0) and "Rose" or "Cream")
 		end
 	end
-	local slope = math.rad(17.6)
-	for i = 1, 6 do
-		local x = (i - 3.5) * 1.6
-		local stripe = rose
-		if i % 2 == 0 then
-			stripe = cream
+	VX.Fill(g, -5, 5, 0, 8, 3, 3, "WoodDark")
+	VX.Fill(g, -4, 4, 5, 5, 2, 2, "Wood")
+	for _, sx in ipairs({ -6, 6 }) do
+		VX.Fill(g, sx, sx, 0, 8, -3, -3, "Post")
+		VX.Fill(g, sx, sx, 0, 10, 3, 3, "Post")
+	end
+	-- striped awning in three steps, sloping down to the front, with a scalloped fringe
+	for x = -7, 7 do
+		local stripe = (math.floor((x + 7) / 2) % 2 == 0) and "Rose" or "Cream"
+		for z = -4, 4 do
+			local y = 9 + math.floor((z + 4) / 3)
+			Voxel.Set(g, x, y, z, stripe)
 		end
-		block(model, frame(x, 7.3, -0.6) * CFrame.Angles(-slope, 0, 0), Vector3.new(1.6, 0.25, 6.0), {
-			Name = "AwningStripe",
-			Color = stripe,
-			CanCollide = false,
-		})
-		ball(model, at(x, 6.4, -3.46), 0.9, { Name = "AwningFringe", Color = stripe, CanCollide = false })
+		if x % 2 == 0 then
+			Voxel.Set(g, x, 8, -4, stripe)
+		end
 	end
-
-	for _, sx in ipairs({ -1, 1 }) do
-		ball(model, at(sx * 5.4, 0.9, 0.5), 3.4, { Name = "StallPuff", Color = COL.Puff, CanCollide = false })
-	end
-
-	-- Sign above the stall.
-	local anchor = anchorPart(model, "SignAnchor", at(0, 12, 0))
-	local bb = newBillboard(anchor, 12, 5, 0, 100)
-	bb.Name = "ItemShopBillboard"
-	local card = cardPanel(bb, rose, 0.14)
-	fitLabel(card, "Item Shop", "Title", COL.Text, "NameLabel", 0.04, 0.06, 0.92, 0.52)
-	fitLabel(card, "Heal " .. BULLET .. " Shield " .. BULLET .. " Revive", "Body", COL.TextGold, "SubLabel", 0.04, 0.62, 0.92, 0.3)
-
-	local prompt = block(model, frame(0, 2.0, -4.6), Vector3.new(5, 4, 3), {
-		Name = "PromptPart",
-		Transparency = 1,
-		CanCollide = false,
-		CanTouch = false,
+	-- goods: heal cloud, shield bubble, phoenix feather on the shelf; coins on the counter
+	Voxel.Shape(g, { Kind = "Ellipsoid", Center = { -3, 6.5, 2 }, Radius = { 1.3, 0.8, 0.6 }, Key = "Heal" })
+	Voxel.Shape(g, { Kind = "Ellipsoid", Center = { 0, 6.7, 2 }, Radius = { 0.9, 0.9, 0.6 }, Key = "Shield" })
+	Voxel.Shape(g, { Kind = "Curve", Points = { { 2.6, 6, 2 }, { 3.2, 7, 2 }, { 3.5, 8.1, 2 } }, Radius = 0.45, RadiusB = 0.2, Key = "Feather" })
+	Voxel.Set(g, 3, 8, 2, "Gold")
+	Voxel.Set(g, 2, 4, 0, "Gold")
+	Voxel.Set(g, 3, 4, -1, "Gold")
+	Voxel.Set(g, -3, 4, 0, "Heal")
+	Voxel.Shade(g, { Skip = { Shield = true, Rose = true, Cream = true }, Smooth = 1, Seed = 13 })
+	VX.Build(g, {
+		V = 1,
+		Name = "Stall",
+		CF = cf * CFrame.new(0, 0.5, 0),
+		Collide = true,
+		Parent = model,
+		Pal = {
+			Wood = C.Plank,
+			WoodDark = C.PlankDark,
+			Post = C.PlankDark,
+			Top = C.Cream,
+			Rose = C.Rose,
+			Cream = C.Cream,
+			Heal = rgb(124, 214, 150),
+			Shield = { Color = rgb(120, 184, 250), Material = MAT.Glass, Transparency = 0.35 },
+			Feather = rgb(244, 136, 70),
+			Gold = C.Gold,
+		},
+		MaxParts = 80,
 	})
-	model.PrimaryPart = counter
-	return { PromptPart = prompt, Center = counter.Position, Model = model }
+	local lamp = anchorPart(model, "StallLight", (cf * CFrame.new(0, 7.5, 0)).Position)
+	pointLight(lamp, C.Lamp, 0.8, 16)
+
+	-- name tag standing on the awning (bottom edge 13.3 studs up)
+	local anchor = anchorPart(model, "SignAnchor", (cf * CFrame.new(0, 15.5, 0)).Position)
+	local bb = newTag(anchor, "ItemShopBillboard", 320, 110, -2.2, 80)
+	local plate = tagPlate(bb, C.Rose, 160)
+	tagText(plate, "NameLabel", "Item Shop", "Title", TAG_NAME, C.Text, 1)
+	tagText(plate, "SubLabel", "Heal " .. GLYPH.Bullet .. " Shield " .. GLYPH.Bullet .. " Revive", "Body", TAG_INFO, C.TextGold, 2, 2)
+
+	local prompt = box(model, "PromptPart", cf * CFrame.new(0, 2, -4.6), Vector3.new(5, 4, 3), C.Cloud, { Transparency = 1, Shadow = false })
+	local counter = model:FindFirstChild("Stall")
+	model.PrimaryPart = (counter and counter.PrimaryPart) or prompt
+	return { PromptPart = prompt, Center = (cf * CFrame.new(0, 1.7, 0)).Position, Model = model }
 end
 
 local function fallbackItemStall(parent, cf)
-	local model = Instance.new("Model")
-	model.Name = "ItemShopFallback"
-	model.Parent = parent
-	local counter = block(model, cf * CFrame.new(0, 1.7, 0), Vector3.new(9, 3.4, 3.2), { Name = "Counter", Color = COL.Wood })
-	local prompt = block(model, cf * CFrame.new(0, 2, -4.6), Vector3.new(5, 4, 3), {
-		Name = "PromptPart",
-		Transparency = 1,
-		CanCollide = false,
-		CanTouch = false,
-	})
+	local old = parent:FindFirstChild("ItemShop")
+	if old then
+		old:Destroy()
+	end
+	local model = newModel(parent, "ItemShop")
+	local counter = box(model, "Counter", cf * CFrame.new(0, 1.7, 0), Vector3.new(9, 3.4, 3.2), C.Plank, { Collide = true })
+	local prompt = box(model, "PromptPart", cf * CFrame.new(0, 2, -4.6), Vector3.new(5, 4, 3), C.Cloud, { Transparency = 1, Shadow = false })
 	model.PrimaryPart = counter
 	return { PromptPart = prompt, Center = counter.Position, Model = model }
 end
 
 -- Board that explains the roulettes: price, and which rarities each one can give.
 local function buildRarityBoard(parent, cf)
-	local board = signStructure(parent, cf, 18, 11, 15)
-	local gui = surfaceGui(board, 40)
+	-- 700 x 450 px canvas (14 x 9 studs): a 1-stud header, then one row per roulette: the name and the price
+	-- (0.6 stud) over rarity pills that spell out what it can pay (0.6 stud)
+	local face = noticeBoard(parent, cf, 14, 9, "RarityBoard")
+	local gui = surfaceGui(face, Enum.NormalId.Front)
 	local panel = signPanel(gui)
-	fitLabel(panel, "WINGED PETS", "Title", COL.Gold, "Header", 0.04, 0.03, 0.92, 0.14)
-	fitLabel(panel, "Pricier roulette = rarer pets", "Script", COL.Text, "Sub", 0.04, 0.17, 0.92, 0.1)
-
+	local H = 450
+	signText(panel, "WINGED PETS", "Title", 50, C.Gold, "Header", 0.04, 6 / H, 0.92, 54 / H)
+	signText(panel, "Pricier roulette = rarer pets", "Body", SIGN_INFO, C.Text, "Sub", 0.04, 60 / H, 0.92, 34 / H)
 	for i, roulette in ipairs(Config.Roulettes) do
-		local y = 0.3 + (i - 1) * 0.145
-		fitLabel(panel, roulette.DisplayName or roulette.Id, "Heading", roulette.Color:Lerp(COL.Text, 0.3), "Name" .. i, 0.04, y, 0.4, 0.125, Enum.TextXAlignment.Left)
-		fitLabel(panel, priceText(roulette.Price or 0), "Body", COL.TextGold, "Price" .. i, 0.43, y, 0.2, 0.125, Enum.TextXAlignment.Right)
-		local rarities = oddsRarities(roulette)
-		for k, rarity in ipairs(rarities) do
-			local chip = Instance.new("Frame")
-			chip.Name = "Chip"
-			chip.Position = UDim2.new(0.66 + (k - 1) * 0.085, 0, y + 0.01, 0)
-			chip.Size = UDim2.new(0.075, 0, 0.105, 0)
-			chip.BackgroundColor3 = rarity.Color
-			chip.BorderSizePixel = 0
-			local corner = Instance.new("UICorner")
-			corner.CornerRadius = UDim.new(0.3, 0)
-			corner.Parent = chip
-			chip.Parent = panel
-			fitLabel(chip, string.sub(rarity.Id, 1, 1), "Heading", COL.Ink, "Initial", 0.1, 0.05, 0.8, 0.9)
+		local top = 102 + (i - 1) * 84
+		local y = top / H
+		local color = roulette.Color or C.Rose
+		signText(panel, roulette.DisplayName or roulette.Id, "Heading", SIGN_INFO, color:Lerp(C.Text, 0.35), "Name" .. i, 0.04, y, 0.6, 36 / H, Enum.TextXAlignment.Left)
+		signText(panel, priceText(roulette.Price or 0), "Body", SIGN_INFO, C.TextGold, "Price" .. i, 0.6, y, 0.36, 36 / H, Enum.TextXAlignment.Right)
+		local pills = plainFrame(panel, "Rarities" .. i, {
+			Position = UDim2.new(0.04, 0, (top + 38) / H, 0),
+			Size = UDim2.new(0.92, 0, 36 / H, 0),
+		})
+		local layout = listLayout(pills, Enum.FillDirection.Horizontal, 10, Enum.HorizontalAlignment.Left)
+		layout.VerticalAlignment = Enum.VerticalAlignment.Center
+		for k, rarity in ipairs(oddsRarities(roulette)) do
+			local pill = tagPill(pills, "Rarity_" .. rarity.Id, rarity.Id, "Body", SIGN_INFO, rarity.Color:Lerp(C.Navy, 0.18), k)
+			local pad = pill:FindFirstChildOfClass("UIPadding")
+			if pad then -- a slim pill: the row keeps a clear gap to the next roulette
+				pad.PaddingTop = UDim.new(0, 0)
+				pad.PaddingBottom = UDim.new(0, 0)
+			end
+			pill.Size = UDim2.fromOffset(0, 34)
 		end
 	end
+	gui.Parent = face
+end
 
-	local legend = {}
-	for _, rarity in ipairs(Config.Rarities) do
-		legend[#legend + 1] = string.format('<font color="%s">%s</font>', hex(rarity.Color), rarity.Id)
+-- A big decorative voxel coin with a cloud emblem on a pedestal (NOT a collectible token).
+local function buildTokenStatue(parent, ground)
+	local m = newModel(parent, "TokenStatue")
+	local g = Voxel.NewGrid(12)
+	VX.RoundRect(g, 0, 0, 6, 6, 1.2, 0, 1, "StoneLight")
+	VX.RoundRect(g, 0, 0, 4.4, 4.4, 1, 2, 2, "Stone")
+	for x = -4, 4 do
+		for y = -4, 4 do
+			local d = math.sqrt(x * x + y * y)
+			if d <= 4.3 then
+				local key = (d >= 3.4) and "GoldDark" or "Gold"
+				Voxel.Set(g, x, 7 + y, 0, key)
+			end
+		end
 	end
-	local legendLabel = fitLabel(panel, table.concat(legend, "  "), "Body", COL.Text, "Legend", 0.03, 0.9, 0.94, 0.07)
-	legendLabel.RichText = true
-	gui.Parent = board
+	-- the cloud emblem in relief on both faces
+	local emblem = {}
+	for _, row in ipairs({ { 2, -1, 0 }, { 1, -2, 2 }, { 0, -3, 3 }, { -1, -2, 2 } }) do
+		for x = row[2], row[3] do
+			emblem[#emblem + 1] = { x, row[1] }
+		end
+	end
+	for _, e in ipairs(emblem) do
+		Voxel.Set(g, e[1], 7 + e[2], -1, "GoldGlow")
+		Voxel.Set(g, e[1], 7 + e[2], 1, "GoldGlow")
+	end
+	VX.Fill(g, -1, 1, 3, 3, 0, 0, "GoldDark")
+	Voxel.Shade(g, { Only = { StoneLight = true, Stone = true }, Smooth = 1 })
+	VX.Build(g, { V = 1, Name = "Coin", CF = flatLook(ground, Vector3.new(OX, ground.Y, OZ)) * CFrame.new(0, 0.5, 0), Collide = true, Parent = m })
+	local sparkle = anchorPart(m, "CoinSparkle", ground + Vector3.new(0, 7, 0), Vector3.new(6, 6, 2))
+	emitter(sparkle, { Rate = 5, Lifetime = NumberRange.new(1.2, 2), Speed = NumberRange.new(0.5, 1.5), SpreadAngle = Vector2.new(180, 180), Size = popSize(0.6) })
+	return m
 end
 
 local function buildShop(root, L)
 	local f = newFolder(root, "Shop")
-	local rng = Util.NewRng(SEED + 4)
 	local S = L.ShopCenter
 	local R = L.ShopR
-	local sd = L.ShopAngle -- direction plaza -> shop
-	local entrance = sd + 180 -- direction shop -> plaza
-
-	-- World position on the shop island at an angle (degrees) and distance from its centre.
-	local function shopPoint(deg, dist)
-		local a = math.rad(deg)
-		return S + Vector3.new(math.cos(a) * dist, 0, math.sin(a) * dist)
+	local shopCF = flatLook(S, Vector3.new(OX, TOP, OZ)) -- local -Z = towards the plaza (the entrance)
+	local function at(x, z)
+		return (shopCF * CFrame.new(x, 0, z)).Position
 	end
-	local function lookAtCentre(pos)
-		return CFrame.lookAt(pos, Vector3.new(S.X, pos.Y, S.Z))
+	local function local2(wx, wz)
+		local p = shopCF:PointToObjectSpace(Vector3.new(S.X + wx, TOP, S.Z + wz))
+		return p.X, p.Z
+	end
+	local rng = Util.NewRng(SEED + 4)
+
+	-- Ground layers (2-stud cells): lawn, patches + flowers, borders, the stone court + entrance path, inlays.
+	local cell = 2
+	local n = math.ceil(R / cell)
+	local grids = { Voxel.NewGrid(1), Voxel.NewGrid(1), Voxel.NewGrid(1), Voxel.NewGrid(1), Voxel.NewGrid(1) }
+	for i = -n, n do
+		for k = -n, n do
+			local wx, wz = i * cell, k * cell
+			local r = math.sqrt(wx * wx + wz * wz)
+			if r <= R - 0.5 then
+				local x, z = local2(wx, wz)
+				Voxel.Set(grids[1], i, 0, k, "Grass")
+				local nz = vnoise(wx + 50, wz + 50, 22, 31)
+				if r > R - 3 then
+					nz = 0.5 -- lawn only at the very edge
+				end
+				if nz < 0.26 then
+					Voxel.Set(grids[2], i, 0, k, "GrassDark")
+				elseif nz > 0.76 then
+					Voxel.Set(grids[2], i, 0, k, "GrassLight")
+				end
+				local court = r <= 21
+				local path = z < 0 and math.abs(x) <= 7
+				if court or path then
+					Voxel.Set(grids[3], i, 0, k, "StoneEdge")
+				end
+				if r <= 19 or (z < 0 and math.abs(x) <= 5) then
+					Voxel.Set(grids[4], i, 0, k, "Stone")
+				elseif not court and not path and r > R - 7 and r < R - 3 and hash3(i, 3, k, 8) < 0.07 then
+					Voxel.Set(grids[2], i, 0, k, "Flower" .. (math.floor(hash3(i, 4, k, 2) * #FLOWERS) + 1))
+				end
+				if r <= 19 then
+					if r >= 12 and r <= 13.5 then
+						Voxel.Set(grids[5], i, 0, k, "StoneLight")
+					elseif r >= 4.5 and r <= 6.5 then
+						Voxel.Set(grids[5], i, 0, k, "GoldDark")
+					end
+				end
+			end
+		end
+	end
+	local tops = { -0.4, -0.3, -0.1, 0, 0.1 }
+	for li = 1, 5 do
+		VX.Build(grids[li], { V = cell, Name = "Ground" .. li, CF = CFrame.new(S.X, TOP + tops[li] - cell / 2, S.Z), Collide = true, Shadow = false, Parent = f })
 	end
 
-	-- Island body + the neck that joins it to the plaza.
-	local topPart = disc(f, S - Vector3.new(0, 2, 0), R * 2, 4, { Name = "ShopTop", Color = COL.Top, CastShadow = true })
-	islandBody(f, rng, S, R, 4, COL.Dusk, 3)
-	rimPuffs(f, rng, S, R - 0.5, 12, 6, 9, 0.2, 1.0, COL.Puff, { entrance }, 24)
-	walkway(f, polar(sd, SURF_R - 4, SPOKE_TOP), polar(sd, L.ShopDist - R + 6, SPOKE_TOP), 16, "ShopNeck", 2.4)
-	local neckDir = Vector3.new(math.cos(math.rad(sd)), 0, math.sin(math.rad(sd)))
-	local neckPerp = perpendicular(neckDir)
-	for _, s in ipairs({ -1, 1 }) do
-		lampPost(f, polar(sd, SURF_R + 1, SPOKE_TOP) + neckPerp * (s * 7), false)
+	-- The shop's cloud body + the stone neck to the plaza.
+	local okBody, errBody = pcall(function()
+		local rim = {}
+		for i = 1, 9 do
+			local a = (i - 1) / 9 * 360 + rng:Float(-5, 5)
+			local wx, wz = math.cos(math.rad(a)) * (R + 1.5), math.sin(math.rad(a)) * (R + 1.5)
+			local _, lz = local2(wx, wz)
+			if lz > -R * 0.55 then
+				local s = rng:Float(8, 10)
+				rim[#rim + 1] = { wx, rng:Float(-1, 1), wz, s, s * 0.6, s }
+			end
+		end
+		local puffs = {}
+		for i = 1, 6 do
+			local a = (i - 1) / 6 * math.pi * 2 + rng:Float(-0.3, 0.3)
+			local s = rng:Float(7, 11)
+			puffs[#puffs + 1] = { math.cos(a) * (R - 6), -7, math.sin(a) * (R - 6), s, s * 0.7, s }
+		end
+		VX.CloudModel({
+			V = 3,
+			Tiers = { { R = R + 3, H = 1 }, { R = R - 3, H = 2 }, { R = R - 11, H = 2 }, { R = R - 19, H = 2 } },
+			Puffs = puffs,
+			Rim = rim,
+			Carve = function(x, y, z)
+				return y > 0 and (x * x + z * z) < (R - 4) * (R - 4)
+			end,
+			Seed = 5,
+			MaxParts = 84,
+		}, CFrame.new(S.X, TOP - 1.2, S.Z), f, "ShopCloud", true)
+	end)
+	if not okBody then
+		warn("[LobbyBuilder] shop cloud failed: " .. tostring(errBody))
 	end
+	local neckA = polar(L.ShopAngle, PLAZA_R - 4, TOP)
+	local neckB = polar(L.ShopAngle, L.ShopDist - R + 5, TOP)
+	local neckMid = (neckA + neckB) * 0.5
+	box(f, "ShopNeck", flatLook(neckMid, neckB) * CFrame.new(0, -0.2 - 0.6, 0), Vector3.new(G.BoardHalf * 2 - 0.3, 1.2, (neckB - neckA).Magnitude), C.Stone, { Collide = true })
+	place(Props.Puff("S"), CFrame.new(neckMid - Vector3.new(0, 1.4, 0)), f, "NeckPuff")
 
-	-- Floor medallion + a floating token pedestal as the shop's centrepiece.
-	local mStack = 0
-	local mLayers = {
-		{ d = 15, color = COL.GoldDark },
-		{ d = 13.6, color = COL.Side },
-		{ d = 10, color = COL.Top:Lerp(COL.Gold, 0.2) },
-	}
-	for _, layer in ipairs(mLayers) do
-		disc(f, S + Vector3.new(0, mStack + 0.05, 0), layer.d, 0.1, { Name = "ShopMedallion", Color = layer.color, CanCollide = false })
-		mStack = mStack + 0.1
-	end
-	tokenShowcase(f, S + Vector3.new(0, 0.3, 0), "Cloud Tokens", "Earn them on every climb")
-
-	-- Entrance sign facing the plaza.
-	local signPos = shopPoint(entrance, R - 10)
-	local signCF = CFrame.lookAt(signPos, Vector3.new(ORIGIN.X, signPos.Y, ORIGIN.Z))
-	-- postHeight 15 lifts the collidable frame's underside to 8.3 studs (it was 5.3, head height, right on
-	-- the neck's centre line), so players walk under the gateway instead of bumping into it.
-	local signBoard = signStructure(f, signCF, 12, 4.6, 15)
-	local sgui = surfaceGui(signBoard, 50)
-	local spanel = signPanel(sgui, COL.TextGold)
-	fitLabel(spanel, "CLOUD SHOP", "Title", COL.Gold, "Name", 0.04, 0.08, 0.92, 0.56)
-	fitLabel(spanel, "pets & items", "Script", COL.Text, "Sub", 0.04, 0.66, 0.92, 0.28)
-	sgui.Parent = signBoard
-
-	-- Roulette machines on an arc across the far side of the island, cheapest on the left as the
-	-- customer walks in. The angular step makes neighbouring machines one billboard width apart.
+	-- Roulette machines on an arc across the back, cheapest on the left as the customer walks in.
 	local roulettes = {}
-	local machineCount = #Config.Roulettes
-	local arcR = math.max(14, math.min(24, R - 8))
-	local thetaStep = math.deg(2 * math.asin(math.min(1, (MACHINE_CARD_W + 1) / (2 * arcR))))
-	if machineCount > 1 then
-		thetaStep = math.min(thetaStep, 150 / (machineCount - 1))
+	local count = #Config.Roulettes
+	local arcR = 19
+	local stepDeg = math.deg(2 * math.asin(math.min(1, (MACHINE_CARD_W + 1) / (2 * arcR))))
+	if count > 1 then
+		stepDeg = math.min(stepDeg, 150 / (count - 1))
 	end
 	for i, roulette in ipairs(Config.Roulettes) do
-		local theta = (i - (machineCount + 1) / 2) * thetaStep
-		local pos = shopPoint(sd + theta, arcR)
-		local cf = lookAtCentre(pos)
-		local info
+		local phi = math.rad((i - (count + 1) / 2) * stepDeg)
+		local pos = at(-math.sin(phi) * arcR, math.cos(phi) * arcR)
+		local cf = flatLook(pos, S)
 		local ok, result = pcall(buildMachine, f, cf, roulette)
-		if ok then
-			info = result
-		else
+		if not ok then
 			warn("[LobbyBuilder] roulette machine " .. tostring(roulette.Id) .. " failed: " .. tostring(result))
-			info = fallbackMachine(f, cf, roulette)
+			result = fallbackMachine(f, cf, roulette)
 		end
-		roulettes[roulette.Id] = info
+		roulettes[roulette.Id] = result
 	end
 
-	-- Item stall (east of the entrance) and rarity guide (west), both facing the centre.
-	local itemShop
-	local stallCF = lookAtCentre(shopPoint(entrance - 62, 21))
+	-- Item stall (left of the entrance) and rarity board (right), both facing the centre.
+	local stallPos = at(-21, -8) - Vector3.new(0, LAWN, 0) -- on the lawn layer
+	local stallCF = flatLook(stallPos, S - Vector3.new(0, LAWN, 0))
 	local okStall, stall = pcall(buildItemStall, f, stallCF)
-	if okStall then
-		itemShop = stall
-	else
+	if not okStall then
 		warn("[LobbyBuilder] item stall failed: " .. tostring(stall))
-		itemShop = fallbackItemStall(f, stallCF)
+		stall = fallbackItemStall(f, stallCF)
 	end
-	local okBoard, boardErr = pcall(buildRarityBoard, f, lookAtCentre(shopPoint(entrance + 62, 21)))
+	local okBoard, errBoard = pcall(buildRarityBoard, f, flatLook(at(21, -8) - Vector3.new(0, LAWN, 0), S - Vector3.new(0, LAWN, 0)))
 	if not okBoard then
-		warn("[LobbyBuilder] rarity board failed: " .. tostring(boardErr))
+		warn("[LobbyBuilder] rarity board failed: " .. tostring(errBoard))
 	end
 
-	-- Cosy details around the rim.
-	bench(f, lookAtCentre(shopPoint(sd + 92, 27.5)))
-	bench(f, lookAtCentre(shopPoint(sd - 92, 27.5)))
-	flowerPatch(f, rng, shopPoint(sd - 65, 28), 3.4, 3)
-	flowerPatch(f, rng, shopPoint(sd + 65, 28), 3.4, 3)
-	local lampAngles = { sd - 55, sd + 55, entrance - 42, entrance + 42 }
-	for i, deg in ipairs(lampAngles) do
-		lampPost(f, shopPoint(deg, 29), i <= 2)
+	-- Decor: token statue, entrance arch with the shop sign, lamps, bunting, flower beds, fireflies.
+	local okDecor, errDecor = pcall(function()
+		buildTokenStatue(f, S)
+		local archCF = shopCF * CFrame.new(0, 0, -(R - 5)) * CFrame.Angles(0, math.pi, 0)
+		local arch = newModel(f, "ShopArch")
+		for _, s in ipairs({ -1, 1 }) do
+			box(arch, "Pillar", archCF * CFrame.new(s * 7.6, 0.35, 0), Vector3.new(2.6, 1.7, 2.6), C.StoneDark, { Collide = true })
+			box(arch, "Pillar", archCF * CFrame.new(s * 7.6, 5.6, 0), Vector3.new(1.8, 8.8, 1.8), C.StoneLight, { Collide = true })
+			box(arch, "PillarCap", archCF * CFrame.new(s * 7.6, 10.3, 0), Vector3.new(2.6, 0.8, 2.6), C.Rose)
+			box(arch, "PillarLamp", archCF * CFrame.new(s * 7.6, 11.2, 0), Vector3.new(1, 1, 1), C.Lamp, { Material = MAT.Neon })
+		end
+		box(arch, "Beam", archCF * CFrame.new(0, 10.3, 0), Vector3.new(13, 0.6, 1.2), C.PlankDark)
+		local sign = box(arch, "ShopSign", archCF * CFrame.new(0, 12.38, 0), Vector3.new(12.4, 3.6, 0.8), C.Navy, { Shadow = true })
+		box(arch, "SignRoof", archCF * CFrame.new(0, 14.46, 0), Vector3.new(14, 0.6, 1.8), C.Rose)
+		-- 620 x 180 px canvas: the name 1.6 studs tall, the caption 0.68 stud
+		for _, face in ipairs({ Enum.NormalId.Front, Enum.NormalId.Back }) do
+			local gui = surfaceGui(sign, face)
+			local panel = signPanel(gui, C.TextGold)
+			signText(panel, "CLOUD SHOP", "Title", 80, C.Gold, "Name", 0.03, 0.05, 0.94, 0.56)
+			signText(panel, "pets & items", "Body", 34, C.Text, "Sub", 0.04, 0.62, 0.92, 0.3)
+			gui.Parent = sign
+		end
+		local lampTpl = Props.Lamp()
+		local lampTops = {}
+		for i, p in ipairs({ { -9, -13 }, { 9, -13 }, { -25, 6 }, { 25, 6 } }) do
+			local base = at(p[1], p[2]) - Vector3.new(0, (i > 2) and LAWN or 0, 0) -- the outer pair stands on the lawn
+			local lamp = place(lampTpl, CFrame.new(base), f, "ShopLamp")
+			local glass = lamp and lamp:FindFirstChild("LampGlass")
+			if glass and i <= 2 then
+				pointLight(glass, C.Lamp, 0.8, 16)
+			end
+			lampTops[i] = base + Vector3.new(0, 7.4, 0)
+		end
+		bunting(f, lampTops[1], lampTops[2], { C.Rose, C.Cream, C.Gold, rgb(120, 190, 235) }, 1.2)
+		local down = Vector3.new(0, LAWN, 0)
+		place(Props.FlowerBed(2), flatLook(at(-11.5, -19) - down, S - down) * CFrame.Angles(0, math.rad(90), 0), f, "FlowerBed")
+		place(Props.FlowerBed(4), flatLook(at(11.5, -19) - down, S - down) * CFrame.Angles(0, math.rad(90), 0), f, "FlowerBed")
+		local flies = anchorPart(f, "Fireflies", S + Vector3.new(0, 5, 0), Vector3.new(R * 1.5, 8, R * 1.5))
+		emitter(flies, {
+			Color = ColorSequence.new(rgb(255, 236, 150), rgb(190, 240, 170)),
+			Rate = 5,
+			Lifetime = NumberRange.new(5, 8),
+			Speed = NumberRange.new(0.3, 1),
+			SpreadAngle = Vector2.new(180, 180),
+			Size = popSize(0.45),
+		})
+	end)
+	if not okDecor then
+		warn("[LobbyBuilder] shop decor failed: " .. tostring(errDecor))
 	end
+	return { Roulettes = roulettes, ItemShop = stall }
+end
 
-	nameTag(topPart, "Cloud Shop", 22, 140)
-	local flies = anchorPart(f, "Fireflies", S + Vector3.new(0, 5, 0), Vector3.new(R * 1.5, 8, R * 1.5))
-	emitter(flies, {
-		Color = ColorSequence.new(Color3.fromRGB(236, 224, 150), Color3.fromRGB(176, 228, 160)),
-		Rate = 5,
-		Lifetime = NumberRange.new(5, 8),
-		Speed = NumberRange.new(0.3, 1),
-		SpreadAngle = Vector2.new(180, 180),
-		Size = popSize(0.45),
-	})
-
-	return { Roulettes = roulettes, ItemShop = itemShop }
+-- Last-resort shop: plain machines and a counter with their PromptParts, so pets and items stay purchasable.
+local function fallbackShop(root, L)
+	local f = newFolder(root, "ShopFallback")
+	local S = L.ShopCenter
+	box(f, "ShopTop", CFrame.new(S - Vector3.new(0, 1, 0)), Vector3.new(L.ShopR * 2, 2, L.ShopR * 2), C.Cloud, { Collide = true })
+	local neckA = polar(L.ShopAngle, PLAZA_R - 4, TOP)
+	local neckB = polar(L.ShopAngle, L.ShopDist - L.ShopR + 5, TOP)
+	local mid = (neckA + neckB) * 0.5
+	box(f, "ShopNeck", flatLook(mid, neckB) * CFrame.new(0, -0.8, 0), Vector3.new(14, 1.2, (neckB - neckA).Magnitude), C.Stone, { Collide = true })
+	local roulettes = {}
+	local count = #Config.Roulettes
+	for i, roulette in ipairs(Config.Roulettes) do
+		local pos = S + Vector3.new((i - (count + 1) / 2) * 12, 0, -12)
+		roulettes[roulette.Id] = fallbackMachine(f, flatLook(pos, S), roulette)
+	end
+	local stallPos = S + Vector3.new(0, 0, 12)
+	local stall = fallbackItemStall(f, flatLook(stallPos, S))
+	return { Roulettes = roulettes, ItemShop = stall }
 end
 
 ----------------------------------------------------------------------
--- Sky decoration: drifting clouds, a far cloud sea, distant banks, dust
+-- Home plots (one per spot) and the ring street
 ----------------------------------------------------------------------
 
-local function buildSky(root)
-	local f = newFolder(root, "SkyDecor")
-	local rng = Util.NewRng(SEED + 5)
+-- Local positions inside a plot (studs; origin = yard centre on the ground, -Z = gate / street side).
+local PLOT_POS = {
+	Gate = -G.PlotHalf,
+	Mailbox = Vector3.new(-11, 0, -G.PlotHalf - 2),
+	Podium = Vector3.new(G.PlotHalf - 12, 0, -G.PlotHalf + 10),
+	Spawn = Vector3.new(0, 3, -12),
+}
 
-	-- Drifting puffs: each cluster slides sideways and back forever (all parts share one tween).
-	local driftCount = 8
-	for i = 1, driftCount do
-		local ang = (i - 1) * (360 / driftCount) + rng:Float(-15, 15)
-		local dist = rng:Float(255, 330)
-		local y = TOP + rng:Float(-10, 70)
-		local radius = rng:Float(10, 17)
-		local parts = cloudCluster(f, rng, polar(ang, dist, y), radius, { Puffs = 2, CanCollide = false, Transparency = 0.05 })
-		local a = math.rad(ang)
-		local tangent = Vector3.new(-math.sin(a), 0, math.cos(a))
-		local sign = 1
-		if rng:Chance(0.5) then
-			sign = -1
-		end
-		local offset = tangent * (rng:Float(26, 46) * sign) + Vector3.new(0, rng:Float(-3, 3), 0)
-		local period = rng:Float(26, 44)
-		later(function()
-			for _, p in ipairs(parts) do
-				loopTween(p, period, { Position = p.Position + offset }, Enum.EasingStyle.Sine, true)
+-- Everything every plot shares, built once in plot-local space and cloned per plot.
+local function plotTemplate()
+	return template("Plot", function()
+		local m = Instance.new("Model")
+		m.Name = "Plot"
+		local half = G.PlotHalf
+		local ix = G.IslandHalfX
+		local front, back = G.IslandFront, G.IslandBack
+		local depth = back - front
+		local midZ = (back + front) / 2
+
+		-- cloud island body (top 1.2 under the lawn): a puffy cushion, not a slab. Two flat tiers carry the lawn;
+		-- overlapping billows bulge out along both sides and the back (a scalloped outline from above, round
+		-- bumps from the side), a hanging cumulus of big lumps rounds the underside off, and a soft rim of
+		-- small puffs rises from the outer margins (outside the fence; the yard, verge and street stay clear).
+		local rng = Util.NewRng(SEED + 77)
+		local puffs, rim = {}, {}
+		local sideZ0, sideZ1 = front + 12, back - 8
+		for _, sx in ipairs({ -1, 1 }) do
+			for i = 0, 3 do
+				local z = sideZ0 + i * (sideZ1 - sideZ0) / 3 + rng:Float(-3, 3)
+				puffs[#puffs + 1] = { sx * (ix + rng:Float(1, 3)), rng:Float(-5, -3.5), z, rng:Float(8, 10), rng:Float(5.5, 7), rng:Float(10, 12.5) }
 			end
-		end)
-	end
+			rim[#rim + 1] = { sx * (ix - 1), 0, rng:Float(-12, -4), 6, 4, 8 }
+		end
+		for i = 0, 2 do
+			local x = -ix + 12 + i * (2 * ix - 24) / 2 + rng:Float(-3, 3)
+			puffs[#puffs + 1] = { x, rng:Float(-5, -3.5), back + rng:Float(1, 3), rng:Float(12, 14), rng:Float(5.5, 7), rng:Float(8, 10) }
+		end
+		rim[#rim + 1] = { -ix + 2, 0, back - 1, 10, 6.5, 10 }
+		rim[#rim + 1] = { ix - 2, 0, back - 1, 10, 6.5, 10 }
+		-- the hanging underside (studs below the top of the cloud)
+		local hang = {
+			{ 0, -10, midZ, ix * 0.95, 7.5, depth * 0.48 },
+			{ ix * 0.1, -15, midZ, 20, 6.5, 22 },
+		}
+		for _, h in ipairs(hang) do
+			puffs[#puffs + 1] = h
+		end
+		-- 6-stud voxels: the island is cloned 16 times, so its body must stay cheap (~56 parts)
+		VX.CloudModel({
+			V = 6,
+			Tiers = {
+				{ SX = ix * 2 + 4, SZ = depth + 4, Z = midZ, Round = 10, H = 1 },
+			},
+			Puffs = puffs,
+			Rim = rim,
+			-- nothing may rise above the yard, the verge or the street
+			Carve = function(x, y, z)
+				return y > 0 and ((math.abs(x) < G.PlotHalf + 1.5 and z < G.PlotHalf + 1.5 and z > -G.PlotHalf - G.Verge - 1) or (z <= -G.PlotHalf - G.Verge - 1 and z > front - 3 and math.abs(x) < ix + 6))
+			end,
+			MaxParts = 80,
+			Seed = 9,
+		}, CFrame.new(0, -1.2, 0), m, "Island", true)
 
-	-- A fluffy sea far under the lobby. Non-collidable, so falling players are caught by the
-	-- kill-plane teleport rather than landing on it.
-	for i = 1, 10 do
-		local ang = (i - 1) * 36 + rng:Float(-14, 14)
-		local dist = rng:Float(120, 420)
-		local y = TOP - rng:Float(75, 130)
-		cloudCluster(f, rng, polar(ang, dist, y), rng:Float(24, 42), {
-			Puffs = 2,
-			CanCollide = false,
-			Color = COL.Dusk:Lerp(COL.Top, 0.4),
-			Shade = COL.Dusk,
+		-- mowed lawn stripes in the yard + darker margins and verge (all flush at the walking height)
+		local stripeW = PLOT / 6
+		for i = 1, 6 do
+			local z = -half + (i - 0.5) * stripeW
+			box(m, "Yard", CFrame.new(0, -0.5, z), Vector3.new(PLOT, 1, stripeW), (i % 2 == 0) and C.GrassLight or C.Grass, { Collide = true, Shadow = false })
+		end
+		local verge = G.Verge
+		box(m, "Margin", CFrame.new(-(half + ix) / 2, -0.5, (back + (-half - verge)) / 2), Vector3.new(ix - half, 1, back + half + verge), C.GrassDark, { Collide = true, Shadow = false })
+		box(m, "Margin", CFrame.new((half + ix) / 2, -0.5, (back + (-half - verge)) / 2), Vector3.new(ix - half, 1, back + half + verge), C.GrassDark, { Collide = true, Shadow = false })
+		box(m, "Margin", CFrame.new(0, -0.5, (back + half) / 2), Vector3.new(PLOT, 1, back - half), C.GrassDark, { Collide = true, Shadow = false })
+		box(m, "Verge", CFrame.new(0, -0.5, -half - verge / 2), Vector3.new(PLOT, 1, verge), C.GrassDark, { Collide = true, Shadow = false })
+		-- stepping stones from the gate into the yard
+		for i, z in ipairs({ -half + 2.5, -half + 6.5, -half + 10.5 }) do
+			box(m, "SteppingStone", CFrame.new((i % 2 == 0) and 0.6 or -0.4, 0.05, z), Vector3.new(4, 0.1, 2.6), C.StoneLight, { Collide = true, Shadow = false })
+		end
+
+		-- the street in front: stone slabs in two shades with darker curbs
+		local sw = G.StreetW
+		local slabs = 4
+		local slabLen = (ix * 2) / slabs
+		for i = 1, slabs do
+			local x = -ix + (i - 0.5) * slabLen
+			box(m, "Street", CFrame.new(x, -0.5, G.StreetZ), Vector3.new(slabLen, 1, sw - 3), (i % 2 == 0) and C.StoneLight or C.Stone, { Collide = true, Shadow = false })
+		end
+		for _, s in ipairs({ -1, 1 }) do
+			box(m, "Curb", CFrame.new(0, -0.5, G.StreetZ + s * (sw / 2 - 0.75)), Vector3.new(ix * 2, 1, 1.5), C.StoneDark, { Collide = true, Shadow = false })
+		end
+		-- low hedge along the plaza side of the street (keeps walkers from stepping off the island)
+		box(m, "Hedge", CFrame.new(0, 0.9, front - 0.9), Vector3.new(ix * 2, 1.8, 1.8), C.Hedge, { Collide = true })
+		box(m, "HedgeTop", CFrame.new(0, 1.9, front - 0.9), Vector3.new(ix * 2 - 1, 0.4, 1.3), C.HedgeLight)
+
+		-- fence posts + rails around the yard, open at the gate
+		local postSpots = {}
+		for _, x in ipairs({ -half, -half / 3, half / 3, half }) do
+			postSpots[#postSpots + 1] = { x, half }
+		end
+		for _, z in ipairs({ -half / 3, half / 3 }) do
+			postSpots[#postSpots + 1] = { -half, z }
+			postSpots[#postSpots + 1] = { half, z }
+		end
+		postSpots[#postSpots + 1] = { -half, -half }
+		postSpots[#postSpots + 1] = { half, -half }
+		for _, p in ipairs(postSpots) do
+			box(m, "FencePost", CFrame.new(p[1], 1.5, p[2]), Vector3.new(1, 3, 1), C.PlankDark, { Collide = true })
+		end
+		for _, y in ipairs({ 2.3 }) do
+			box(m, "FenceRail", CFrame.new(0, y, half), Vector3.new(PLOT, 0.35, 0.35), C.Plank, { Collide = true })
+			box(m, "FenceRail", CFrame.new(-half, y, 0), Vector3.new(0.35, 0.35, PLOT), C.Plank, { Collide = true })
+			box(m, "FenceRail", CFrame.new(half, y, 0), Vector3.new(0.35, 0.35, PLOT), C.Plank, { Collide = true })
+			local seg = half - 8
+			box(m, "FenceRail", CFrame.new(-half + seg / 2, y, -half), Vector3.new(seg, 0.35, 0.35), C.Plank, { Collide = true })
+			box(m, "FenceRail", CFrame.new(half - seg / 2, y, -half), Vector3.new(seg, 0.35, 0.35), C.Plank, { Collide = true })
+		end
+
+		-- the gate: stone pillars with lanterns, a beam across
+		for _, s in ipairs({ -1, 1 }) do
+			box(m, "GateBase", CFrame.new(s * 7.2, 0.5, -half), Vector3.new(2.6, 1, 2.6), C.StoneDark, { Collide = true })
+			box(m, "GatePillar", CFrame.new(s * 7.2, 4, -half), Vector3.new(2, 6, 2), C.StoneLight, { Collide = true })
+			box(m, "GateCap", CFrame.new(s * 7.2, 7.3, -half), Vector3.new(2.6, 0.6, 2.6), C.Stone)
+			box(m, "GateLantern", CFrame.new(s * 7.2, 8.1, -half), Vector3.new(1, 1, 1), C.Lamp, { Material = MAT.Neon })
+		end
+		box(m, "GateBeam", CFrame.new(0, 6.6, -half), Vector3.new(13.4, 0.8, 1), C.PlankDark)
+
+		-- mailbox (the nameplate floats above it); the gate lanterns light the street
+		local mb = PLOT_POS.Mailbox
+		box(m, "MailPost", CFrame.new(mb.X, 1.5, mb.Z), Vector3.new(0.5, 3, 0.5), C.PlankDark, { Collide = true })
+		box(m, "MailBox", CFrame.new(mb.X, 3.4, mb.Z), Vector3.new(1.4, 1.2, 2.2), C.IronLight)
+
+		-- pet podium: stepped stone with a band in the plot accent (recoloured per plot)
+		local pod = Instance.new("Model")
+		pod.Name = "Podium"
+		local pp = PLOT_POS.Podium
+		box(pod, "PodiumBase", CFrame.new(pp + Vector3.new(0, 0.5, 0)), Vector3.new(6, 1, 6), C.StoneDark, { Collide = true })
+		box(pod, "Accent", CFrame.new(pp + Vector3.new(0, 1.5, 0)), Vector3.new(4.4, 1, 4.4), C.Rose, { Collide = true })
+		box(pod, "PodiumTop", CFrame.new(pp + Vector3.new(0, 2.5, 0)), Vector3.new(5.2, 1, 5.2), C.StoneLight, { Collide = true })
+		pod.Parent = m
+		return m
+	end)
+end
+
+-- "No. 7" on both faces of the plot's gate sign: 220 x 90 px, the number 1.12 studs tall, gold on navy.
+local function numberSign(sign, index, accent)
+	for _, face in ipairs({ Enum.NormalId.Front, Enum.NormalId.Back }) do
+		local gui = surfaceGui(sign, face)
+		local plate = plainFrame(gui, "Plate", {
+			Size = UDim2.new(1, 0, 1, 0),
+			BackgroundColor3 = Color3.fromRGB(255, 255, 255),
+			BackgroundTransparency = 0,
 		})
+		vgradient(plate, C.Violet, C.Navy)
+		rounded(plate, 10)
+		outline(plate, accent:Lerp(C.TextGold, 0.5), 4)
+		signText(plate, "No. " .. tostring(index), "Title", SIGN_TITLE, C.TextGold, "Number", 0.03, 0.04, 0.94, 0.92)
+		gui.Parent = sign
+	end
+end
+
+-- Home nameplate over the mailbox (World text rule): a compact pixel tag, readable from ~80 studs. Left: a round
+-- avatar disc with the plot number badge; right: the name (big, outlined) and an info line. The disc holds
+--   Headshot    ImageLabel: SpotService loads the owner's headshot into it (Players:GetUserThumbnailAsync)
+--   Silhouette  the fallback built from frames (head + shoulders) while no headshot is available
+--   FreeIcon    a "+" shown while the home is free
+-- and the attributes OwnedColor / FreeColor (disc colour per state, read by SpotService).
+-- Returns gui, nameLabel, subLabel.
+local AVATAR_PX = 60
+
+local function avatarDisc(parent, index, accent)
+	local holder = plainFrame(parent, "AvatarHolder", { Size = UDim2.fromOffset(AVATAR_PX + 8, AVATAR_PX + 8), LayoutOrder = 1 })
+	local freeColor = (Theme.Buttons and Theme.Buttons.Green) or rgb(96, 196, 108)
+	local ownedColor = accent:Lerp(C.Cloud, 0.45)
+	local disc = plainFrame(holder, "Avatar", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromOffset(AVATAR_PX, AVATAR_PX),
+		BackgroundColor3 = freeColor,
+		BackgroundTransparency = 0,
+	})
+	disc:SetAttribute("OwnedColor", ownedColor)
+	disc:SetAttribute("FreeColor", freeColor)
+	rounded(disc, UDim.new(0.5, 0))
+	outline(disc, INK, 3)
+
+	-- fallback avatar: head + shoulders in a deeper shade of the plot colour (fits inside the circle)
+	local shade = Theme.Darken and Theme.Darken(accent, 0.38) or accent:Lerp(C.Navy, 0.38)
+	local silhouette = plainFrame(disc, "Silhouette", { Size = UDim2.fromScale(1, 1), Visible = false })
+	local head = plainFrame(silhouette, "Head", {
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 10),
+		Size = UDim2.fromOffset(23, 23),
+		BackgroundColor3 = shade,
+		BackgroundTransparency = 0,
+	})
+	rounded(head, UDim.new(0.5, 0))
+	local body = plainFrame(silhouette, "Shoulders", {
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 35),
+		Size = UDim2.fromOffset(36, 19),
+		BackgroundColor3 = shade,
+		BackgroundTransparency = 0,
+	})
+	rounded(body, 10)
+
+	-- free home: a chunky "+"
+	local plus = plainFrame(disc, "FreeIcon", { Size = UDim2.fromScale(1, 1) })
+	for _, size in ipairs({ Vector2.new(30, 9), Vector2.new(9, 30) }) do
+		local bar = plainFrame(plus, "Bar", {
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromScale(0.5, 0.5),
+			Size = UDim2.fromOffset(size.X, size.Y),
+			BackgroundColor3 = C.Text,
+			BackgroundTransparency = 0,
+		})
+		rounded(bar, 4)
 	end
 
-	-- Distant cloud banks on the horizon give the village a sense of scale.
+	local shot = Instance.new("ImageLabel")
+	shot.Name = "Headshot"
+	shot.AnchorPoint = Vector2.new(0.5, 0.5)
+	shot.Position = UDim2.fromScale(0.5, 0.5)
+	shot.Size = UDim2.new(1, -4, 1, -4)
+	shot.BackgroundTransparency = 1
+	shot.BorderSizePixel = 0
+	shot.Image = ""
+	shot.ScaleType = Enum.ScaleType.Crop
+	shot.Visible = false
+	rounded(shot, UDim.new(0.5, 0))
+	shot.Parent = disc
+
+	-- plot number badge on the disc's lower-left edge
+	local badge = plainFrame(holder, "NumberBadge", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.new(0, 10, 1, -9),
+		Size = UDim2.fromOffset(26, TAG_SMALL + 6),
+		AutomaticSize = Enum.AutomaticSize.X,
+		BackgroundColor3 = C.Gold,
+		BackgroundTransparency = 0,
+		ZIndex = 3,
+	})
+	rounded(badge, 10)
+	outline(badge, INK, 2.5)
+	padding(badge, 1, 6, 2)
+	local number = tagText(badge, "Number", "#" .. tostring(index), "Display", TAG_SMALL, C.Text, 1, 2)
+	number.ZIndex = 4
+	return holder
+end
+
+local function homeNameplate(anchor, index, accent)
+	-- bottom edge 7.2 studs up: a few studs over the mailbox, under the gate lanterns' glow
+	local gui = newTag(anchor, "Nameplate", 460, 110, -2.4, 100)
+	local plate = tagPlate(gui, accent, 230, Enum.FillDirection.Horizontal, 12)
+	local pad = plate:FindFirstChildOfClass("UIPadding")
+	if pad then -- the avatar disc hugs the left edge
+		pad.PaddingLeft = UDim.new(0, 6)
+		pad.PaddingRight = UDim.new(0, 18)
+		pad.PaddingTop = UDim.new(0, 5)
+		pad.PaddingBottom = UDim.new(0, 5)
+	end
+	avatarDisc(plate, index, accent)
+	local texts = plainFrame(plate, "Texts", { AutomaticSize = Enum.AutomaticSize.XY, LayoutOrder = 2 })
+	listLayout(texts, Enum.FillDirection.Vertical, 0, Enum.HorizontalAlignment.Left)
+	local nameLabel = tagText(texts, "NameLabel", "Free home", "Title", TAG_NAME, C.Text, 1)
+	local subLabel = tagText(texts, "SubLabel", "Step in to claim", "Body", TAG_INFO, C.TextGold, 2, 2)
+	return gui, nameLabel, subLabel
+end
+
+local function buildSpot(parent, index, angle)
+	local accent = ACCENTS[(index - 1) % #ACCENTS + 1]
+	local f = newFolder(parent, string.format("Spot_%02d", index))
+	f:SetAttribute("SpotIndex", index)
+	local centre = polar(angle, SPOT_R, TOP)
+	local plotCF = faceCentre(centre) -- LookVector = towards the gate / street / plaza
+	local function at(v)
+		return plotCF * CFrame.new(v)
+	end
+
+	local plot = place(plotTemplate(), plotCF, f, "Plot")
+	if plot then
+		-- the podium trim takes the plot accent
+		local podium = plot:FindFirstChild("Podium")
+		if podium then
+			for _, d in ipairs(podium:GetChildren()) do
+				if d:IsA("BasePart") and d.Name == "Accent" then
+					d.Color = accent
+				end
+			end
+		end
+	else
+		-- plain stand-in (template failed): a lawn slab so the spot stays usable
+		box(f, "Yard", plotCF * CFrame.new(0, -0.5, -9), Vector3.new(PLOT + 12, 1, PLOT + 30), C.Grass, { Collide = true })
+	end
+
+	-- per-plot accents: banner pennants on the gate beam, mailbox flag, number sign
+	for _, s in ipairs({ -1, 1 }) do
+		box(f, "GateBanner", at(Vector3.new(s * 5.4, 5.4, PLOT_POS.Gate - 0.6)), Vector3.new(1.6, 2, 0.15), accent, { Shadow = false })
+	end
+	local mb = PLOT_POS.Mailbox
+	box(f, "MailFlag", at(Vector3.new(mb.X + 0.77, 4.2, mb.Z + 0.4)), Vector3.new(0.15, 1, 0.8), accent, { Shadow = false })
+	local sign = box(f, "NumberSign", at(Vector3.new(0, 7.9, PLOT_POS.Gate)), Vector3.new(4.4, 1.8, 0.5), C.Plank)
+	numberSign(sign, index, accent)
+
+	-- nameplate over the mailbox
+	local anchor = anchorPart(f, "NameplateAnchor", at(Vector3.new(mb.X, 9.6, mb.Z)).Position)
+	local gui, nameLabel, subLabel = homeNameplate(anchor, index, accent)
+
+	local podiumTop = at(PLOT_POS.Podium + Vector3.new(0, 3, 0)).Position
+	local spawnPos = at(PLOT_POS.Spawn).Position
+	return {
+		Index = index,
+		Folder = f,
+		Center = centre,
+		SpawnCFrame = flatLook(spawnPos, centre + Vector3.new(0, 3, 0) + plotCF.LookVector * -30),
+		NameLabel = nameLabel,
+		SubLabel = subLabel,
+		Nameplate = gui,
+		PodiumCFrame = flatLook(podiumTop, podiumTop + plotCF.LookVector),
+		PlotCFrame = plotCF,
+		PlotSize = PLOT,
+		GateCFrame = at(Vector3.new(0, 0, PLOT_POS.Gate)),
+		Accent = accent,
+	}
+end
+
+-- Bare-minimum spot (see fallbackPortal): a lawn slab, a podium and the two labels.
+local function fallbackSpot(parent, index, angle)
+	local old = parent:FindFirstChild(string.format("Spot_%02d", index))
+	if old then
+		old:Destroy()
+	end
+	local f = newFolder(parent, string.format("Spot_%02d", index))
+	f:SetAttribute("SpotIndex", index)
+	local centre = polar(angle, SPOT_R, TOP)
+	local plotCF = faceCentre(centre)
+	box(f, "Yard", plotCF * CFrame.new(0, -0.5, -9), Vector3.new(PLOT + 12, 1, PLOT + 30), C.Grass, { Collide = true })
+	box(f, "PodiumBase", plotCF * CFrame.new(PLOT_POS.Podium + Vector3.new(0, 1.5, 0)), Vector3.new(5, 3, 5), C.Stone, { Collide = true })
+	local anchor = anchorPart(f, "NameplateAnchor", (plotCF * CFrame.new(PLOT_POS.Mailbox + Vector3.new(0, 9.6, 0))).Position)
+	local gui, nameLabel, subLabel = homeNameplate(anchor, index, C.TextGold)
+	local podiumTop = (plotCF * CFrame.new(PLOT_POS.Podium + Vector3.new(0, 3, 0))).Position
+	local spawnPos = (plotCF * CFrame.new(PLOT_POS.Spawn)).Position
+	return {
+		Index = index,
+		Folder = f,
+		Center = centre,
+		SpawnCFrame = flatLook(spawnPos, centre + Vector3.new(0, 3, 0) + plotCF.LookVector * -30),
+		NameLabel = nameLabel,
+		SubLabel = subLabel,
+		Nameplate = gui,
+		PodiumCFrame = flatLook(podiumTop, podiumTop + plotCF.LookVector),
+		PlotCFrame = plotCF,
+		PlotSize = PLOT,
+		GateCFrame = plotCF * CFrame.new(0, 0, PLOT_POS.Gate),
+		Accent = C.TextGold,
+	}
+end
+
+-- Rope rail with end posts along a straight edge (a, b = ground points).
+local function rail(parent, a, b, height)
+	height = height or 2.8
+	local m = newModel(parent, "Rail")
+	local dir = b - a
+	local len = dir.Magnitude
+	if len < 1 then
+		return m
+	end
+	local posts = math.max(2, math.floor(len / 30) + 1)
+	for i = 0, posts - 1 do
+		local p = a + dir * (i / (posts - 1))
+		box(m, "RailPost", CFrame.new(p + Vector3.new(0, height / 2, 0)), Vector3.new(0.6, height, 0.6), C.PlankDark, { Collide = true })
+	end
+	local mid = (a + b) * 0.5 + Vector3.new(0, height - 0.4, 0)
+	box(m, "RailRope", CFrame.lookAt(mid, mid + dir), Vector3.new(0.3, 0.3, len), C.Plank, { Collide = true, Shadow = false })
+	return m
+end
+
+-- A wooden bridge between two ground points (deck top `topOffset` below TOP): longitudinal planks, edge
+-- beams, rope rails on both sides (open ends) and optional cloud puffs underneath.
+local function woodBridge(parent, name, a, b, width, opts)
+	opts = opts or {}
+	local m = newModel(parent, name)
+	local topY = TOP + (opts.Top or -0.2)
+	a = Vector3.new(a.X, topY, a.Z)
+	b = Vector3.new(b.X, topY, b.Z)
+	local dir = b - a
+	local len = dir.Magnitude
+	local cf = CFrame.lookAt((a + b) * 0.5, b)
+	local planks = math.max(3, math.floor(width / 2 + 0.5))
+	local pw = width / planks
+	for i = 1, planks do
+		local x = -width / 2 + (i - 0.5) * pw
+		box(m, "Plank", cf * CFrame.new(x, -0.5, 0), Vector3.new(pw, 1, len), (i % 2 == 0) and C.PlankLight or C.Plank, { Collide = true, Shadow = len > 8 })
+	end
+	if opts.Rails ~= false then
+		local insetA = opts.RailInsetA or opts.RailInset or 3
+		local insetB = opts.RailInsetB or opts.RailInset or 3
+		local right = cf.RightVector
+		for _, s in ipairs({ -1, 1 }) do
+			if not (opts.NoRail and opts.NoRail[s]) then
+				local off = right * (s * (width / 2 - 0.3))
+				local p0 = a + dir.Unit * insetA + off
+				local p1 = b - dir.Unit * insetB + off
+				rail(m, Vector3.new(p0.X, topY, p0.Z), Vector3.new(p1.X, topY, p1.Z))
+			end
+		end
+	end
+	for _, t in ipairs(opts.Puffs or {}) do
+		-- the puff's highest voxels reach 3 studs over its anchor: anchored 4 under the deck top, it touches the
+		-- underside of the 1-stud planks and nothing pokes through
+		place(Props.Puff(opts.PuffSize or "M"), CFrame.new(a + dir * t - Vector3.new(0, 4, 0)) * CFrame.Angles(0, t * 7, 0), m, "BridgePuff")
+	end
+	return m
+end
+
+-- Ring street junctions (plank bridges between neighbouring plots), spoke bridges and garden bridges.
+local function buildRoads(root, L)
+	local f = newFolder(root, "Roads")
+	local ext = G.JunctionX + G.StreetExt
+	local ix = G.IslandHalfX
+	local sw = G.StreetW
+	for j, info in ipairs(L.Junctions) do
+		local a = info.Angle
+		local open = info.Spoke or info.Garden or info.Altar -- something docks on the plaza side here
+		local jf = newModel(f, string.format("Junction_%02d", j))
+		-- half A belongs to the plot before the junction (its local -X side), half B to the plot after it
+		for half = 1, 2 do
+			local plotAngle = (half == 1) and (a - G.HalfStep) or (a + G.HalfStep)
+			local plotCF = faceCentre(polar(plotAngle, SPOT_R, TOP))
+			local s = (half == 1) and -1 or 1
+			local lift = (half == 1) and 0 or -0.1 -- the halves overlap at the junction: never coplanar
+			local x0, x1 = s * ix, s * ext
+			local len = math.abs(x1 - x0)
+			local count = math.max(2, math.floor(len / 4 + 0.5))
+			local pw = len / count
+			for i = 1, count do
+				local x = x0 + s * (i - 0.5) * pw
+				box(jf, "Plank", plotCF * CFrame.new(x, -0.5 + lift, G.StreetZ), Vector3.new(pw, 1, sw), (i % 2 == 0) and C.PlankLight or C.Plank, { Collide = true, Shadow = false })
+			end
+		end
+		-- one straight rail per side across both halves: outer always, inner unless a bridge docks here
+		local plotA = faceCentre(polar(a - G.HalfStep, SPOT_R, TOP))
+		local plotB = faceCentre(polar(a + G.HalfStep, SPOT_R, TOP))
+		local sides = { G.StreetZ + sw / 2 - 0.9 }
+		if not open then
+			sides[2] = G.StreetZ - sw / 2 + 0.9
+		end
+		for _, z in ipairs(sides) do
+			local pA = (plotA * CFrame.new(-ix - 0.8, 0, z)).Position
+			local pB = (plotB * CFrame.new(ix + 0.8, 0, z)).Position
+			rail(jf, Vector3.new(pA.X, TOP, pA.Z), Vector3.new(pB.X, TOP, pB.Z))
+		end
+		if open then
+			-- short inner rails on both sides of the docking bridge
+			local zIn = G.StreetZ - sw / 2 + 0.9
+			local dock = polar(a, G.StreetR / math.cos(math.rad(G.HalfStep)) - sw / 2, TOP)
+			-- (the Storm Altar's bridge docks with a 14-stud entrance gate whose low walls close the gap)
+			local keep = info.Altar and 7.6 or (((info.Spoke and G.SpokeW) or 8) / 2 + 0.8)
+			for _, p in ipairs({ (plotA * CFrame.new(-ix - 0.8, 0, zIn)).Position, (plotB * CFrame.new(ix + 0.8, 0, zIn)).Position }) do
+				local d = Vector3.new(dock.X - p.X, 0, dock.Z - p.Z)
+				local len = d.Magnitude - keep
+				if len > 1.5 then
+					local q = p + d.Unit * len
+					rail(jf, Vector3.new(p.X, TOP, p.Z), Vector3.new(q.X, TOP, q.Z))
+				end
+			end
+		end
+	end
+
+	-- Spokes: plaza rim -> junction, over open sky, carried by cloud puffs.
+	for _, a in ipairs(L.SpokeAngles) do
+		local p0 = polar(a, PLAZA_R - 3, TOP)
+		local p1 = polar(a, G.SpokeEndR, TOP)
+		-- rails run from the plaza's cloud rim right up to the street edge (no open window over the sky)
+		woodBridge(f, "Spoke", p0, p1, G.SpokeW, { Puffs = { 0.52 }, PuffSize = "S", RailInsetA = 6, RailInsetB = 2.6 })
+	end
+end
+
+----------------------------------------------------------------------
+-- Garden islands (hanging off the street) and the reserved Storm Altar site
+----------------------------------------------------------------------
+
+-- Five stacked ground layers around `centre` (2-stud cells). fn(x, z, r) -> l1, l2, l3, l4 (see plazaCell).
+local function layeredGround(parent, centre, radius, fn)
+	local cell = 2
+	local n = math.ceil(radius / cell)
+	local grids = { Voxel.NewGrid(1), Voxel.NewGrid(1), Voxel.NewGrid(1), Voxel.NewGrid(1), Voxel.NewGrid(1) }
+	for i = -n, n do
+		for k = -n, n do
+			local x, z = i * cell, k * cell
+			local r = math.sqrt(x * x + z * z)
+			if r <= radius - 0.5 then
+				Voxel.Set(grids[1], i, 0, k, "Grass")
+				local keys = { fn(x, z, r) }
+				for li = 1, 4 do
+					if keys[li] then
+						Voxel.Set(grids[li + 1], i, 0, k, keys[li])
+					end
+				end
+			end
+		end
+	end
+	local tops = { -0.4, -0.3, -0.1, 0, 0.1 }
+	for li = 1, 5 do
+		VX.Build(grids[li], { V = cell, Name = "Ground" .. li, CF = CFrame.new(centre.X, TOP + tops[li] - cell / 2, centre.Z), Collide = true, Shadow = false, Parent = parent })
+	end
+end
+
+local function buildPond(parent, ground)
+	local g = Voxel.NewGrid(14)
+	VX.Ring(g, 0, 0, 5.2, 6.9, 0, 1, "Stone")
+	VX.Disc(g, 0, 0, 5.3, -1, -1, "WaterDeep")
+	VX.Disc(g, 0, 0, 5.3, 0, 0, "Water")
+	for _, p in ipairs({ { -2, 1 }, { 2, -2 }, { 1, 3 } }) do
+		Voxel.Set(g, p[1], 0, p[2], "Leaf")
+		Voxel.Set(g, p[1] + 1, 0, p[2], "Leaf")
+	end
+	Voxel.Set(g, 1, 1, 3, "Blossom")
+	Voxel.Set(g, -2, 1, 1, "BlossomWhite")
+	local water = VX.Split(g, { Water = true })
+	local cf = CFrame.new(ground.X, TOP + 0.1, ground.Z)
+	VX.Build(g, { V = 1, Name = "PondStone", CF = cf, Collide = true, Parent = parent })
+	VX.Build(water, { V = 1, Name = "PondWater", CF = cf, Collide = false, Parent = parent })
+	local sparkle = anchorPart(parent, "PondSparkle", ground + Vector3.new(0, 1, 0), Vector3.new(9, 1, 9))
+	emitter(sparkle, { Color = ColorSequence.new(rgb(200, 236, 255)), Rate = 3, Lifetime = NumberRange.new(1.5, 2.5), Speed = NumberRange.new(0.2, 0.6), Size = popSize(0.5) })
+end
+
+local function buildGarden(parent, spec, L)
+	local f = newFolder(parent, "Garden_" .. (spec.Name:gsub("%s", "")))
+	local a = spec.Angle
+	local c = polar(a, G.GardenR, TOP)
+	local R = G.GardenSize
+	local out = dirOf(a)
+	local rng = Util.NewRng(SEED + 40 + math.floor(a))
+	local cf = flatLook(c, c + out) -- local -Z = outwards (towards the street bridge)
+
+	local rim, puffs = {}, {}
 	for i = 1, 6 do
-		local ang = (i - 1) * 60 + rng:Float(-20, 20)
-		local dist = rng:Float(430, 540)
-		cloudCluster(f, rng, polar(ang, dist, TOP + rng:Float(-70, 10)), rng:Float(40, 62), {
-			Puffs = 3,
-			CanCollide = false,
-			Color = COL.Side,
-			Shade = COL.Shadow,
-			Transparency = 0.12,
-		})
+		local deg = (i - 1) * 60 + a + 180 + rng:Float(-6, 6)
+		if angleDiff(deg, a) > 30 then
+			local s = rng:Float(8, 9.5)
+			rim[#rim + 1] = { math.cos(math.rad(deg)) * (R + 1.5), rng:Float(-1.5, 0), math.sin(math.rad(deg)) * (R + 1.5), s, s * 0.62, s }
+		end
+	end
+	for i = 1, 3 do
+		local ang = (i - 1) / 3 * math.pi * 2 + rng:Float(-0.3, 0.3)
+		local s = rng:Float(7, 9)
+		puffs[#puffs + 1] = { math.cos(ang) * (R - 5), -6, math.sin(ang) * (R - 5), s, s * 0.7, s }
+	end
+	VX.CloudModel({
+		V = 3,
+		Tiers = { { R = R + 3, H = 1 }, { R = R - 3, H = 2 }, { R = R - 10, H = 2 }, { R = R - 16, H = 1 } },
+		Puffs = puffs,
+		Rim = rim,
+		Carve = function(x, y, z)
+			return y > 0 and (x * x + z * z) < (R - 3) * (R - 3)
+		end,
+		MaxParts = 46,
+		Seed = 20 + math.floor(a),
+	}, CFrame.new(c.X, TOP - 1.2, c.Z), f, "GardenCloud", true)
+
+	layeredGround(f, c, R, function(x, z, r)
+		local l1, l2, l3
+		local nz = vnoise(x + a, z - a, 18, 17)
+		if nz < 0.26 then
+			l1 = "GrassDark"
+		elseif nz > 0.76 then
+			l1 = "GrassLight"
+		end
+		local ring = math.abs(r - 10)
+		local t = x * out.X + z * out.Z
+		local d = math.abs(-x * out.Z + z * out.X)
+		-- the border reaches 2.2 studs past the sand (more than one 2-stud cell), so the sand never ends flush
+		-- with it on the grid
+		local onPath = t >= 9 and d <= 4.4
+		if ring <= 4.4 or onPath then
+			l2 = "SandDark"
+		end
+		if ring <= 2.2 or (t >= 9 and d <= 2.2 and r <= R - 2.5) then
+			l3 = "Sand"
+		end
+		if r > R - 3 then
+			l1 = nil -- lawn only at the very edge
+		elseif not l2 and r > R - 6 and hash3(math.floor(x), 7, math.floor(z), 3) < 0.09 then
+			l1 = "Flower" .. (math.floor(hash3(math.floor(x), 8, math.floor(z), 6) * #FLOWERS) + 1)
+		end
+		return l1, l2, l3, nil
+	end)
+
+	-- features
+	local function localPos(deg, dist)
+		-- deg measured from the outward direction
+		return (cf * CFrame.Angles(0, math.rad(deg), 0) * CFrame.new(0, 0, -dist)).Position
+	end
+	local down = Vector3.new(0, LAWN, 0) -- props stand on the lawn layer
+	if spec.Kind == "Pond" then
+		buildPond(f, c)
+		place(Props.Tree("Round"), CFrame.new(localPos(180, 16) - down) * CFrame.Angles(0, 1.3, 0), f, "RoundTree")
+		place(Props.FlowerBed(6), flatLook(localPos(140, 16) - down, c - down) * CFrame.Angles(0, math.rad(90), 0), f, "FlowerBed")
+	else
+		place(Props.Tree("Blossom"), CFrame.new(c - down) * CFrame.Angles(0, 0.7, 0), f, "BlossomTree")
+		place(Props.FlowerBed(1), flatLook(localPos(180, 16) - down, c - down) * CFrame.Angles(0, math.rad(90), 0), f, "FlowerBed")
+	end
+	for _, deg in ipairs({ 75, -75 }) do
+		local p = localPos(deg, 15.5) - down
+		place(Props.Bench(), flatLook(p, c - down), f, "Bench")
 	end
 
-	-- High, slow sparkle dust around the whole village.
-	local dust = anchorPart(f, "SkyDust", Vector3.new(ORIGIN.X, TOP + 20, ORIGIN.Z), Vector3.new(520, 90, 520))
+	-- name tag + the bridge to the street junction
+	local tag = anchorPart(f, "NameTag", c + Vector3.new(0, 22, 0))
+	local gui = newTag(tag, "NameTag", 320, 80, -1.7, 120)
+	local plate = tagPlate(gui, rgb(150, 210, 160), 160)
+	tagText(plate, "Text", spec.Name, "Title", TAG_NAME + 2, C.Text, 1)
+	woodBridge(f, "GardenBridge", polar(a, G.GardenR + R - 3, TOP), polar(a, G.SpokeEndR, TOP), 8, { RailInsetA = 3, RailInsetB = 2.6 })
+	return f
+end
+
+----------------------------------------------------------------------
+-- Sky: voxel cumulus around the village and one far below it (never collidable)
+----------------------------------------------------------------------
+
+-- kind: "Big" (96 studs) | "Small" (60 studs)
+local function cumulus(kind)
+	return template("Sky" .. kind, function()
+		local r = Util.NewRng(SEED + #kind * 13)
+		local w = (kind == "Big") and 96 or 60
+		local rim = {}
+		local n = 5
+		for i = 1, n do
+			local x = (i - (n + 1) / 2) / n * w * 0.9 + r:Float(-4, 4)
+			local s = r:Float(0.16, 0.24) * w
+			rim[#rim + 1] = { x, r:Float(0, 6), r:Float(-w * 0.12, w * 0.12), s, s * 0.8, s * 0.9 }
+		end
+		rim[#rim + 1] = { r:Float(-6, 6), w * 0.18, 0, w * 0.22, w * 0.2, w * 0.2 }
+		local spec = {
+			V = 6,
+			Tiers = { { SX = w, SZ = w * 0.55, Round = w * 0.2, H = 1, Key = "Mist" } },
+			Rim = rim,
+			MaxParts = 32,
+			Seed = #kind,
+		}
+		return VX.CloudModel(spec, CFrame.new(), nil, "SkyCloud", false)
+	end)
+end
+
+local function buildSky(root)
+	local f = newFolder(root, "Sky")
+	local rng = Util.NewRng(SEED + 5)
+	local count = 3
+	for i = 1, count do
+		local ang = (i - 1) * (360 / count) + rng:Float(-14, 14) + 20
+		local dist = rng:Float(430, 620)
+		local y = TOP + rng:Float(-40, 80)
+		local kind = (i == 2) and "Small" or "Big"
+		local pos = polar(ang, dist, y)
+		place(cumulus(kind), CFrame.new(pos) * CFrame.Angles(0, math.rad(rng:Float(0, 360)), 0), f, "SkyCloud")
+	end
+	-- far below: one big puffy cumulus (depth under the village), not a flat sheet
+	place(cumulus("Big"), CFrame.new(polar(rng:Float(40, 80), rng:Float(200, 320), TOP - rng:Float(130, 160))) * CFrame.Angles(0, math.rad(rng:Float(0, 360)), 0), f, "CloudSea")
+	local dust = anchorPart(f, "SkyDust", Vector3.new(OX, TOP + 24, OZ), Vector3.new(560, 90, 560))
 	emitter(dust, {
-		Color = ColorSequence.new(Color3.fromRGB(226, 208, 190), Color3.fromRGB(190, 206, 236)),
-		Rate = 12,
+		Color = ColorSequence.new(rgb(255, 236, 200), rgb(200, 220, 255)),
+		Rate = 14,
 		Lifetime = NumberRange.new(8, 12),
 		Speed = NumberRange.new(0.3, 1.2),
 		SpreadAngle = Vector2.new(180, 180),
@@ -2750,48 +3408,45 @@ local function section(name, fn)
 	if not ok then
 		warn("[LobbyBuilder] section '" .. name .. "' failed: " .. tostring(err))
 	end
+	return ok
 end
 
--- Last-resort shop (see fallbackPortal): a disc with plain machines and a counter, all with their
--- PromptParts, so pets and items stay purchasable even if the pretty shop could not be built.
-local function fallbackShop(root, L)
-	local f = newFolder(root, "ShopFallback")
-	local S = L.ShopCenter
-	disc(f, S - Vector3.new(0, 2, 0), L.ShopR * 2, 4, { Name = "ShopTop", Color = COL.Top })
-	walkway(f, polar(L.ShopAngle, SURF_R - 4, SPOKE_TOP), polar(L.ShopAngle, L.ShopDist - L.ShopR + 6, SPOKE_TOP), 16, "ShopNeck", 2.4)
-	local roulettes = {}
-	local count = #Config.Roulettes
-	for i, roulette in ipairs(Config.Roulettes) do
-		local pos = S + Vector3.new((i - (count + 1) / 2) * 12, 0, -12)
-		roulettes[roulette.Id] = fallbackMachine(f, CFrame.lookAt(pos, pos + Vector3.new(0, 0, 1)), roulette)
+-- Six spots on the plaza lawn when the decor pass could not compute them.
+local function defaultNpcSpots(L)
+	local spots = {}
+	local plan = { 22.5, 157.5, L.ShopAngle - 30, L.ShopAngle + 30, L.ShopAngle - 60, L.ShopAngle + 60 }
+	for _, a in ipairs(plan) do
+		local pos = polar(a, 58, TOP)
+		spots[#spots + 1] = faceCentre(pos)
 	end
-	local stallPos = S + Vector3.new(0, 0, 12)
-	local stall = fallbackItemStall(f, CFrame.lookAt(stallPos, stallPos + Vector3.new(0, 0, 1)))
-	return { Roulettes = roulettes, ItemShop = stall }
+	return spots
 end
 
 function LobbyBuilder.Build()
-	stopAnimations()
-	partCount = 0
+	templates = {}
+	reserved = {}
+	gateBoxCache = nil
+	machineBoxCache = nil
 
 	local old = Workspace:FindFirstChild("NimbusLobby")
 	if old then
 		old:Destroy()
 	end
-
 	local root = Instance.new("Folder")
 	root.Name = "NimbusLobby"
 
 	local L = computeLayout()
 	local diffs = Config.Difficulties
+	if not Voxel then
+		warn("[LobbyBuilder] shared/Voxel is missing: building the plain fallback lobby")
+	end
 
-	-- Gameplay-critical objects first (portals, spots, shop); each has a bare-bones fallback so a
-	-- scenery bug can never remove the contract the other services rely on.
+	-- Gameplay-critical objects first (portals, spots, shop); each has a bare-bones fallback.
 	local portals = {}
 	local portalFolder = newFolder(root, "Portals")
 	for i, diff in ipairs(diffs) do
 		local angle = L.PortalAngles[i]
-		local ok, result = pcall(buildPortal, portalFolder, Util.NewRng(SEED + 10 + i), diff, angle)
+		local ok, result = pcall(buildPortal, portalFolder, diff, angle)
 		if not ok then
 			warn("[LobbyBuilder] portal " .. tostring(diff.Id) .. " failed: " .. tostring(result))
 			result = fallbackPortal(portalFolder, diff, angle)
@@ -2802,46 +3457,46 @@ function LobbyBuilder.Build()
 	local spots = {}
 	local spotFolder = newFolder(root, "Spots")
 	for i = 1, SPOT_COUNT do
-		local angle = L.SpotAngles[i]
-		local ok, result = pcall(buildSpot, spotFolder, i, angle, L)
+		local angle = L.PlotAngles[i]
+		local ok, result = pcall(buildSpot, spotFolder, i, angle)
 		if not ok then
 			warn("[LobbyBuilder] spot " .. tostring(i) .. " failed: " .. tostring(result))
-			result = fallbackSpot(spotFolder, i, angle, L)
+			result = fallbackSpot(spotFolder, i, angle)
 		end
 		spots[i] = result
 	end
 
-	local shop
-	local okShop, shopResult = pcall(buildShop, root, L)
-	if okShop then
-		shop = shopResult
-	else
-		warn("[LobbyBuilder] shop failed: " .. tostring(shopResult))
+	local okShop, shop = pcall(buildShop, root, L)
+	if not okShop then
+		warn("[LobbyBuilder] shop failed: " .. tostring(shop))
+		local broken = root:FindFirstChild("Shop")
+		if broken then
+			broken:Destroy()
+		end
 		shop = fallbackShop(root, L)
 	end
 
-	-- Everything else is decoration: a failure there must not take the lobby down.
-	section("plaza", function()
+	-- The plaza ground is where everyone spawns: keep a plain floor if the voxel plaza cannot be built.
+	local okPlaza = section("plaza", function()
 		buildPlaza(root, L)
 	end)
-	section("rainbow arch", function()
-		buildArch(root)
-	end)
-	section("how-to board", function()
-		buildHowToBoard(root, L)
-	end)
-	section("guide board", function()
-		buildGuideBoard(root, L)
-	end)
+	if not okPlaza or not root:FindFirstChild("Plaza") or not root.Plaza:FindFirstChild("Paths") then
+		local floor = newFolder(root, "PlazaFallback")
+		box(floor, "PlazaFloor", CFrame.new(OX, TOP - 1, OZ), Vector3.new(PLAZA_R * 1.7, 2, PLAZA_R * 1.7), C.Grass, { Collide = true })
+		box(floor, "ShopNeckFloor", CFrame.new((Vector3.new(OX, TOP - 1, OZ) + L.ShopCenter - Vector3.new(0, 1, 0)) * 0.5), Vector3.new(16, 2, L.ShopDist), C.Stone, { Collide = true })
+	end
+	if type(L.NpcSpots) ~= "table" or #L.NpcSpots < 6 then
+		L.NpcSpots = defaultNpcSpots(L)
+	end
+
 	section("roads", function()
 		buildRoads(root, L)
 	end)
-	section("decor islands", function()
-		local decorFolder = newFolder(root, "DecorIslands")
-		for i, angle in ipairs(L.DecorAngles) do
-			local spec = DECOR_SPECS[(i - 1) % #DECOR_SPECS + 1]
-			section("decor " .. spec.Name, function()
-				buildDecorIsland(decorFolder, spec, angle, i, L)
+	section("gardens", function()
+		local gf = newFolder(root, "Gardens")
+		for _, spec in ipairs(L.Gardens) do
+			section("garden " .. spec.Name, function()
+				buildGarden(gf, spec, L)
 			end)
 		end
 	end)
@@ -2850,29 +3505,38 @@ function LobbyBuilder.Build()
 	end)
 
 	root.Parent = Workspace
+	-- the templates and merged box lists are only needed while building
+	templates = {}
+	gateBoxCache = nil
+	machineBoxCache = nil
 
-	-- Start looping animations now that everything lives in the DataModel.
-	for _, fn in ipairs(animQueue) do
-		local ok, err = pcall(fn)
-		if not ok then
-			warn("[LobbyBuilder] animation failed: " .. tostring(err))
+	-- Spawn on the golden medallion in the middle of the court, looking at the middle portal.
+	local spawnPos = Vector3.new(OX, TOP + 3, OZ)
+	local focus = polar(L.MidAngle, PORTAL_R, TOP + 3)
+	local altarSite = nil
+	local altarDock = nil
+	if L.AltarAngle then
+		altarSite = faceCentre(polar(L.AltarAngle, G.GardenR, TOP))
+		altarDock = polar(L.AltarAngle, G.SpokeEndR - 2.4, TOP)
+	end
+
+	local parts = 0
+	for _, d in ipairs(root:GetDescendants()) do
+		if d:IsA("BasePart") then
+			parts = parts + 1
 		end
 	end
-	animQueue = {}
-
-	-- Spawn in the middle of the plaza, looking at the middle portal.
-	local spawnPos = Vector3.new(ORIGIN.X, TOP + 3, ORIGIN.Z)
-	local focus = portals[diffs[math.ceil(#diffs / 2)].Id]
-	local lookTarget = Vector3.new(focus.Center.X, spawnPos.Y, focus.Center.Z)
-
-	print(string.format("[LobbyBuilder] lobby built (%d parts, %d portals, %d spots)", partCount, #diffs, #spots))
+	print(string.format("[LobbyBuilder] voxel lobby built (%d parts, %d portals, %d plots)", parts, #diffs, #spots))
 
 	return {
 		Folder = root,
-		SpawnCFrame = CFrame.lookAt(spawnPos, lookTarget),
+		SpawnCFrame = flatLook(spawnPos, focus),
 		Portals = portals,
 		Spots = spots,
 		Shop = shop,
+		NpcSpots = L.NpcSpots,
+		AltarSite = altarSite, -- reserved for the Storm Altar (ARCHITECTURE_V3.md section 10), faces the plaza
+		AltarDock = altarDock, -- street inner edge where a bridge to the altar island can dock
 	}
 end
 
