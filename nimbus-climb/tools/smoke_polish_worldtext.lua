@@ -30,7 +30,6 @@ local NAME_MIN = 22 -- px at 1080p
 local INFO_MIN = 18
 local TITLE_STUDS = 0.95 -- surface signs: the biggest line
 local INFO_STUDS = 0.6
-local BULLET = "\226\128\162"
 
 ----------------------------------------------------------------------------------------------------
 -- the audit (both worlds)

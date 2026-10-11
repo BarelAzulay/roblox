@@ -2449,6 +2449,11 @@ local function applyState(payload)
 		ensureLoop()
 		return
 	end
+	if S.finale then
+		-- a tutorial running again after the finale (the developer tools' restart): the card and the guide come back
+		S.finale = false
+		S.finaleUntil = nil
+	end
 	local changed = not prev or prev.Done or prev.Id ~= st.Id or prev.Step ~= st.Step or prev.Text ~= st.Text
 	if changed then
 		local advanced = prev ~= nil and not prev.Done and st.Step > prev.Step

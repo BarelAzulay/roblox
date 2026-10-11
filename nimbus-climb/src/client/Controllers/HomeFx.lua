@@ -27,10 +27,10 @@
 --     a field of lock signs: from afar it shows what can be bought now, like a classic tycoon.
 --   * the local player's own pads glow when the Cash attribute can pay their Price and dim (price in red) when not.
 --   * the pets at work: every key of the plot's GardenPets attribute ("1=cat;3=fox@Golden", written by TycoonService
---     on the plot folder) stands on the Garden's Spot<slot> cushion, every key of GymPets (PetCareService) on the
---     Gym's Spot<slot> target (PetBuilder Low detail, facing the yard), for homes within K.PET_NEAR studs; they
---     breathe / flap a few times a second (gym pets livelier). Hybrid keys need their owner's record and are
---     skipped. Pets live in workspace.ClientFx.HomePets.
+--     on the plot folder) stands on the Garden's Spot<slot> cushion (full size), every key of GymPets (PetCareService)
+--     on the Gym's Spot<slot> target (a little smaller: the targets are closer together), PetBuilder Low detail,
+--     facing the yard, for homes within K.PET_NEAR studs; they breathe / flap a few times a second (gym pets
+--     livelier). Hybrid keys need their owner's record and are skipped. Pets live in workspace.ClientFx.HomePets.
 -- Cheap: one RenderStepped connection; homes farther than K.NEAR studs from the camera are frozen; the cloud blocks
 -- are pooled parts in workspace.ClientFx (never more than K.MAX_BLOCKS), nothing else is created per frame; no
 -- collisions, queries, touches or shadows on anything HomeFx makes. Plain Lua 5.1-compatible syntax only.

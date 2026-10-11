@@ -359,6 +359,16 @@ end
 -- resolveSize -> measureContent -> textExtent (one shared upvalue), plus Mock.TextExtent (TextBounds).
 -- measure (optional) replaces GUI_MEASURE. Returns true + a function that puts the mock's own measure back,
 -- or false + the reason.
+-- LuaJIT treats a local function that is never reassigned as an immutable upvalue: a trace compiled while the layout
+-- code was hot keeps calling the OLD textExtent after debug.setupvalue. Flushing the trace cache after every swap
+-- makes the swap reach compiled code too (no-op without the jit library).
+local function flushTraces()
+	local j = rawget(_G, "jit")
+	if type(j) == "table" and type(j.flush) == "function" then
+		pcall(j.flush)
+	end
+end
+
 local function installMetrics(measure)
 	if measure then
 		MEASURE = measure
@@ -380,10 +390,12 @@ local function installMetrics(measure)
 	debug.setupvalue(measureContent, index, realExtent)
 	Mock.TextExtent = realExtent
 	Mock.GuiEpoch = (Mock.GuiEpoch or 0) + 1
+	flushTraces()
 	return true, function()
 		debug.setupvalue(measureContent, index, original)
 		Mock.TextExtent = originalPublic
 		Mock.GuiEpoch = (Mock.GuiEpoch or 0) + 1
+		flushTraces()
 	end
 end
 

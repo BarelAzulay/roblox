@@ -4,8 +4,8 @@
 -- the Collector pad, MarketplaceService.ProcessReceipt) while TycoonService, PetCareService, FusionService,
 -- GemService, TutorialService, SpotService, HomeBuilder, PetService and DataService all run at once. Cash for the big
 -- purchases comes from DataService.AddCash (a stand-in for hours of Collector income, like tools/sim_tycoon.py).
--- Loaded by tools/smoke.py in the SERVER world; the scenarios are chapters of ONE story and run in order (before the
--- care block: p2care_exploits leaves a dish cooking for p2care_shutdown):
+-- Loaded by tools/smoke.py in BOTH worlds (ARGS.context picks the half). In the server world the scenarios are chapters
+-- of ONE story and run in order (before the care block: p2care_exploits leaves a dish cooking for p2care_shutdown):
 --   p2flow_arrive        Ann (new), Ben (new, an account where paid random items are restricted) and Cid (a v3 /
 --                        Phase 1 save: Home.Rooms reserve, finished basics, an old SpotIndex) join: nobody gets a
 --                        plot, Cash / Gems attributes, the policy state, the join toasts ("Pick a free home" /
@@ -40,7 +40,8 @@
 --                        with the receipt, a retry grants nothing, a pack that is not created stays pending); the Storm
 --                        Altar opens the Shop on the Secret roulette for Ann (a side toast for Ben); a gem spin of the
 --                        Secret roulette (Mythic / Secret pet, discovered; refused for Ben, nothing charged); mixing that
---                        pet with the training Combat pet costs Gems and makes a hybrid record.
+--                        pet with the training Combat pet costs Gems and makes a hybrid record; the hybrid takes Ann's
+--                        podium on a tag plate that hugs its short blended name.
 --   p2flow_rejoin        Ann leaves with two Snacks cooking (refunded into the leave save) and her plot is cleared;
 --                        Cid rejoins ("Welcome back") and claims Ann's old plot (his Phase 2 build comes back there);
 --                        Ann rejoins ("Pick a free home": her last plot is taken), every saved number is back, she claims
@@ -49,6 +50,9 @@
 --                        known. DataStore merge the other way: Ben's previous server lands a late Prestige-1 Home while
 --                        he plays at Prestige 0 here: his session's station edit is void, his live Home and the plot in
 --                        the world follow (stations, star, Prestige attribute, the Fusion Machine requirement).
+--   client_p2flow        (client) the flow's players end with a finished tutorial: the card shows the finale and
+--                        leaves; a tutorial restarted afterwards in the same session (the developer tools' restart)
+--                        shows its card and its world guide again (TutorialController kept its finale flag forever)
 -- Plain Lua 5.1 syntax only.
 
 local T = SmokeCommon.T
@@ -58,6 +62,83 @@ local CONTEXT = (ARGS and ARGS.context) or "server"
 
 local S = {}
 if CONTEXT ~= "server" then
+	------------------------------------------------------------------------------------------------
+	-- client world: the tutorial card after the whole tutorial was finished (the flow's players end there)
+	------------------------------------------------------------------------------------------------
+	S.client_p2flow = guarded("client_p2flow", function()
+		local KC = _G.KC
+		if not T.check(type(KC) == "table" and type(KC.toClient) == "function", "client flow: (precondition) the client kit is loaded") then
+			return
+		end
+		local advance, toClient = KC.advance, KC.toClient
+		local Config = KC.env()
+		local LocalPlayer = game:GetService("Players").LocalPlayer
+		local function moduleAt(top, rest)
+			local inst = Mock.GetPath(ROOTS[top] .. "/" .. rest)
+			if not inst then
+				return nil
+			end
+			local ok, result = pcall(require, inst)
+			return ok and type(result) == "table" and result or nil
+		end
+		local Steps = moduleAt("shared", "TutorialSteps")
+		local TC = moduleAt("client", "Controllers/TutorialController")
+		if not T.check(Steps ~= nil and TC ~= nil and type(TC.GetState) == "function", "client flow: (precondition) TutorialSteps and TutorialController load") then
+			return
+		end
+		local function payload(index, over)
+			local step = Steps.Steps[index]
+			local text = tostring(step.Text):gsub("{GiftTokens}", tostring(Config.Tutorial.GiftTokens))
+			text = text:gsub("{FinishTokens}", tostring(Config.Tutorial.FinishReward.Tokens))
+			local st = {
+				Step = index, Total = #Steps.Steps, Id = step.Id, Title = step.Title, Text = text, Target = step.Target, Chapter = step.Chapter,
+				CompleteOn = step.CompleteOn, Hint = step.Hint, Button = step.Button, Gift = step.Gift == true,
+				Done = false, Completed = false, Skipped = false, Reward = 0,
+			}
+			for k, v in pairs(over or {}) do
+				st[k] = v
+			end
+			return st
+		end
+		local function panel()
+			local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+			local g = pg and pg:FindFirstChild("NimbusTutorial")
+			return g and g:FindFirstChild("TutorialPanel")
+		end
+		local function guideSign()
+			local fx = workspace:FindFirstChild("ClientFx")
+			return fx and fx:FindFirstChild("GuideSign", true)
+		end
+		Mock.SetViewport(1920, 1080)
+		LocalPlayer:SetAttribute(Config.Attr.InMatch, false)
+		local errors0 = #Mock.Errors
+		-- the home chapter's last step, then the whole tutorial completes: the finale, then the card leaves
+		local last = #Steps.Steps
+		toClient("TutorialState", payload(last))
+		advance(3)
+		T.check(panel() ~= nil and panel().Visible, "client flow: the card shows the home chapter's last step ('" .. Steps.Steps[last].Id .. "')")
+		toClient("TutorialState", payload(last, { Done = true, Completed = true }))
+		advance(1)
+		T.check(panel() ~= nil and panel().Visible, "client flow: finishing the tutorial shows the finale on the card")
+		advance(6)
+		T.check(panel() ~= nil and not panel().Visible, "client flow: ...then the card leaves")
+		-- the developer tools restart the tutorial in the same session: the card and the world guide come back
+		local portal = (Steps.IndexOf and Steps.IndexOf.portal) or 7
+		local target = { Kind = "Portal", Id = "Easy", Label = "Easy Portal", Position = Config.Lobby.Origin + Vector3.new(60, 0, 40) }
+		toClient("TutorialState", payload(portal, { Target = target }))
+		advance(2.5)
+		local st = TC.GetState()
+		T.check(panel() ~= nil and panel().Visible and st ~= nil and st.Id == "portal", "client flow: a tutorial restarted after the finale shows its card again")
+		T.check(guideSign() ~= nil, "client flow: ...and its world guide (the floating sign over the target)")
+		-- finished again (no Completed: no second finale)
+		toClient("TutorialState", payload(last, { Done = true }))
+		advance(1.5)
+		T.check(panel() ~= nil and not panel().Visible, "client flow: a Done state without Completed just hides the card")
+		T.eq(#Mock.Errors - errors0, 0, "client flow: no client script errors")
+		if KC.flushErrors then
+			KC.flushErrors("client_p2flow")
+		end
+	end)
 	return S
 end
 
@@ -1031,7 +1112,6 @@ S.p2flow_prestige = guarded("p2flow_prestige", function()
 		Cash = cash(ann), Gems = gems(ann), Stations = home(ann).Stations, Garden = home(ann).Garden, Gym = home(ann).Gym,
 		Snack = DataS.GetFood(ann, "Snack"), Eco = X.PK.Count(DataS.GetProfile(ann), F.eco), Level = TC.HomeLevelOf(home(ann)),
 	}
-	F.preStored = stored(ann.UserId)
 	mark = K.logSize()
 	pressPad(ann, annInfo, "Prestige")
 	local after = home(ann)
@@ -1059,30 +1139,37 @@ S.p2flow_prestige = guarded("p2flow_prestige", function()
 	local gLv2, gXp2 = DataS.GetPetLevel(ann, F.combat)
 	T.check(gLv2 == gLv and gXp2 == gXp, "flow prestige: the pet in the reset Gym stops training", gLv .. "/" .. gXp .. " -> " .. gLv2 .. "/" .. gXp2)
 
-	-- DataStore merge after the prestige: a stale server's late prestige-0 write lands before this server saves
+	-- DataStore merge after the prestige: a stale server's late write lands (Ann's previous session, at prestige 0:
+	-- an extra Vault level, +5000 Cash, +7 Gems, +2 Snacks). Its Home edits only count while the store is still at
+	-- prestige 0 (when an autosave of this server already stored the prestige, the other server's merge voids them);
+	-- Cash / Gems / Food always travel as deltas. Either way the outcome below is the same.
 	local rec = stored(ann.UserId)
-	if T.check(type(rec) == "table" and type(rec.Home) == "table" and rec.Home.Prestige == 0, "flow merge: (precondition) the store still holds the prestige-0 build") then
-		local stashCash, stashGems = rec.Cash or 0, rec.Gems or 0
-		local stashSnack = (type(rec.Food) == "table" and rec.Food.Snack) or 0
-		rec.Home.Stations.Vault = min(5, (rec.Home.Stations.Vault or 0) + 1)
-		rec.Home.Level = (rec.Home.Level or 0) + 1
-		rec.Cash = stashCash + 5000
-		rec.Gems = stashGems + 7
+	if T.check(type(rec) == "table" and type(rec.Home) == "table", "flow merge: (precondition) Ann has a save") then
+		local storeAtZero = (rec.Home.Prestige or 0) == 0
+		T.info("flow merge: the stale write lands " .. (storeAtZero and "before this server saved the prestige" or "after an autosave stored the prestige"))
+		if storeAtZero then
+			rec.Home.Stations = type(rec.Home.Stations) == "table" and rec.Home.Stations or {}
+			rec.Home.Stations.Vault = min(5, (rec.Home.Stations.Vault or 0) + 1)
+			rec.Home.Level = (rec.Home.Level or 0) + 1
+		end
+		rec.Cash = (rec.Cash or 0) + 5000
+		rec.Gems = (rec.Gems or 0) + 7
 		rec.Food = type(rec.Food) == "table" and rec.Food or {}
-		rec.Food.Snack = stashSnack + 2
+		rec.Food.Snack = (rec.Food.Snack or 0) + 2
 		DataS.Save(ann)
 		local s = stored(ann.UserId) or {}
 		local sh = type(s.Home) == "table" and s.Home or {}
 		T.check(sh.Prestige == 1 and sameMap(sh.Stations, home(ann).Stations) and (sh.Stations.Vault or 0) == (home(ann).Stations.Vault or 0),
 			"flow merge: the prestiged Home wins whole (the stale write's station levels do not come back)", mapText(sh.Stations))
 		T.eq(s.Cash, 5000, "flow merge: Cash merges as a delta: the stale server's +5000 stays, the prestige reset took the rest")
-		T.eq(s.Gems, stashGems + 7 + TC.PrestigeGems(1), "flow merge: Gems: the stale +7 plus the prestige reward")
-		T.check(type(s.Food) == "table" and s.Food.Snack == stashSnack + 2, "flow merge: Food merges as a delta (+2 Snacks)")
+		T.eq(s.Gems, before.Gems + 7 + TC.PrestigeGems(1), "flow merge: Gems: the stale +7 plus the prestige reward")
+		T.check(type(s.Food) == "table" and s.Food.Snack == before.Snack + 2, "flow merge: Food merges as a delta (+2 Snacks)")
 		advance(0.6)
 		T.check(cash(ann) == 5000 and ann:GetAttribute(config().Attr.Cash) == 5000 and gems(ann) == s.Gems and ann:GetAttribute(config().Attr.Gems) == s.Gems,
 			"flow merge: the live profile adopts the merged balances (HUD attributes too)")
 		T.check(home(ann).Prestige == 1 and stationModel(annInfo, "Vault") == nil and stationModel(annInfo, "Press1") == nil,
 			"flow merge: ...and the plot keeps showing the prestiged home")
+		T.check(tut(ann) and tut(ann).Done == true and DataS.GetTutorial(ann).Done == true, "flow merge: ...and the finished tutorial stays finished")
 	end
 	K.flushErrors("p2flow_prestige")
 	K.flushWarnings("p2flow_prestige", ALLOWED_WARNINGS)
@@ -1252,13 +1339,40 @@ S.p2flow_fusion_gems = guarded("p2flow_fusion_gems", function()
 		T.eq(opened, 1, "flow secret: Ann's Summon opens the Shop on the Secret roulette")
 		T.check(#K.remotesFor("OpenPanel", ben.UserId, mark) == 0 and toasted(ben, "not available", mark), "flow secret: Ben's account gets a side toast instead (no Shop)")
 	end
-	-- a gem spin of the Secret roulette (the Shop's Gems tab: BuyRoulette(id, "Gems"))
+	-- a gem spin of the Secret roulette (the Shop's Gems tab: BuyRoulette(id, "Gems")). The roll is pinned to the pool
+	-- pet whose hybrid with the training Combat pet gets the shortest blended name (the podium check after the Mix
+	-- wants the narrowest tag, the same in every run); the quote, the charge and the grant stay the real ones.
 	local price = Config.Gems.SecretRoulette.GemPrice
 	local gA, gB, pB = gems(ann), gems(ben), countKeys(DataS.GetProfile(ben).Pets)
+	local pinned = nil
+	do
+		local combatDef = X.PC.Get(F.combat)
+		local pool = (Gs and type(Gs.PossiblePets) == "function") and Gs.PossiblePets(secretId) or {}
+		local shortest = math.huge
+		for _, def in ipairs(pool) do
+			local okName, blended = pcall(PK.BlendName, def.Name, combatDef and combatDef.Name)
+			local n = (okName and type(blended) == "string") and #blended or math.huge
+			if n < shortest or (n == shortest and pinned and def.Id < pinned) then
+				pinned, shortest = def.Id, n
+			end
+		end
+	end
+	local realRoll = Gs and Gs.RollPet
+	if pinned and realRoll then
+		Gs.RollPet = function()
+			return pinned
+		end
+	end
 	mark = K.logSize()
-	Mock.FromClient(remote("BuyRoulette"), ann, secretId, "Gems")
-	Mock.FromClient(remote("BuyRoulette"), ben, secretId, "Gems")
-	advance(0.6)
+	local okSpin, errSpin = pcall(function()
+		Mock.FromClient(remote("BuyRoulette"), ann, secretId, "Gems")
+		Mock.FromClient(remote("BuyRoulette"), ben, secretId, "Gems")
+		advance(0.6)
+	end)
+	if realRoll then
+		Gs.RollPet = realRoll
+	end
+	T.check(okSpin, "flow secret: the spins ran", tostring(errSpin))
 	local spun = K.lastRemote("RouletteResult", ann.UserId, mark)
 	local result = spun and spun.args[1]
 	local won = type(result) == "table" and result.Ok == true and result.PetId or nil
@@ -1301,6 +1415,30 @@ S.p2flow_fusion_gems = guarded("p2flow_fusion_gems", function()
 			end
 			T.check(prof.Equipped[2] == hybridKey, "flow fusion: ...and the equipped place of the Combat pet", table.concat(prof.Equipped, ","))
 			F.hybrid = hybridKey
+
+			-- the hybrid is Ann's best pet now: it takes her podium, on a tag plate that hugs its short blended name
+			-- (World text rule: compact plates; the plate's minimum width once left ~75 px of it empty)
+			if X.SS and type(X.SS.Refresh) == "function" then
+				pcall(X.SS.Refresh, ann)
+			end
+			advance(0.3)
+			local tag = annInfo and annInfo.Folder and annInfo.Folder:FindFirstChild("ShowcaseTag", true)
+			local card = tag and tag:FindFirstChild("Card", true)
+			local nameLabel = tag and tag:FindFirstChild("PetName", true)
+			local shownName = def and tostring(def.DisplayName or def.Name) or "?"
+			if T.check(tag ~= nil and tag.Enabled and card ~= nil and nameLabel ~= nil and nameLabel.Text == shownName,
+				"flow fusion: ...and takes Ann's podium (her best pet): the tag names '" .. shownName .. "'", nameLabel and nameLabel.Text or "no tag") then
+				local minX, maxX = math.huge, -math.huge
+				for _, c in ipairs(card:GetDescendants()) do
+					if c:IsA("GuiObject") and c.Visible and c.AbsoluteSize.X > 0 then
+						minX = math.min(minX, c.AbsolutePosition.X)
+						maxX = math.max(maxX, c.AbsolutePosition.X + c.AbsoluteSize.X)
+					end
+				end
+				T.check(maxX > minX and card.AbsoluteSize.X - (maxX - minX) <= 64,
+					"flow fusion: ...on a plate that hugs the short name (World text rule: compact plates)",
+					string.format("%d px plate for %d px of text", card.AbsoluteSize.X, maxX - minX))
+			end
 		end
 	end
 	K.flushErrors("p2flow_fusion_gems")
@@ -1454,6 +1592,7 @@ S.p2flow_rejoin = guarded("p2flow_rejoin", function()
 				"flow merge 2: ...the plot in the world follows (Press 1 Lv 3, the lanterns, no Cottage)")
 			T.check(benInfo.Folder:GetAttribute("Prestige") == 1 and benInfo.SubLabel.Text:find(STAR, 1, true) ~= nil, "flow merge 2: ...the star on his nameplate", benInfo.SubLabel.Text)
 			T.check(#K.remotesFor("ProfileSync", ben.UserId, mk) >= 1, "flow merge 2: ...and his client gets the new snapshot")
+			T.check(tut(ben) and tut(ben).Done == true, "flow merge 2: ...his skipped tutorial stays skipped")
 			local okU, whyU = X.Fuse.Unlocked(ben)
 			T.check(okU == false and tostring(whyU):find("Build the Fusion Machine", 1, true) ~= nil, "flow merge 2: the Fusion Machine now only needs to be built (Prestige 1 reached)", tostring(whyU))
 		end

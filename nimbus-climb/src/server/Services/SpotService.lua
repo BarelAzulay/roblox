@@ -343,7 +343,9 @@ local function buildTag(info)
 	card.Name = "Card"
 	card.AnchorPoint = Vector2.new(0.5, 1)
 	card.Position = UDim2.new(0.5, 0, 1, 0)
-	card.Size = UDim2.fromOffset(140, 0)
+	-- minimum width: catalog names are wider anyway; a short hybrid name ("Draar" + "Mythic") still gets a plate
+	-- that hugs it (140 left ~75 px of empty plate around it)
+	card.Size = UDim2.fromOffset(120, 0)
 	card.AutomaticSize = Enum.AutomaticSize.XY
 	card.BackgroundColor3 = Color3.fromRGB(255, 255, 255) -- the gradient below sets the real colour
 	card.BackgroundTransparency = 0.04

@@ -1752,6 +1752,27 @@ function V.profileSync(s)
 	return p
 end
 
+-- The pets a roulette can roll: PetCatalog's token roulettes, else GemService's gems-only roulettes (Phase 2: the
+-- Secret roulette lives in Config.Gems.SecretRoulette and GemService rolls it).
+local function possiblePets(rouletteId)
+	local PC = M["shared/PetCatalog"]
+	local list = PC and PC.PossiblePets(rouletteId) or {}
+	if #list == 0 then
+		local inst = moduleInstance("server/Services/GemService")
+		local ok, Gems = false, nil
+		if inst then
+			ok, Gems = pcall(require, inst)
+		end
+		if ok and type(Gems) == "table" and type(Gems.PossiblePets) == "function" then
+			local okList, gemList = pcall(Gems.PossiblePets, rouletteId)
+			if okList and type(gemList) == "table" then
+				list = gemList
+			end
+		end
+	end
+	return list
+end
+
 -- ARCHITECTURE_V2.md section 2: RouletteResult { Ok, Reason, RouletteId, PetId, IsNew, Count, Tokens, Strip }
 function V.rouletteResult(r)
 	local PC = M["shared/PetCatalog"]
@@ -1771,7 +1792,7 @@ function V.rouletteResult(r)
 			p[#p + 1] = "Strip has " .. tostring(type(r.Strip) == "table" and #r.Strip or r.Strip) .. " entries (needs >= 34)"
 		elseif PC and isStr(r.RouletteId) then
 			local possible = {}
-			for _, def in ipairs(PC.PossiblePets(r.RouletteId)) do
+			for _, def in ipairs(possiblePets(r.RouletteId)) do
 				possible[def.Id] = true
 			end
 			if r.Strip[34] ~= r.PetId then

@@ -1138,7 +1138,9 @@ local function clientScenarios()
 			local label = "DEV " .. size[1] .. "x" .. size[2]
 			local floorPx = size[2] >= 1000 and 15 or 14
 			checkTile(label, floorPx)
-			checkTileToasts(label, true)
+			-- (844x390: with the Phase 2 currency stack - Cloud Tokens, Cash, Gems - only the newest toast fits under
+			-- it, so the "two newest toasts" check is reported only there, like the open panel's below)
+			checkTileToasts(label, size[1] ~= 844)
 			Mock.Click(named(g, "DevButton"))
 			advance(0.6)
 			checkPanel(label, floorPx, size[3])

@@ -26,7 +26,8 @@
 --   HomeBuilder.SetCollector(spotInfo, cash, cap)  attribute updates only: CollectorCash / CollectorCap on the Home
 --                                               folder (HomeFx draws the amount, the tank fill and the glow)
 --   HomeBuilder.ClearPlot(spotInfo)             removes every station, pad, ghost and the conveyor (the paths too when
---                                               nobody owns the plot); the claim prompt stays
+--                                               nobody owns the plot; while owned the paths and the house lot stay);
+--                                               the claim prompt stays
 -- Extras (nothing depends on them): GetHomeFolder(spotInfo), GetStation(spotInfo, id), GetPad(spotInfo, id),
 --   GetClaimPrompt(spotInfo), BuildHome(spotInfo, home) (every station of home.Stations, others removed),
 --   BuildStationModel(id, level) -> a fresh clone at the origin (renders / tests), PartCount(spotInfo),
@@ -2016,13 +2017,14 @@ function Art.Fusion(def, level)
 		SK.Oct(s, px, cz, 1.0, 1.5, 2.0, trim)
 		SK.Oct(s, px, cz, 1.5, 5.0, 5.5, trim)
 		SK.Oct(s, px, cz, 1.0, 5.5, 6.0, "Metal")
-		SK.Box(s, px - 0.5, px + 0.5, 6.0, 6.5, cz - 0.5, cz + 0.5, glowKey)
+		-- the pipe leaves the lid on its inner side (the beacon on top stays clear) and arches into the chamber
 		SK.Curve(s, {
-			{ px, 6.0, cz },
-			{ px - sx * 0.5, 7.75, cz },
+			{ px - sx * 0.75, 5.75, cz },
+			{ px - sx * 1.0, 7.5, cz },
 			{ sx * 2.25, 8.25, cz },
 			{ sx * 1.75, 8.25, cz },
 		}, 0.4, 0.4, "Pipe")
+		SK.Box(s, px - 0.5, px + 0.5, 6.0, 6.5, cz - 0.5, cz + 0.5, glowKey)
 	end
 	-- the chamber: a round pedestal, a gold or lavender trim, the neon seam, four ribs, the crown ring and a stepped
 	-- dome with the fusion crystal's holder
@@ -3147,14 +3149,11 @@ end
 local function priceText(pad)
 	local price = tonumber(pad.Price) or 0
 	if pad.Prestige or pad.StationId == "Prestige" then
-		-- what the reset buys: the income multiplier of the next star
+		-- what the reset buys: every star multiplies the income (the Home window says the same, per star)
 		local cat = catalog()
-		local stars = tonumber(pad.NextLevel) or 1
-		if cat and type(cat.PrestigeMultiplier) == "function" then
-			local ok, m = pcall(cat.PrestigeMultiplier, stars)
-			if ok and type(m) == "number" and m == m and m > 0 and m < 1e9 then
-				return "Reset: " .. multText(m) .. " income"
-			end
+		local m = cat and type(cat.Prestige) == "table" and tonumber(cat.Prestige.IncomeMultiplier) or nil
+		if m and m == m and m > 1 and m < 100 then
+			return "Reset: " .. multText(m) .. " income"
 		end
 		return "Start over: +1 " .. GLYPH.Star
 	end

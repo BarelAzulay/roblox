@@ -457,15 +457,24 @@ local function usageNotes(inputs)
 		end
 		placedOff = placedOff + math.max(0, placed - left)
 	end
+	-- every note has a Short form for the one-line layouts (landscape phones)
 	local notes = {}
 	if equippedTotal > 0 and dropped >= equippedTotal then
-		return notes, "Those are your only equipped pets: unequip them or equip another pet first"
+		return notes, "Those are your only equipped pets: unequip them or equip another pet first", "Equip another pet first"
 	end
 	if dropped > 0 then
-		notes[#notes + 1] = { Text = dropped .. " equipped cop" .. (dropped == 1 and "y is" or "ies are") .. " taken off first; the new pet takes the slot", Color = WARN }
+		notes[#notes + 1] = {
+			Text = dropped .. " equipped cop" .. (dropped == 1 and "y is" or "ies are") .. " taken off first; the new pet takes the slot",
+			Short = "Unequips " .. dropped .. " cop" .. (dropped == 1 and "y" or "ies") .. " first",
+			Color = WARN,
+		}
 	end
 	if placedOff > 0 then
-		notes[#notes + 1] = { Text = placedOff .. " cop" .. (placedOff == 1 and "y leaves" or "ies leave") .. " the Garden / Gym first; the new pet takes over", Color = WARN }
+		notes[#notes + 1] = {
+			Text = placedOff .. " cop" .. (placedOff == 1 and "y leaves" or "ies leave") .. " the Garden / Gym first; the new pet takes over",
+			Short = placedOff .. " cop" .. (placedOff == 1 and "y leaves" or "ies leave") .. " the Garden / Gym first",
+			Color = WARN,
+		}
 	end
 	return notes, nil
 end
@@ -579,10 +588,11 @@ local function computePlan()
 		plan.Reason = "These pets cannot be fused"
 		return plan
 	end
-	local notes, rule = usageNotes(plan.Inputs)
+	local notes, rule, ruleShort = usageNotes(plan.Inputs)
 	plan.Notes = notes
 	if rule then
 		plan.Reason = rule
+		plan.ReasonShort = ruleShort
 		return plan
 	end
 	local have = balance(plan.Cost.Currency)
@@ -1151,14 +1161,17 @@ layoutPreview = function()
 	U.Cost.TextSize = compact and 24 or 28
 	U.FuseButton.Size = UDim2.fromOffset(compact and 170 or 214, short and 48 or 58)
 	U.FuseButton.TextSize = compact and 24 or 28
-	-- on a phone Roblox's jump button covers the bottom-right corner: FUSE goes to the left, the cost to the right
+	-- on a phone Roblox's jump button covers the bottom-right corner: FUSE goes to the left and the cost follows it
+	-- (left-aligned right after the button), so the corner under the jump button stays empty
 	local leftFuse = short and UserInputService.TouchEnabled
+	S.CostOnly = leftFuse -- the cost shows without its "Cost:" label there (shorter, clear of the jump button)
+	local fuseW = compact and 170 or 214
 	U.FuseButton.AnchorPoint = leftFuse and Vector2.new(0, 0.5) or Vector2.new(1, 0.5)
 	U.FuseButton.Position = leftFuse and UDim2.new(0, 0, 0.5, 0) or UDim2.new(1, 0, 0.5, 0)
-	U.Cost.AnchorPoint = leftFuse and Vector2.new(1, 0.5) or Vector2.new(0, 0.5)
-	U.Cost.Position = leftFuse and UDim2.new(1, 0, 0.5, 0) or UDim2.new(0, 0, 0.5, 0)
-	U.Cost.TextXAlignment = leftFuse and Enum.TextXAlignment.Right or Enum.TextXAlignment.Left
-	U.Cost.Size = UDim2.new(1, -(compact and 184 or 230), 0, 40)
+	U.Cost.AnchorPoint = Vector2.new(0, 0.5)
+	U.Cost.Position = leftFuse and UDim2.new(0, fuseW + 14, 0.5, 0) or UDim2.new(0, 0, 0.5, 0)
+	U.Cost.TextXAlignment = Enum.TextXAlignment.Left
+	U.Cost.Size = UDim2.new(1, -(fuseW + 14), 0, 40)
 	U.Details.Position = UDim2.new(0, 14, 0, y)
 	U.Details.Size = UDim2.new(1, -28, 1, -(y + bottomH + (short and 8 or 20)))
 	U.ServerNote.Position = UDim2.new(0, 14, 1, -(bottomH + (short and 10 or 18)))
@@ -1180,6 +1193,8 @@ local function setNotes(plan)
 		end
 	end
 	U.Info.Visible = true
+	S.NotesToken = (S.NotesToken or 0) + 1
+	local mine = S.NotesToken
 	local order = 1
 	local function add(text, color)
 		order = order + 1
@@ -1193,7 +1208,7 @@ local function setNotes(plan)
 	end
 	local lines = {}
 	if plan.Reason and not plan.Empty then
-		lines[#lines + 1] = { Text = plan.Reason, Color = BAD }
+		lines[#lines + 1] = { Text = plan.Reason, Short = plan.ReasonShort, Color = BAD }
 	end
 	for _, note in ipairs(plan.Notes or {}) do
 		lines[#lines + 1] = note
@@ -1205,7 +1220,7 @@ local function setNotes(plan)
 		-- one line only: the most important note replaces the summary / explanation
 		local first = lines[1]
 		if first then
-			U.Info.Text = first.Text
+			U.Info.Text = (S.Short and first.Short) or first.Text
 			U.Info.TextColor3 = first.Color or MUTED
 		end
 		return
@@ -1217,7 +1232,8 @@ local function setNotes(plan)
 	-- explanation steps aside instead of a warning being clipped at the bottom
 	if #lines > 0 then
 		local function fit()
-			if not U.Details or not U.Info.Parent then
+			-- (a newer refresh owns the details now; the one-line layouts never hide their only line)
+			if S.NotesToken ~= mine or S.Short or S.Tall or not U.Details or not U.Info.Parent then
 				return
 			end
 			U.Info.Visible = true
@@ -1343,7 +1359,7 @@ local function renderPreview(plan)
 	-- cost
 	if plan.Cost then
 		local info = (plan.Cost.Currency == "Gems") and GEM_INFO or TOKEN_INFO
-		U.Cost.Text = "Cost: " .. tostring(info.Glyph) .. " " .. commas(plan.Cost.Amount)
+		U.Cost.Text = (S.CostOnly and "" or "Cost: ") .. tostring(info.Glyph) .. " " .. commas(plan.Cost.Amount)
 		U.Cost.TextColor3 = (plan.CanAfford == false) and BAD or (info.Color or GOLD)
 	else
 		U.Cost.Text = "Cost: -"
