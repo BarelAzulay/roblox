@@ -75,6 +75,7 @@ local ContextActionService = game:GetService("ContextActionService")
 local TweenService = game:GetService("TweenService")
 local Debris = game:GetService("Debris")
 local MarketplaceService = game:GetService("MarketplaceService")
+local TextService = game:GetService("TextService")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Config = require(Shared:WaitForChild("Config"))
@@ -212,10 +213,13 @@ K.GEM_PACK_H = 248
 K.GEM_ROW_H = 120
 K.FEED_W = 600
 K.FEED_H = 470
+K.INFO_CHARS = 34 -- a station row's "now -> next" line longer than this shows "Next: ..." only
+K.CONFIRM_W = 560 -- the prestige confirmation
+K.CONFIRM_H = 356
 K.RESTRICTED_ATTR = "PaidRandomItemsRestricted" -- GemService: true while gem roulettes are not allowed / unknown
 K.KITCHEN_QUEUE_ATTR = "KitchenQueue" -- PetCareService: "Snack,Meal" (cooking first), "" when idle
 K.KITCHEN_READY_ATTR = "KitchenReadyAt" -- workspace:GetServerTimeNow() when the current dish is done
-K.REVEAL = { TallW = 480, TallH = 640, WideW = 790, WideH = 372 }
+K.REVEAL = { TallW = 452, TallH = 640, WideW = 790, WideH = 372 } -- TallW: a 390 px phone keeps the 0.8 scale (18 px pills stay >= 14 px)
 K.STAGE = { W = 920, H = 380 }
 K.STRIP = { Cell = 150, W = 860, H = 190, Target = 34, MinCells = 42, Seconds = 5.6, Curve = 2.8 }
 
@@ -1405,14 +1409,15 @@ local function buildHint()
 	stroke(frame, NAVY, 3, 0)
 	Theme.Gradient(frame, Colors.PanelLight, Colors.Panel, 90)
 	pad(frame, 14, 8, 14, 8)
+	-- the width is set per message (one line when it fits, else wrapped at Hint.MaxW); the height follows the text
 	local label = makeText(frame, "Text", "", "Toast", 20, WHITE, {
-		AutomaticSize = Enum.AutomaticSize.XY,
-		Size = UDim2.fromOffset(0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		Size = UDim2.fromOffset(300, 0),
 		TextWrapped = true,
 		TextXAlignment = Enum.TextXAlignment.Left,
 		ZIndex = 10,
 	})
-	Hint.Limit = Util.Create("UISizeConstraint", { MaxSize = Vector2.new(300, 220), Parent = label })
+	Hint.MaxW = 300
 	Hint.Frame = frame
 	Hint.Label = label
 	Hint.Scale = Util.Create("UIScale", { Name = "ReadScale", Scale = 1, Parent = frame })
@@ -1427,6 +1432,15 @@ function showHint(text, kind)
 	local color = KINDS[kind or "info"] or KINDS.info or Colors.PanelLight
 	Hint.Label.Text = tostring(text)
 	Hint.Label.TextColor3 = Theme.Lighten(color, 0.55)
+	local maxW = Hint.MaxW or 300
+	local width = maxW
+	local ok, bounds = pcall(function()
+		return TextService:GetTextSize(Hint.Label.Text, Hint.Label.TextSize, Hint.Label.Font, Vector2.new(4000, 1000))
+	end)
+	if ok and typeof(bounds) == "Vector2" and bounds.X + 6 < maxW then
+		width = math.ceil(bounds.X) + 6
+	end
+	Hint.Label.Size = UDim2.fromOffset(width, 0)
 	Hint.Frame.Visible = true
 	task.delay(K.HINT_SECONDS, function()
 		if Hint.Token == mine and Hint.Frame then
@@ -1974,7 +1988,7 @@ local function buildTile(column, spec, index)
 	})
 	round(entry.Badge)
 	stroke(entry.Badge, NAVY, 2.5, 0)
-	makeText(entry.Badge, "Mark", "!", "Button", 19, WHITE, { Size = UDim2.new(1, 0, 1, 0), ZIndex = 8 })
+	entry.BadgeMark = makeText(entry.Badge, "Mark", "!", "Button", 19, WHITE, { Size = UDim2.new(1, 0, 1, 0), ZIndex = 8 })
 
 	entry.Fx = Util.Create("UIScale", { Name = "FxScale", Scale = 1, Parent = button })
 	button.MouseEnter:Connect(function()
@@ -2159,6 +2173,15 @@ function relayoutMenu()
 	setColumnLayout(mode)
 	U.Column.Size = UDim2.fromOffset(w, h)
 	U.ColumnScale.Scale = scale
+	-- the red "!" stays readable (>= 14 px) on the small icon-only tiles of phones
+	local badgeText = math.max(19, math.ceil(K.MIN_LABEL_PX / math.max(scale, 0.1)))
+	local badgeSize = math.max(28, badgeText + 9)
+	for _, entry in pairs(Entries) do
+		if entry.Badge and entry.BadgeMark then
+			entry.Badge.Size = UDim2.fromOffset(badgeSize, badgeSize)
+			entry.BadgeMark.TextSize = badgeText
+		end
+	end
 	local hintY = UDim2.new(0, 0, 0.5, 0)
 	if columnTop then
 		U.Column.AnchorPoint = Vector2.new(0, 0)
@@ -2174,7 +2197,7 @@ function relayoutMenu()
 		local room = math.max(120, area.X * 0.34 - hintLeft - 28 * factor)
 		Hint.Scale.Scale = factor
 		Hint.Frame.Position = UDim2.new(0, hintLeft, hintY.Y.Scale, hintY.Y.Offset)
-		Hint.Limit.MaxSize = Vector2.new(math.min(300, math.floor(room / factor)), 260)
+		Hint.MaxW = math.min(300, math.floor(room / factor))
 	end
 	for _, win in pairs(windows) do
 		if win.Shown then
@@ -2445,7 +2468,7 @@ do
 			Position = UDim2.new(0.5, 0, 0.5, 0),
 			Size = UDim2.fromOffset(K.FEED_W, K.FEED_H),
 			BackgroundTransparency = 0,
-			BackgroundColor3 = Colors.Panel,
+			BackgroundColor3 = WHITE, -- the UIGradient below multiplies this colour
 			ZIndex = 41,
 		})
 		corner(box, 16)
@@ -2490,11 +2513,14 @@ do
 			Parent = box,
 		})
 		F.Xp.Root.ZIndex = 42
-		local list = makeFrame(box, "Foods", {
+		-- the dishes (a scrolling list: on short screens the box is shorter than its three rows)
+		local list = scroller(box, "Foods", {
 			Position = UDim2.fromOffset(14, 100),
 			Size = UDim2.new(1, -28, 0, 3 * 86 + 2 * 8),
 			ZIndex = 42,
 		})
+		list.ScrollBarThickness = 8
+		pad(list, 0, 0, 4, 0)
 		listLayout(list, Enum.FillDirection.Vertical, 8)
 		F.List = list
 		for index, food in ipairs(P2.foodList()) do
@@ -2593,13 +2619,20 @@ do
 			TextXAlignment = Enum.TextXAlignment.Left,
 			ZIndex = 42,
 		})
-		-- narrow pages (portrait phones): the buttons go under the food name
-		function F.Layout(pageW)
+		-- narrow pages (portrait phones): the buttons go under the food name; short pages (landscape phones): the box
+		-- fills the page height and the dishes scroll
+		function F.Layout(pageW, pageH)
 			local narrowBox = pageW < K.FEED_W + 20
 			local boxW = math.min(K.FEED_W, pageW - 16)
 			local rowH = narrowBox and 132 or 86
-			box.Size = UDim2.fromOffset(boxW, 100 + 3 * rowH + 2 * 8 + 70)
-			list.Size = UDim2.new(1, -28, 0, 3 * rowH + 2 * 8)
+			local listH = 3 * rowH + 2 * 8
+			local boxH = 100 + listH + 70
+			if pageH and pageH > 0 and boxH > pageH - 8 then
+				boxH = math.max(240, pageH - 8)
+				listH = boxH - 100 - 70
+			end
+			box.Size = UDim2.fromOffset(boxW, boxH)
+			list.Size = UDim2.new(1, -28, 0, listH)
 			for _, row in ipairs(F.Rows) do
 				row.Frame.Size = UDim2.new(1, 0, 0, rowH)
 				if narrowBox then
@@ -2630,6 +2663,9 @@ do
 		Feed.Gui = F.Root
 		Feed.Token = Feed.Token + 1
 		local mine = Feed.Token
+		if Feed.Relayout then
+			safe("feed layout", Feed.Relayout)
+		end
 		F.Root.Visible = true
 		syncBackBinding()
 		local pop = F.Box:FindFirstChild("Pop") or Util.Create("UIScale", { Name = "Pop", Scale = 1, Parent = F.Box })
@@ -2903,7 +2939,8 @@ do
 				Parent = buttons,
 			})
 			W.WorkBtn.TextScaled = true
-			Util.Create("UITextSizeConstraint", { MaxTextSize = 20, MinTextSize = 16, Parent = W.WorkBtn })
+			W.WorkBtn.TextWrapped = true -- "Place in Garden" may take two lines on narrow cards (never under 18 design px)
+			Util.Create("UITextSizeConstraint", { MaxTextSize = 20, MinTextSize = 18, Parent = W.WorkBtn })
 			W.Status = makeText(body, "Status", "", "Label", 18, MUTED, {
 				AnchorPoint = Vector2.new(0, 1),
 				Position = UDim2.new(0, 10, 1, -4),
@@ -2934,7 +2971,7 @@ do
 				TextXAlignment = Enum.TextXAlignment.Left,
 				TextYAlignment = Enum.TextYAlignment.Top,
 			})
-			Util.Create("UITextSizeConstraint", { MaxTextSize = 18, MinTextSize = 16, Parent = W.PerksLabel })
+			Util.Create("UITextSizeConstraint", { MaxTextSize = 18, MinTextSize = 18, Parent = W.PerksLabel })
 			local equipRow = makeFrame(header, "EquippedSlots", {
 				AnchorPoint = Vector2.new(1, 0),
 				Position = UDim2.new(1, 0, 0, 2),
@@ -3037,6 +3074,36 @@ do
 			local level = P2.petLevel(key)
 			slot.LevelTag.Visible = level > 1
 			slot.LevelTag.Text = "Lv " .. level
+			-- a pet working at home: a seedling (Garden) or muscle (Gym) chip beside the tier chip
+			local home = P2.homeData()
+			local where = nil
+			if #P2.slotsHolding(home.Garden, key) > 0 then
+				where = "Garden"
+			elseif #P2.slotsHolding(home.Gym, key) > 0 then
+				where = "Gym"
+			end
+			if where and not slot.WorkChip then
+				local chip = makeFrame(slot.Button, "WorkBadge", {
+					Size = UDim2.fromOffset(30, 30),
+					BackgroundTransparency = 0,
+					BackgroundColor3 = WHITE,
+					ZIndex = 8,
+				})
+				round(chip)
+				stroke(chip, NAVY, 2.5, 0)
+				slot.WorkGradient = Util.Create("UIGradient", { Rotation = 90, Parent = chip })
+				slot.WorkText = makeText(chip, "Mark", "", "Title", 18, WHITE, { Size = UDim2.new(1, 0, 1, 0), ZIndex = 9 })
+				slot.WorkChip = chip
+			end
+			if slot.WorkChip then
+				slot.WorkChip.Visible = where ~= nil
+				if where then
+					local color = where == "Garden" and C2.Kind.Garden or C2.Kind.Gym
+					slot.WorkGradient.Color = ColorSequence.new(Theme.Lighten(color, 0.3), Theme.Darken(color, 0.15))
+					slot.WorkText.Text = where == "Garden" and G.Seedling or G.Muscle
+					slot.WorkChip.Position = UDim2.fromOffset(slot.TierChip.Visible and 36 or 4, 4)
+				end
+			end
 		end
 
 		local function setPills(def, key, color, elements)
@@ -3392,16 +3459,23 @@ do
 					end
 				end
 			end
+			-- short perk names keep the line readable (18 design px) beside the equipped slots
 			local perkParts = {}
 			local order = PetCatalog.PerkOrder or { "MaxHealth", "TokenBonus", "StaminaRegen", "CheckpointHeal" }
+			local short = { MaxHealth = "Health", TokenBonus = "Tokens", StaminaRegen = "Stamina", CheckpointHeal = "Heal" }
 			for _, perkKey in ipairs(order) do
 				local value = snapshot.Perks[perkKey]
 				if type(value) == "number" and value > 0 then
-					table.insert(perkParts, PetCatalog.PerkLabel(perkKey, value))
+					local label = PetCatalog.PerkLabel(perkKey, value)
+					local name = PetCatalog.PerkNames and PetCatalog.PerkNames[perkKey]
+					if name and short[perkKey] then
+						label = label:gsub(name:gsub("%p", "%%%0"), short[perkKey])
+					end
+					table.insert(perkParts, label)
 				end
 			end
 			if #perkParts > 0 then
-				W.PerksLabel.Text = "Team perks: " .. table.concat(perkParts, "   ")
+				W.PerksLabel.Text = "Team: " .. table.concat(perkParts, "  " .. G.Bullet .. "  ")
 			else
 				W.PerksLabel.Text = "Equip pets to gain perks."
 			end
@@ -3542,7 +3616,19 @@ do
 				end)
 			end
 		end
-		win.OnLayout = function(w, _h, narrow, short, tall)
+		-- the Feed picker's size follows the Pets page (also called when the picker opens)
+		function Feed.Relayout(fallbackW, fallbackH)
+			if Feed.Ui and Feed.Ui.Layout and W.Page then
+				-- the page in design px (the window's fit scale and its pop-in scale undone)
+				local size = W.Page.AbsoluteSize
+				local scale = (win.Fit and win.Fit.Scale or 1) * (win.Pop and win.Pop.Scale or 1)
+				local designW = (size.X > 0 and scale > 0) and (size.X / scale) or (fallbackW or 800)
+				local designH = (size.Y > 0 and scale > 0) and (size.Y / scale) or (fallbackH or 500)
+				Feed.Ui.Layout(designW, designH)
+			end
+		end
+
+		win.OnLayout = function(w, h, narrow, short, tall)
 			local detailW = narrow and K.DETAIL_W_NARROW or K.DETAIL_W
 			local buttonsH = short and 94 or 116
 			if W.Detail then
@@ -3563,6 +3649,10 @@ do
 					W.Left.Size = UDim2.new(1, -(detailW + 12), 1, 0)
 				end
 			end
+			if W.PerksLabel then
+				-- the one-column layout has no room beside the equipped slots: each pet's card lists its perks
+				W.PerksLabel.Visible = not tall
+			end
 			if W.View then
 				-- compact cards (landscape phones, portrait pages): a smaller pet, slimmer buttons and no status line,
 				-- so the name stays in view above the pinned buttons
@@ -3574,12 +3664,7 @@ do
 				W.Status.Visible = not short
 				W.InfoScroll.Size = UDim2.new(1, -8, 1, -(buttonsH + (short and 16 or 60)))
 			end
-			if Feed.Ui and Feed.Ui.Layout and W.Page then
-				local pageW = W.Page.AbsoluteSize.X
-				local scale = win.Fit and win.Fit.Scale or 1
-				local designW = (pageW > 0 and scale > 0) and (pageW / scale) or (w - 48)
-				Feed.Ui.Layout(designW)
-			end
+			Feed.Relayout(w - 48, h - 150)
 			-- item rows: narrow (portrait) rows stack the text and put the button under it
 			for _, row in pairs(itemRows) do
 				local P = row.Parts
@@ -3841,7 +3926,7 @@ local function buildRouletteCard(shop, parent, roulette, index)
 		TextWrapped = true,
 		TextStrokeColor3 = Theme.Darken(color, 0.65),
 	})
-	Util.Create("UITextSizeConstraint", { MaxTextSize = 24, MinTextSize = 16, Parent = bannerText })
+	Util.Create("UITextSizeConstraint", { MaxTextSize = 24, MinTextSize = 18, Parent = bannerText })
 
 	-- the roulette "machine": glossy dome on a base
 	local base = makeFrame(card, "Base", {
@@ -3900,7 +3985,7 @@ local function buildRouletteCard(shop, parent, roulette, index)
 			Size = UDim2.new(1, -12, 0, 24),
 			TextScaled = true,
 		})
-		Util.Create("UITextSizeConstraint", { MaxTextSize = 19, MinTextSize = 15, Parent = bestLabel })
+		Util.Create("UITextSizeConstraint", { MaxTextSize = 19, MinTextSize = 18, Parent = bestLabel })
 	end
 	local dots = makeFrame(card, "RarityDots", {
 		AnchorPoint = Vector2.new(0.5, 0),
@@ -3956,7 +4041,7 @@ local function buildRouletteCard(shop, parent, roulette, index)
 		TextWrapped = true,
 		TextYAlignment = Enum.TextYAlignment.Top,
 	})
-	Util.Create("UITextSizeConstraint", { MaxTextSize = 18, MinTextSize = 15, Parent = hint })
+	Util.Create("UITextSizeConstraint", { MaxTextSize = 18, MinTextSize = 18, Parent = hint })
 	return {
 		Roulette = roulette,
 		Root = card,
@@ -4007,6 +4092,11 @@ local function layoutRouletteCard(card, compact)
 		place(P.Hint, 0.5, 0, UDim2.new(0.5, 0, 0, 182), UDim2.new(1, -16, 0, 30))
 		P.Hint.TextScaled = true -- one or two short lines must fit the compact card
 		P.Mark.TextSize = 40
+		-- the narrow compact card names the best rarity alone ("Legendary"), readable at 18 design px
+		local best = card.Roulette and bestRarityOf(card.Roulette)
+		if P.Best and best then
+			P.Best.Text = best
+		end
 	else
 		place(P.Banner, 0.5, 0, UDim2.new(0.5, 0, 0, 10), UDim2.new(1, -18, 0, 54))
 		place(P.Dome, 0.5, 0, UDim2.new(0.5, 0, 0, 72), UDim2.fromOffset(120, 120))
@@ -4018,6 +4108,10 @@ local function layoutRouletteCard(card, compact)
 		place(P.Hint, 0.5, 0, UDim2.new(0.5, 0, 0, 420), UDim2.new(1, -20, 0, 48))
 		P.Hint.TextScaled = false
 		P.Mark.TextSize = 64
+		local best = card.Roulette and bestRarityOf(card.Roulette)
+		if P.Best and best then
+			P.Best.Text = "Up to " .. best
+		end
 	end
 	P.Dots.Visible = not compact
 end
@@ -4093,6 +4187,7 @@ local function buildItemCard(parent, def, index, count)
 	})
 	return {
 		Def = def,
+		Root = card,
 		Slot = slot,
 		Owned = owned,
 		Buy = buy,
@@ -4162,7 +4257,7 @@ local function buildShop(win)
 		TextScaled = true,
 		ZIndex = 9,
 	})
-	Util.Create("UITextSizeConstraint", { MaxTextSize = 26, MinTextSize = 16, Parent = W.Balance })
+	Util.Create("UITextSizeConstraint", { MaxTextSize = 26, MinTextSize = 18, Parent = W.Balance })
 
 	local function buildRoulettePage(page)
 		local scroll = scroller(page, "Cards", { Size = UDim2.new(1, 0, 1, 0) })
@@ -4462,26 +4557,48 @@ local function buildShop(win)
 		return entry
 	end
 
+	-- every pack looks a step richer than the one before: a bigger disc, a bigger pile of gems, a warmer colour
+	-- (the biggest pack gold with a sparkle)
+	local PACK_LOOKS = {
+		{ Disc = 60, Pile = G.Gem, Size = 38 },
+		{ Disc = 64, Pile = G.Gem .. G.Gem, Size = 28, Color = Color3.fromRGB(92, 214, 230) },
+		{ Disc = 68, Pile = G.Gem .. "\n" .. G.Gem .. G.Gem, Size = 24, Color = Color3.fromRGB(150, 122, 240) },
+		{ Disc = 72, Pile = G.Gem .. "\n" .. G.Gem .. G.Gem, Size = 26, Color = Color3.fromRGB(246, 192, 70), Sparkle = true },
+	}
+
 	local function buildPack(parent, product, order)
+		local look = PACK_LOOKS[math.min(#PACK_LOOKS, math.max(1, product.Index))]
+		local tint = look.Color or C2.Gem
 		local card = makeFrame(parent, "Pack_" .. product.Index, {
 			BackgroundColor3 = WHITE,
 			BackgroundTransparency = 0,
 			LayoutOrder = order,
 		})
 		corner(card, 16)
-		stroke(card, NAVY, 4, 0)
-		Theme.Gradient(card, Theme.Darken(C2.Gem, 0.25), Theme.Darken(C2.Gem, 0.68), 90)
+		stroke(card, look.Sparkle and Theme.Darken(tint, 0.35) or NAVY, 4, 0)
+		Theme.Gradient(card, Theme.Darken(tint, 0.25), Theme.Darken(tint, 0.68), 90)
 		local disc = makeFrame(card, "Disc", {
-			AnchorPoint = Vector2.new(0.5, 0),
-			Position = UDim2.new(0.5, 0, 0, 12),
-			Size = UDim2.fromOffset(70, 70),
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.new(0.5, 0, 0, 48),
+			Size = UDim2.fromOffset(look.Disc, look.Disc),
 			BackgroundTransparency = 0,
-			BackgroundColor3 = C2.Gem,
+			BackgroundColor3 = tint,
 		})
 		round(disc)
 		stroke(disc, NAVY, 3, 0)
-		Theme.Gradient(disc, Theme.Lighten(C2.Gem, 0.5), Theme.Darken(C2.Gem, 0.15), 90)
-		makeText(disc, "Glyph", G.Gem, "Title", 44, WHITE, { Size = UDim2.new(1, 0, 1, 0) })
+		Theme.Gradient(disc, Theme.Lighten(tint, 0.5), Theme.Darken(tint, 0.15), 90)
+		local pile = makeText(disc, "Glyph", look.Pile, "Title", look.Size, WHITE, { Size = UDim2.new(1, 0, 1, 0) })
+		pile.LineHeight = 0.8
+		if look.Sparkle then
+			for i, spot in ipairs({ { 0.06, 0.02 }, { 0.84, 0.14 }, { 0.78, 0.74 } }) do
+				makeText(disc, "Sparkle" .. i, G.Sparkle, "Title", 22, Color3.fromRGB(255, 246, 200), {
+					AnchorPoint = Vector2.new(0.5, 0.5),
+					Position = UDim2.fromScale(spot[1], spot[2]),
+					Size = UDim2.fromOffset(20, 20),
+					ZIndex = 3,
+				})
+			end
+		end
 		local name = makeText(card, "Name", product.Name, "Title", 22, WHITE, {
 			Position = UDim2.fromOffset(8, 88),
 			Size = UDim2.new(1, -16, 0, 28),
@@ -4626,7 +4743,7 @@ local function buildShop(win)
 				hint = "Need " .. P2.gemAmount(price - gems) .. " more"
 				hintColor = Theme.Lighten(BAD, 0.35)
 			elseif card.Big then
-				hint = "Odds: Mythic or Secret on every spin"
+				hint = "Every spin: Mythic or Secret!"
 			end
 			card.Spin.Text = label
 			CloudUI.SetDisabled(card.Spin, disabled or not open)
@@ -4661,8 +4778,9 @@ local function buildShop(win)
 				P.Chances.Size = UDim2.new(1, -24, 0, 30)
 				P.Right.AnchorPoint = Vector2.new(0.5, 1)
 				P.Right.Position = UDim2.new(0.5, 0, 1, -10)
-				P.Right.Size = UDim2.new(1, -24, 0, big and 110 or 96)
-				card.Root.Size = UDim2.new(1, 0, 0, big and 300 or 270)
+				P.Right.Size = UDim2.new(1, -24, 0, big and 156 or 96)
+				P.Hint.Size = UDim2.new(1, 0, 0, big and 48 or 0)
+				card.Root.Size = UDim2.new(1, 0, 0, big and 350 or 270)
 			else
 				local textX = domeSize + 30
 				P.Dome.Size = UDim2.fromOffset(domeSize, domeSize)
@@ -4677,6 +4795,7 @@ local function buildShop(win)
 				P.Right.AnchorPoint = Vector2.new(1, 0.5)
 				P.Right.Position = UDim2.new(1, -14, 0.5, 0)
 				P.Right.Size = UDim2.fromOffset(310, big and 170 or 96)
+				P.Hint.Size = UDim2.new(1, 0, 0, big and 56 or 0)
 				card.Root.Size = UDim2.new(1, 0, 0, big and 214 or K.GEM_ROW_H)
 			end
 		end
@@ -5018,9 +5137,10 @@ do
 		elseif kind == "Kitchen" then
 			return tostring(e.Queue or e.Slots or 0) .. " dishes, x" .. shortNumber(e.CookSpeed or 1) .. " speed"
 		elseif kind == "Gym" then
-			return tostring(e.Slots or 0) .. " slots, " .. tostring(e.XpPerMinute or 0) .. " XP/min"
+			local slots = tonumber(e.Slots) or 0
+			return slots .. (slots == 1 and " slot, " or " slots, ") .. tostring(e.XpPerMinute or 0) .. " XP/min"
 		elseif kind == "Vault" then
-			return shortPercent(e.OfflinePercent) .. " for " .. tostring(e.OfflineHours or 0) .. "h away"
+			return "Offline " .. shortPercent(e.OfflinePercent) .. " for " .. tostring(e.OfflineHours or 0) .. "h"
 		elseif kind == "House" then
 			return tostring(e.Name or e.Tier or "")
 		elseif kind == "Fusion" then
@@ -5134,16 +5254,6 @@ do
 		return cash, cap, income, parts
 	end
 
-	local function prestigeStars(n)
-		n = math.max(0, math.floor(tonumber(n) or 0))
-		if n == 0 then
-			return "No stars yet"
-		elseif n <= 5 then
-			return string.rep(G.Star, n)
-		end
-		return G.Star .. " x" .. n
-	end
-
 	function buildHome(win)
 		local content = win.Panel.Content
 		local H = { Rows = {}, Sections = {}, Pads = {}, Tall = false, Cards = {} }
@@ -5178,67 +5288,70 @@ do
 			return c
 		end
 
-		-- house: tier, Home Level, stars, the next house
-		local house = card("HouseCard", 1, 132)
+		-- house: tier, Home Level, prestige stars (top-right), the next house
+		local house = card("HouseCard", 1, 116)
 		local disc = makeFrame(house, "HouseDisc", {
-			Position = UDim2.fromOffset(12, 14),
-			Size = UDim2.fromOffset(72, 72),
+			Position = UDim2.fromOffset(12, 12),
+			Size = UDim2.fromOffset(64, 64),
 			BackgroundTransparency = 0,
-			BackgroundColor3 = C2.Kind.House,
+			BackgroundColor3 = WHITE,
 		})
 		round(disc)
 		stroke(disc, NAVY, 3, 0)
 		Theme.Gradient(disc, Theme.Lighten(C2.Kind.House, 0.35), Theme.Darken(C2.Kind.House, 0.2), 90)
-		H.HouseGlyph = makeText(disc, "Glyph", G.House, "Title", 40, WHITE, { Size = UDim2.new(1, 0, 1, 0) })
+		H.HouseGlyph = makeText(disc, "Glyph", G.House, "Title", 36, WHITE, { Size = UDim2.new(1, 0, 1, 0) })
 		H.HouseName = makeText(house, "Tier", "Cottage", "Title", 30, Theme.Lighten(C2.Kind.House, 0.4), {
-			Position = UDim2.fromOffset(96, 10),
-			Size = UDim2.new(1, -106, 0, 36),
+			Position = UDim2.fromOffset(88, 8),
+			Size = UDim2.new(1, -170, 0, 36),
 			TextXAlignment = Enum.TextXAlignment.Left,
 			TextScaled = true,
 		})
 		Util.Create("UITextSizeConstraint", { MaxTextSize = 30, MinTextSize = 20, Parent = H.HouseName })
-		H.HomeLevel = makeText(house, "HomeLevel", "Home Level 0", "Heading", 21, WHITE, {
-			Position = UDim2.fromOffset(96, 46),
-			Size = UDim2.new(1, -106, 0, 26),
-			TextXAlignment = Enum.TextXAlignment.Left,
+		H.Stars = makeText(house, "Stars", "", "Title", 22, GOLD, {
+			AnchorPoint = Vector2.new(1, 0),
+			Position = UDim2.new(1, -12, 0, 12),
+			Size = UDim2.fromOffset(78, 28),
+			TextXAlignment = Enum.TextXAlignment.Right,
 		})
-		H.Stars = makeText(house, "Stars", "", "Heading", 20, GOLD, {
-			Position = UDim2.fromOffset(96, 72),
-			Size = UDim2.new(1, -106, 0, 24),
+		H.HomeLevel = makeText(house, "HomeLevel", "Home Level 0", "Heading", 21, WHITE, {
+			Position = UDim2.fromOffset(88, 46),
+			Size = UDim2.new(1, -100, 0, 26),
 			TextXAlignment = Enum.TextXAlignment.Left,
 		})
 		H.NextHouse = makeText(house, "NextHouse", "", "Body", 18, MUTED, {
-			Position = UDim2.fromOffset(14, 100),
+			Position = UDim2.fromOffset(14, 84),
 			Size = UDim2.new(1, -28, 0, 24),
 			TextXAlignment = Enum.TextXAlignment.Left,
 			TextScaled = true,
 		})
-		Util.Create("UITextSizeConstraint", { MaxTextSize = 18, MinTextSize = 16, Parent = H.NextHouse })
+		Util.Create("UITextSizeConstraint", { MaxTextSize = 18, MinTextSize = 18, Parent = H.NextHouse })
 
-		-- income per second
-		local income = card("IncomeCard", 2, 104)
+		-- income per second (the prestige multiplier as a gold tag beside it)
+		local income = card("IncomeCard", 2, 98)
 		makeText(income, "Caption", "Income", "Heading", 19, MUTED, {
 			Position = UDim2.fromOffset(14, 8),
 			Size = UDim2.new(1, -28, 0, 24),
 			TextXAlignment = Enum.TextXAlignment.Left,
 		})
 		H.Income = makeText(income, "PerSecond", G.Cash .. "0/s", "Display", 36, C2.Cash, {
-			Position = UDim2.fromOffset(14, 32),
-			Size = UDim2.new(1, -28, 0, 40),
+			Position = UDim2.fromOffset(14, 30),
+			Size = UDim2.new(1, -110, 0, 40),
 			TextXAlignment = Enum.TextXAlignment.Left,
 			TextScaled = true,
 		})
 		Util.Create("UITextSizeConstraint", { MaxTextSize = 36, MinTextSize = 22, Parent = H.Income })
+		H.Multiplier = colorPill(income, "Multiplier", "x1", GOLD, 19, 0)
+		H.Multiplier.AnchorPoint = Vector2.new(1, 0)
+		H.Multiplier.Position = UDim2.new(1, -14, 0, 38)
 		H.IncomeParts = makeText(income, "Parts", "", "Body", 18, MUTED, {
-			Position = UDim2.fromOffset(14, 74),
-			Size = UDim2.new(1, -28, 0, 24),
+			Position = UDim2.fromOffset(14, 70),
+			Size = UDim2.new(1, -28, 0, 22),
 			TextXAlignment = Enum.TextXAlignment.Left,
-			TextScaled = true,
+			TextTruncate = Enum.TextTruncate.AtEnd,
 		})
-		Util.Create("UITextSizeConstraint", { MaxTextSize = 18, MinTextSize = 16, Parent = H.IncomeParts })
 
 		-- the Collector: cash waiting / cap, Collect
-		local collector = card("CollectorCard", 3, 146)
+		local collector = card("CollectorCard", 3, 134)
 		makeText(collector, "Caption", "Collector", "Heading", 19, MUTED, {
 			Position = UDim2.fromOffset(14, 8),
 			Size = UDim2.new(0.5, -14, 0, 24),
@@ -5247,15 +5360,15 @@ do
 		H.CollectorCap = makeText(collector, "Cap", "", "Heading", 18, MUTED, {
 			AnchorPoint = Vector2.new(1, 0),
 			Position = UDim2.new(1, -14, 0, 8),
-			Size = UDim2.new(0.5, 0, 0, 24),
+			Size = UDim2.new(0.6, 0, 0, 24),
 			TextXAlignment = Enum.TextXAlignment.Right,
 		})
 		H.CollectorBar = CloudUI.Bar({
 			Name = "CollectorBar",
 			Position = UDim2.fromOffset(14, 36),
-			Size = UDim2.new(1, -28, 0, 32),
-			Height = 32,
-			TextSize = 22,
+			Size = UDim2.new(1, -28, 0, 30),
+			Height = 30,
+			TextSize = 21,
 			Color = C2.Cash,
 			Parent = collector,
 		})
@@ -5263,9 +5376,9 @@ do
 			Name = "Collect",
 			Text = "Collect",
 			Style = "Green",
-			AnchorPoint = Vector2.new(0.5, 0),
-			Position = UDim2.new(0.5, 0, 0, 80),
-			Size = UDim2.new(1, -28, 0, 52),
+			AnchorPoint = Vector2.new(0.5, 1),
+			Position = UDim2.new(0.5, 0, 1, -10),
+			Size = UDim2.new(1, -28, 0, 50),
 			TextSize = 24,
 			Callback = function()
 				if not P2.hasHome() then
@@ -5278,7 +5391,7 @@ do
 		})
 
 		-- prestige: stars, Home Level progress, the requirement, the reward, the button
-		local prestige = card("PrestigeCard", 4, 214)
+		local prestige = card("PrestigeCard", 4, 204)
 		H.PrestigeTitle = makeText(prestige, "Caption", "Prestige", "Heading", 19, MUTED, {
 			Position = UDim2.fromOffset(14, 8),
 			Size = UDim2.new(1, -28, 0, 24),
@@ -5297,23 +5410,22 @@ do
 			Position = UDim2.fromOffset(14, 72),
 			Size = UDim2.new(1, -28, 0, 24),
 			TextXAlignment = Enum.TextXAlignment.Left,
-			TextScaled = true,
+			TextTruncate = Enum.TextTruncate.AtEnd,
 		})
-		Util.Create("UITextSizeConstraint", { MaxTextSize = 18, MinTextSize = 16, Parent = H.PrestigeNeed })
 		H.PrestigeReward = makeText(prestige, "Reward", "", "Body", 18, MUTED, {
 			Position = UDim2.fromOffset(14, 98),
-			Size = UDim2.new(1, -28, 0, 46),
+			Size = UDim2.new(1, -28, 0, 44),
 			TextWrapped = true,
 			TextXAlignment = Enum.TextXAlignment.Left,
 			TextYAlignment = Enum.TextYAlignment.Top,
 		})
 		H.PrestigeButton = CloudUI.Button({
 			Name = "Prestige",
-			Text = "Prestige",
+			Text = G.Star .. " Prestige",
 			Style = "Gold",
 			AnchorPoint = Vector2.new(0.5, 1),
-			Position = UDim2.new(0.5, 0, 1, -12),
-			Size = UDim2.new(1, -28, 0, 52),
+			Position = UDim2.new(0.5, 0, 1, -10),
+			Size = UDim2.new(1, -28, 0, 50),
 			TextSize = 24,
 			Callback = function()
 				if H.ShowConfirm then
@@ -5323,13 +5435,16 @@ do
 			Parent = prestige,
 		})
 
+		-- Go home: in the title bar, left of the red X (always in view, also on the one-column phone layout)
 		H.GoHome = CloudUI.Button({
 			Name = "GoHome",
 			Text = G.House .. " Go home",
 			Style = "Blue",
-			Size = UDim2.new(1, 0, 0, 54),
-			TextSize = 24,
-			LayoutOrder = 5,
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, -66, 0, 34),
+			Size = UDim2.fromOffset(164, 40),
+			TextSize = 21,
+			ZIndex = 8,
 			Callback = function()
 				if inMatch() then
 					showHint("You cannot go home during a match.", "info")
@@ -5339,9 +5454,8 @@ do
 					closeWindow("Home")
 				end
 			end,
-			Parent = left,
+			Parent = win.Panel.Root,
 		})
-		H.Cards[#H.Cards + 1] = H.GoHome
 
 		------------------------------------------------------------------
 		-- station rows
@@ -5515,41 +5629,64 @@ do
 		local box = makeFrame(confirm, "Box", {
 			AnchorPoint = Vector2.new(0.5, 0.5),
 			Position = UDim2.new(0.5, 0, 0.5, 0),
-			Size = UDim2.fromOffset(520, 300),
+			Size = UDim2.fromOffset(K.CONFIRM_W, K.CONFIRM_H),
 			BackgroundTransparency = 0,
-			BackgroundColor3 = Colors.Panel,
+			BackgroundColor3 = WHITE, -- the UIGradient below multiplies this colour
 			ZIndex = 31,
 		})
 		corner(box, 16)
 		stroke(box, GOLD, 4, 0)
 		Theme.Gradient(box, Colors.PanelLight, Colors.Panel, 90)
-		Util.Create("UISizeConstraint", { MaxSize = Vector2.new(520, 300), Parent = box })
 		H.ConfirmBox = box
-		makeText(box, "Title", G.Star .. " Prestige now?", "Title", 30, GOLD, {
-			Position = UDim2.fromOffset(16, 14),
-			Size = UDim2.new(1, -32, 0, 38),
+		makeText(box, "Title", G.Star .. " Prestige now?", "Title", 32, GOLD, {
+			Position = UDim2.fromOffset(16, 12),
+			Size = UDim2.new(1, -32, 0, 40),
 			ZIndex = 32,
 		})
-		H.ConfirmText = makeText(box, "Text", "", "Body", 19, WHITE, {
-			Position = UDim2.fromOffset(20, 60),
-			Size = UDim2.new(1, -40, 0, 140),
-			TextWrapped = true,
-			TextYAlignment = Enum.TextYAlignment.Top,
+		-- three lines: what starts over, what stays, what the new star gives
+		local lines = makeFrame(box, "Lines", {
+			Position = UDim2.fromOffset(16, 62),
+			Size = UDim2.new(1, -32, 0, 3 * 62 + 2 * 8),
 			ZIndex = 32,
 		})
+		listLayout(lines, Enum.FillDirection.Vertical, 8)
+		H.ConfirmLines = {}
+		H.ConfirmRows = {}
+		H.ConfirmList = lines
+		for i, spec in ipairs({
+			{ "Reset", "Starts over", Theme.Lighten(BAD, 0.3) },
+			{ "Keep", "You keep", Theme.Lighten(GOOD, 0.35) },
+			{ "Gain", "You get", GOLD },
+		}) do
+			local line = makeInset(lines, "Line_" .. spec[1], { Size = UDim2.new(1, 0, 0, 62), LayoutOrder = i, ZIndex = 32 })
+			H.ConfirmRows[#H.ConfirmRows + 1] = line
+			makeText(line, "Label", spec[2], "Heading", 19, spec[3], {
+				Position = UDim2.fromOffset(12, 0),
+				Size = UDim2.new(0, 116, 1, 0),
+				TextXAlignment = Enum.TextXAlignment.Left,
+				ZIndex = 33,
+			})
+			H.ConfirmLines[spec[1]] = makeText(line, "Text", "", "Body", 19, WHITE, {
+				Position = UDim2.fromOffset(132, 0),
+				Size = UDim2.new(1, -144, 1, 0),
+				TextWrapped = true,
+				TextXAlignment = Enum.TextXAlignment.Left,
+				ZIndex = 33,
+			})
+		end
 		local buttons = makeFrame(box, "Buttons", {
 			AnchorPoint = Vector2.new(0.5, 1),
-			Position = UDim2.new(0.5, 0, 1, -16),
+			Position = UDim2.new(0.5, 0, 1, -14),
 			Size = UDim2.new(1, -32, 0, 56),
 			ZIndex = 32,
 		})
-		listLayout(buttons, Enum.FillDirection.Horizontal, 12, Enum.HorizontalAlignment.Center, Enum.VerticalAlignment.Center)
+		listLayout(buttons, Enum.FillDirection.Horizontal, 14, Enum.HorizontalAlignment.Center, Enum.VerticalAlignment.Center)
 		local yes = CloudUI.Button({
 			Name = "ConfirmPrestige",
-			Text = "Prestige!",
+			Text = G.Star .. " Prestige!",
 			Style = "Gold",
-			Size = UDim2.fromOffset(200, 54),
-			TextSize = 24,
+			Size = UDim2.fromOffset(220, 56),
+			TextSize = 25,
 			LayoutOrder = 1,
 			Callback = function()
 				H.ShowConfirm(false)
@@ -5566,8 +5703,8 @@ do
 			Name = "CancelPrestige",
 			Text = "Not yet",
 			Style = "Blue",
-			Size = UDim2.fromOffset(170, 54),
-			TextSize = 22,
+			Size = UDim2.fromOffset(170, 56),
+			TextSize = 23,
 			LayoutOrder = 2,
 			Callback = function()
 				H.ShowConfirm(false)
@@ -5587,12 +5724,14 @@ do
 				local stars = math.floor(tonumber(home.Prestige) or 0)
 				local P = TycoonCatalog and TycoonCatalog.Prestige or {}
 				local gems = P2.catalogCall("PrestigeGems", stars + 1) or P.GemReward or 0
-				local text = "Your Cash and stations start over. Your pets, food and decor stay.\nYou get star " .. (stars + 1)
-					.. ": x" .. shortNumber(P.IncomeMultiplier or 1.25) .. " income forever and " .. P2.gemAmount(gems) .. " Gems."
-				if stars == 0 then
-					text = text .. " The Fusion Machine unlocks!"
+				local mult = P2.catalogCall("PrestigeMultiplier", stars + 1) or ((P.IncomeMultiplier or 1.25) ^ (stars + 1))
+				H.ConfirmLines.Reset.Text = "Your Cash, the Collector and your stations"
+				H.ConfirmLines.Keep.Text = "Pets, levels, food, Garden pets and decor"
+				local gain = "Star " .. (stars + 1) .. ": x" .. shortNumber(math.floor(mult * 100 + 0.5) / 100) .. " income and " .. commas(gems) .. " Gems"
+				if stars + 1 == (tonumber(P.FusionUnlock) or 1) then
+					gain = gain .. ", the Fusion Machine"
 				end
-				H.ConfirmText.Text = text
+				H.ConfirmLines.Gain.Text = gain
 			end
 			confirm.Visible = on == true
 		end
@@ -5633,13 +5772,17 @@ do
 			if level < 1 then
 				info = nextText and ("Build: " .. nextText) or (def.Blurb or "")
 			elseif nextText and nextText ~= now and now then
-				-- "+10% press Cash -> +20% press Cash" reads as "+10% -> +20% press Cash"
+				-- "+10% press Cash -> +20% press Cash" reads as "+10% -> +20% press Cash"; when both halves do not fit
+				-- the row, only the next level is shown ("Next: 6 dishes, x1.5 speed")
 				local a1, aRest = now:match("^(%S+)(%s.+)$")
 				local b1, bRest = nextText:match("^(%S+)(%s.+)$")
 				if a1 and b1 and aRest == bRest then
 					info = a1 .. " -> " .. b1 .. aRest
 				else
 					info = now .. " -> " .. nextText
+				end
+				if #info > K.INFO_CHARS then
+					info = "Next: " .. nextText
 				end
 			else
 				info = now or (def.Blurb or "")
@@ -5694,13 +5837,21 @@ do
 			end
 			H.HouseGlyph.Text = (type(tier) == "table" and tier.Icon) or G.House
 			H.HomeLevel.Text = "Home Level " .. homeLevel
-			H.Stars.Text = prestigeStars(stars)
-			H.Stars.TextColor3 = stars > 0 and GOLD or MUTED
+			-- prestige stars in the corner (none before the first prestige)
+			H.Stars.Visible = stars > 0
+			H.Stars.Text = stars <= 3 and string.rep(G.Star, stars) or (G.Star .. " x" .. stars)
 			local nextTier = tiers[(houseLevel >= 1 and (tierIndex or 1) or 0) + 1]
+			H.NextHouse.TextColor3 = MUTED
 			if houseLevel < 1 then
-				H.NextHouse.Text = "Build your Cottage from the House pad"
+				H.NextHouse.Text = "Build your Cottage on the House pad"
 			elseif type(nextTier) == "table" then
-				H.NextHouse.Text = "Next: " .. tostring(nextTier.Name) .. " at Home Level " .. tostring(nextTier.HomeLevel)
+				local at = tonumber(nextTier.HomeLevel) or 0
+				if homeLevel >= at then
+					H.NextHouse.Text = G.Check .. " Upgrade the House to a " .. tostring(nextTier.Name) .. "!"
+					H.NextHouse.TextColor3 = Theme.Lighten(GOOD, 0.35)
+				else
+					H.NextHouse.Text = "Next: " .. tostring(nextTier.Name) .. " at Home Level " .. at
+				end
 			else
 				H.NextHouse.Text = "Your " .. ((type(tier) == "table" and tier.Name) or "house") .. " is complete!"
 			end
@@ -5719,10 +5870,9 @@ do
 				H.PrestigeNeed.TextColor3 = C2.Lock
 			end
 			local gems = P2.catalogCall("PrestigeGems", stars + 1) or P.GemReward or 0
-			local reward = "Reward: x" .. shortNumber(P.IncomeMultiplier or 1.25) .. " income forever and " .. commas(gems) .. " Gems"
-			if stars < (tonumber(P.FusionUnlock) or 1) then
-				reward = "Reward: x" .. shortNumber(P.IncomeMultiplier or 1.25) .. " income forever, " .. commas(gems)
-					.. " Gems and the Fusion Machine"
+			local reward = "Reward: x" .. shortNumber(P.IncomeMultiplier or 1.25) .. " income + " .. commas(gems) .. " Gems"
+			if stars + 1 == (tonumber(P.FusionUnlock) or 1) then
+				reward = reward .. " + the Fusion Machine"
 			end
 			H.PrestigeReward.Text = reward
 			CloudUI.SetDisabled(H.PrestigeButton, not ok or inMatch() or not P2.hasHome())
@@ -5734,21 +5884,22 @@ do
 			local cash, cap, income, parts = homeLive(home)
 			H.Income.Text = P2.formatRate(income) .. "/s"
 			local bits = {}
+			local mult = 1
 			if type(parts) == "table" then
-				local mult = tonumber(parts.Multiplier) or 1
+				mult = tonumber(parts.Multiplier) or 1
 				local press, garden = tonumber(parts.Press) or 0, tonumber(parts.Garden) or 0
-				-- the server's live total wins: split it the way the local numbers split
+				-- the server's live total wins: split it the way the local numbers split (the multiplier included)
 				if press + garden > 0 and income > 0 then
 					local k = income / (press + garden)
 					press, garden = press * k, garden * k
 				end
 				bits[#bits + 1] = "Presses " .. P2.formatRate(press)
 				bits[#bits + 1] = "Pets " .. P2.formatRate(garden)
-				if mult > 1.0001 then
-					bits[#bits + 1] = "x" .. shortNumber(math.floor(mult * 100 + 0.5) / 100)
-				end
 			end
 			H.IncomeParts.Text = table.concat(bits, "  " .. G.Bullet .. "  ")
+			-- the prestige multiplier tag (stars x1.25 each)
+			H.Multiplier.Visible = mult > 1.0001
+			H.Multiplier.Text = "x" .. shortNumber(math.floor(mult * 100 + 0.5) / 100)
 			cap = math.max(0, tonumber(cap) or 0)
 			cash = math.max(0, tonumber(cash) or 0)
 			H.CollectorBar.SetFraction(cap > 0 and math.min(1, cash / cap) or 0)
@@ -5791,6 +5942,9 @@ do
 				end
 			end
 			left.Visible = not tall
+			-- portrait phones: a slimmer Go home (no glyph) so the window title keeps clear of it
+			H.GoHome.Size = UDim2.fromOffset(tall and 136 or 164, 40)
+			H.GoHome.Text = tall and "Go home" or (G.House .. " Go home")
 			if tall then
 				list.Position = UDim2.new(1, -10, 0, 10)
 				list.Size = UDim2.new(1, -20, 1, -20)
@@ -5834,7 +5988,14 @@ do
 					row.Price.Size = UDim2.new(1, -((narrow and 140 or 164) + 12), 0, 32)
 				end
 			end
-			box.Size = UDim2.fromOffset(math.min(520, w - 40), tall and 340 or 300)
+			-- short windows (landscape phones): slimmer lines so the box fits above the window's bottom edge
+			local lineH = short and 50 or 62
+			for _, line in ipairs(H.ConfirmRows) do
+				line.Size = UDim2.new(1, 0, 0, lineH)
+			end
+			H.ConfirmList.Position = UDim2.fromOffset(16, short and 56 or 62)
+			H.ConfirmList.Size = UDim2.new(1, -32, 0, 3 * lineH + 2 * 8)
+			box.Size = UDim2.fromOffset(math.min(K.CONFIRM_W, w - 40), short and 302 or K.CONFIRM_H)
 		end
 
 		win.Refresh = H.Refresh

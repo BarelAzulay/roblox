@@ -1,8 +1,10 @@
 -- smoke_economy.lua: server scenarios for the v2 economy and lobby systems (ARCHITECTURE_V2.md sections 1-3, 5):
---   spots              SpotService: assign / free on leave / prefer the previous index / none when full /
---                      nameplates / showcase podium / teleport and the GoToSpot remote
---                      + v3 tutorial flow (TutorialService: every step from welcome to done, the home step on the
---                      player's own spot, gift once, finish reward once, skip, persistence, remote validation)
+--   spots              SpotService (Phase 2: claimed with E at the gate): no plot on join / claim / free on leave /
+--                      the last plot offered again / none when full / nameplates ('Home Level n') / showcase podium
+--                      (built still, animated by the client) / teleport and the GoToSpot remote
+--                      + v3 tutorial flow (TutorialService: every basics step from welcome to done, the home step =
+--                      claiming a plot at its gate, gift once, finish reward once, the home chapter starting after the
+--                      basics, skip, persistence, remote validation)
 --   economy            DataService + PetService: spend / refund / stack cap / equip limits / perks /
 --                      EquippedPets attribute / rate limiting / argument checks / prompts / stats
 --                      + v3 Pet Index flow (MarkDiscovered, PetService.Rolled, IndexService.Completed / CanClaim /
@@ -250,7 +252,9 @@ local function tutorialFlow()
 	for i, step in ipairs(Steps.Steps) do
 		ids[i] = step.Id
 	end
-	T.eq(table.concat(ids, ","), "welcome,home,shop,spin,equip,index,portal,finish,done", "Tutorial: the nine documented steps in order")
+	-- the nine basics keep their indices (the saved progress is the step index); Phase 2 appends the home chapter
+	T.eq(table.concat(ids, ",", 1, math.min(9, #ids)), "welcome,home,shop,spin,equip,index,portal,finish,done", "Tutorial: the nine documented basics come first, in order")
+	T.check(#ids > 9 and Steps.Steps[10].Chapter == 2, "Tutorial: the Phase 2 home chapter is appended after them", #ids .. " steps")
 	local R = remoteFolder()
 	local gift = Config.Tutorial.GiftTokens
 	local finishReward = Config.Tutorial.FinishReward.Tokens
@@ -276,19 +280,34 @@ local function tutorialFlow()
 	T.eq(stepId(p), "welcome", "Tutorial: ...and does not advance")
 	send(p, "Next")
 	T.eq(stepId(p), "home", "Tutorial: Next completes 'welcome'")
-	-- home: the server poll (2 Hz) notices the player on their own plot
-	local spot = SS.GetSpot(p)
-	local homeTarget = TS.GetState(p) and TS.GetState(p).Target
-	T.check(type(homeTarget) == "table" and homeTarget.Kind == "Spot" and spot ~= nil and typeof(homeTarget.Position) == "Vector3" and (homeTarget.Position - spot.Center).Magnitude < 1
-		and homeTarget.SpotIndex == p:GetAttribute(Config.Attr.SpotIndex), "Tutorial: the 'home' target is the player's own spot (Position = SpotInfo.Center, SpotIndex)")
-	if T.check(spot ~= nil, "Tutorial: the new player has a home spot") then
+	-- home (Phase 2): the arrow leads to a free gate; pressing E there claims the plot
+	local function claimTarget(label)
+		local target = TS.GetState(p) and TS.GetState(p).Target
+		local index = type(target) == "table" and target.SpotIndex or nil
+		local spot = index and W.lobbyInfo.Spots[index]
+		local gate = spot and SS.GateCFrame(spot)
+		T.check(type(target) == "table" and target.Kind == "Spot" and gate ~= nil and typeof(target.Position) == "Vector3"
+			and (target.Position - gate.Position).Magnitude < 1 and SS.GetOwner(index) == nil,
+			"Tutorial: the '" .. label .. "' target is the gate of a free plot (Position = its gate, SpotIndex)")
+		return spot, gate
+	end
+	local function pressE(spot, gate)
+		Mock.Teleport(p, gate * CFrame.new(0, 3, -5))
+		for _, d in ipairs(spot.Folder:GetDescendants()) do
+			if d:IsA("ProximityPrompt") and d.Name == "ClaimPrompt" then
+				Mock.Trigger(d, p)
+			end
+		end
+	end
+	local spot, gate = claimTarget("home")
+	if T.check(spot ~= nil, "Tutorial: there is a free plot for the new player") then
 		advance(1.5)
-		T.eq(stepId(p), "home", "Tutorial: 'home' waits while the player is away from the plot")
-		Mock.Teleport(p, CFrame.new(spot.Center + Vector3.new(0, 3, 0)))
+		T.eq(stepId(p), "home", "Tutorial: 'home' waits until the player claims a plot")
+		pressE(spot, gate)
 		waitFor(function()
 			return stepId(p) ~= "home"
 		end, 3)
-		T.eq(stepId(p), "shop", "Tutorial: standing on the own plot completes 'home' (NearSpot poll)")
+		T.eq(stepId(p), "shop", "Tutorial: E at the gate claims the plot and completes 'home'")
 	end
 	-- shop -> spin: the gift is granted once on entering the spin step
 	local tokens = DataS.GetTokens(p)
@@ -332,7 +351,7 @@ local function tutorialFlow()
 		return stepId(p) ~= "finish"
 	end, 10)
 	T.eq(stepId(p), "done", "Tutorial: the end of the match completes 'finish' (InMatch turned false)")
-	-- done: Next finishes and pays the finish reward once
+	-- done: Next pays the basics reward once; the home chapter follows (its 'claim' is already done: the plot)
 	advance(2)
 	tokens = DataS.GetTokens(p)
 	local finished = {}
@@ -343,24 +362,38 @@ local function tutorialFlow()
 	end)
 	mark = logSize()
 	send(p, "Next")
-	local final = TS.GetState(p)
-	T.check(final and final.Done == true, "Tutorial: Next on 'done' finishes the tutorial (Done = true)")
-	T.eq(DataS.GetTokens(p), tokens + finishReward, "Tutorial: finishing pays Config.Tutorial.FinishReward (" .. finishReward .. " tokens)")
+	waitFor(function()
+		return stepId(p) ~= "done"
+	end, 3)
+	local after = TS.GetState(p)
+	T.check(after and after.Done == false and after.Chapter == 2 and after.Id == "claim",
+		"Tutorial: Next on 'done' ends the basics; the home chapter starts at 'claim' (the plot was released when the player left)", after and tostring(after.Id) or "no state")
+	T.eq(DataS.GetTokens(p), tokens + finishReward, "Tutorial: finishing the basics pays Config.Tutorial.FinishReward (" .. finishReward .. " tokens)")
 	local last = lastRemote("TutorialState", p.UserId, mark)
-	T.check(last and last.args[1] and last.args[1].Done == true and #V.tutorialState(last.args[1]) == 0, "Tutorial: ...and sends TutorialState with Done = true")
-	send(p, "Next")
-	send(p, "Skip")
-	T.eq(DataS.GetTokens(p), tokens + finishReward, "Tutorial: the finish reward is paid only once")
-	if fc then
-		fc:Disconnect()
-		T.check(#finished == 1 and finished[1] == false, "Tutorial: TutorialService.Finished fires once (skipped = false)")
+	T.check(last and last.args[1] and last.args[1].Chapter == 2 and #V.tutorialState(last.args[1]) == 0, "Tutorial: ...and sends the home chapter's TutorialState")
+	spot, gate = claimTarget("claim")
+	if spot then
+		pressE(spot, gate)
+		waitFor(function()
+			return stepId(p) ~= "claim"
+		end, 3)
 	end
-	T.eq(DataS.GetTutorial(p).Done, true, "Tutorial: Tutorial.Done is stored in the profile")
+	T.eq(stepId(p), "press", "Tutorial: E at the gate completes 'claim' -> 'press'")
+	send(p, "Next")
+	T.eq(DataS.GetTokens(p), tokens + finishReward, "Tutorial: the basics reward is paid only once")
+	T.check(DataS.GetTutorial(p).Done == true, "Tutorial: Tutorial.Done is stored once the basics are finished")
 	removePlayers({ p })
 	advance(1.5)
 	p = joinWithId("Newbie", 940001)
 	advance(0.5)
-	T.check(TS.GetState(p) and TS.GetState(p).Done == true and DataS.GetTokens(p) == tokens + finishReward, "Tutorial: a finished tutorial stays finished after a rejoin (no replay, no reward)")
+	T.check(TS.GetState(p) and TS.GetState(p).Id == "press" and DataS.GetTokens(p) == tokens + finishReward,
+		"Tutorial: after a rejoin the home chapter resumes ('press'), the basics are not replayed nor paid again")
+	send(p, "Skip")
+	T.check(TS.GetState(p) and TS.GetState(p).Done == true and DataS.GetTokens(p) == tokens + finishReward, "Tutorial: Skip ends the rest (Done = true, nothing paid)")
+	if fc then
+		fc:Disconnect()
+		T.check(#finished == 1 and finished[1] == true, "Tutorial: TutorialService.Finished fires once, when the whole tutorial ends (here: skipped)")
+	end
 	removePlayers({ p })
 
 	-- skip: ends the tutorial without the finish reward or the gift
@@ -401,6 +434,7 @@ S.spots = guarded("spots", function()
 	local PC, PB = M["shared/PetCatalog"], M["shared/PetBuilder"]
 	local info = W.lobbyInfo
 	local count = Config.Lobby.SpotCount
+	local CS = game:GetService("CollectionService")
 	local function taken()
 		local set, n = {}, 0
 		for _, p in ipairs(Players:GetPlayers()) do
@@ -424,6 +458,28 @@ S.spots = guarded("spots", function()
 	local function subOf(i)
 		return info.Spots[i].SubLabel.Text
 	end
+	-- Phase 2 (ARCHITECTURE_V3.md "Phase 2: Tycoon homes"): nobody gets a plot on join; a plot is claimed with E at
+	-- its gate (the gate's ClaimPrompt, handled by TycoonService) and released when the owner leaves
+	local function claimAt(p, index)
+		local sp = index and info.Spots[index]
+		if not sp then
+			return nil
+		end
+		local gate = SS.GateCFrame(sp)
+		if gate then
+			Mock.Teleport(p, gate * CFrame.new(0, 3, -5))
+		end
+		for _, d in ipairs(sp.Folder:GetDescendants()) do
+			if d:IsA("ProximityPrompt") and d.Name == "ClaimPrompt" then
+				Mock.Trigger(d, p)
+			end
+		end
+		advance(0.6)
+		return SS.GetSpot(p)
+	end
+	local function indexOf(sp)
+		return sp and sp.Index or nil
+	end
 
 	-- the baseline player
 	local alice = W.alice
@@ -431,80 +487,97 @@ S.spots = guarded("spots", function()
 		alice = freshPlayers(1, "Alice")[1]
 		W.alice = alice
 	end
-	local aSpot = SS.GetSpot(alice)
-	if T.check(aSpot ~= nil, "a player who joined owns a spot") then
+	T.eq(SS.GetSpot(alice), nil, "a player who joined owns no spot until pressing E at a gate (Phase 2)")
+	T.eq(alice:GetAttribute("SpotIndex"), nil, "...and has no SpotIndex attribute")
+	local aSpot = claimAt(alice, lowestFree())
+	if T.check(aSpot ~= nil, "E at the gate of a free plot claims it") then
 		T.eq(alice:GetAttribute("SpotIndex"), aSpot.Index, "attribute SpotIndex = the owned spot's index")
 		T.eq(aSpot, info.Spots[aSpot.Index], "GetSpot returns the SpotInfo from LobbyInfo.Spots")
-		T.eq(profileOf(alice).SpotIndex, aSpot.Index, "the spot index is stored in the profile")
+		T.eq(profileOf(alice).SpotIndex, aSpot.Index, "the spot index is stored in the profile (the last plot)")
+		advance(1.2)
 		T.eq(aSpot.NameLabel.Text, alice.DisplayName, "the nameplate shows the owner's display name")
-		local pets, tokens = tostring(aSpot.SubLabel.Text):match("^(%d+) pets? " .. BULLET .. " ([%d,]+) " .. TOKENS_WORD .. "$")
-		T.check(pets == "0" and tokens ~= nil, "the sub label reads '<n> pets " .. BULLET .. " <tokens> " .. TOKENS_WORD .. "'", aSpot.SubLabel.Text)
-		T.eq(tokens and tokens:gsub(",", ""), tostring(alice:GetAttribute("CloudTokens")), "...with the owner's token count")
+		T.eq(aSpot.SubLabel.Text, "Home Level 0", "the sub label reads 'Home Level <n>' (Phase 2: the tycoon home)")
 	end
 	local freeLabels = 0
 	for i = 1, count do
-		if info.Spots[i].NameLabel.Text == "Free home" and info.Spots[i].SubLabel.Text == "Step in to claim" then
+		if info.Spots[i].NameLabel.Text == "Free home" and info.Spots[i].SubLabel.Text == "Press E at the gate" then
 			freeLabels = freeLabels + 1
 		end
 	end
 	local _, owned = taken()
-	T.eq(freeLabels, count - owned, "every unowned spot reads 'Free home' / 'Step in to claim' (" .. owned .. " of " .. count .. " are owned)")
+	T.eq(freeLabels, count - owned, "every unowned spot reads 'Free home' / 'Press E at the gate' (" .. owned .. " of " .. count .. " are owned)")
 
-	-- new players take the lowest free spot, one each
+	-- new players get no plot; they claim a free one, never one that is taken
 	local before = lowestFree()
 	local bob = freshPlayers(1, "Bob")[1]
-	local bobSpot = SS.GetSpot(bob)
-	T.check(bobSpot ~= nil and bobSpot.Index == before, "a new player gets the lowest free spot (" .. tostring(before) .. ")", bobSpot and tostring(bobSpot.Index))
-	T.check(bobSpot ~= nil and bobSpot.Index ~= (aSpot and aSpot.Index), "...never one that is taken")
+	T.eq(SS.GetSpot(bob), nil, "a new player has no spot until claiming one")
+	claimAt(bob, aSpot and aSpot.Index)
+	T.check(SS.GetSpot(bob) == nil and (aSpot == nil or SS.GetOwner(aSpot.Index) == alice), "...never one that is taken (Alice keeps hers)")
+	advance(0.6)
+	local bobSpot = claimAt(bob, before)
+	T.check(bobSpot ~= nil and bobSpot.Index == before, "a new player claims a free spot (" .. tostring(before) .. ")", bobSpot and tostring(bobSpot.Index))
 	local bobIndex = bobSpot and bobSpot.Index
 	if bobSpot then
+		advance(1.2)
 		T.eq(bobSpot.NameLabel.Text, bob.DisplayName, "Bob's nameplate shows Bob")
 		T.check(info.Spots[bobIndex].Folder:IsDescendantOf(info.Folder), "spots live inside the lobby folder")
 	end
-	-- first spawn is on the plaza, not at the spot
-	T.check(planar(root(bob).Position, info.SpawnCFrame.Position) <= 14, "the first spawn is on the plaza (the spot is for later respawns)", fmt(planar(root(bob).Position, info.SpawnCFrame.Position)))
+	-- first spawn is on the plaza, not at a plot
+	local fresh = freshPlayers(1, "Fresh")[1]
+	T.check(planar(root(fresh).Position, info.SpawnCFrame.Position) <= 14, "the first spawn is on the plaza", fmt(planar(root(fresh).Position, info.SpawnCFrame.Position)))
+	removePlayers({ fresh })
 
 	-- leaving frees the spot
 	Mock.RemovePlayer(bob)
 	advance(1.0)
 	if bobIndex then
 		T.eq(info.Spots[bobIndex].NameLabel.Text, "Free home", "leaving frees the spot: nameplate back to 'Free home'")
-		T.eq(subOf(bobIndex), "Step in to claim", "...and 'Step in to claim'")
+		T.eq(subOf(bobIndex), "Press E at the gate", "...and 'Press E at the gate'")
 		T.check(info.Spots[bobIndex].Folder:FindFirstChild("ShowcasePet", true) == nil, "...and the podium is empty")
 		local reused = freshPlayers(1, "Reuse")[1]
-		T.check(SS.GetSpot(reused) ~= nil and SS.GetSpot(reused).Index == bobIndex, "a freed spot (the lowest free one) is handed out again", tostring(SS.GetSpot(reused) and SS.GetSpot(reused).Index) .. " vs " .. tostring(bobIndex))
+		T.check(claimAt(reused, bobIndex) ~= nil and SS.GetSpot(reused).Index == bobIndex, "a freed spot can be claimed again")
 		removePlayers({ reused })
 	end
 
-	-- prefer the previous index (X, Y, Z take consecutive spots; X and Y leave; Y comes back)
+	-- the last plot: X, Y, Z claim spots; X and Y leave; Y comes back: the guide (SuggestSpot) offers Y's old plot
 	local X = joinWithId("Xavier", 910001)
 	local Y = joinWithId("Yara", 910002)
 	local Z = joinWithId("Zed", 910003)
-	local xi, yi, zi = SS.GetSpot(X) and SS.GetSpot(X).Index, SS.GetSpot(Y) and SS.GetSpot(Y).Index, SS.GetSpot(Z) and SS.GetSpot(Z).Index
-	T.check(xi and yi and zi and xi < yi and yi < zi, "three joiners get increasing spots", tostring(xi) .. "," .. tostring(yi) .. "," .. tostring(zi))
+	local xi = indexOf(claimAt(X, lowestFree()))
+	local yi = indexOf(claimAt(Y, lowestFree()))
+	local zi = indexOf(claimAt(Z, lowestFree()))
+	T.check(xi and yi and zi and xi < yi and yi < zi, "three players claim three different spots", tostring(xi) .. "," .. tostring(yi) .. "," .. tostring(zi))
 	Mock.RemovePlayer(X)
 	Mock.RemovePlayer(Y)
 	advance(2.5) -- both saved
 	T.check(taken()[xi] == nil and taken()[yi] == nil, "both spots are free after they left")
+	local mark = logSize()
 	local Y2 = joinWithId("Yara", 910002)
-	local y2 = SS.GetSpot(Y2) and SS.GetSpot(Y2).Index
-	T.check(y2 == yi, "a returning player gets the previous spot back even though a lower one is free (" .. tostring(yi) .. ")", tostring(y2) .. " (lowest free was " .. tostring(xi) .. ")")
-	-- preferred spot taken by someone else -> lowest free
+	advance(5) -- the join toast comes a moment after the profile loaded
+	T.eq(indexOf(SS.SuggestSpot(Y2)), yi, "a returning player is guided back to the previous plot even though a lower one is free (" .. tostring(yi) .. ")")
+	T.check(notified(Y2, "Welcome back", "info", mark), "...with the 'Welcome back! Press E at your gate' toast")
+	T.eq(SS.GetSpot(Y2), nil, "...and nothing is claimed before E is pressed")
+	claimAt(Y2, yi)
+	T.eq(indexOf(SS.GetSpot(Y2)), yi, "E at that gate claims it again")
+	-- the previous plot taken by someone else -> another free plot is suggested
 	local W1 = freshPlayers(1, "Walter")[1]
-	local w1 = SS.GetSpot(W1) and SS.GetSpot(W1).Index
-	T.eq(w1, xi, "a newcomer takes the lowest free spot (Xavier's old one)")
-	local expectFree = lowestFree()
+	local w1 = indexOf(claimAt(W1, xi))
+	T.eq(w1, xi, "a newcomer claims Xavier's old spot")
 	local X2 = joinWithId("Xavier", 910001)
-	local x2 = SS.GetSpot(X2) and SS.GetSpot(X2).Index
-	T.check(x2 ~= nil and x2 ~= xi and x2 == expectFree, "when the previous spot is taken the player gets the lowest free one (" .. tostring(expectFree) .. ")", tostring(x2) .. " (previous " .. tostring(xi) .. ")")
+	local sugg = indexOf(SS.SuggestSpot(X2))
+	T.check(sugg ~= nil and sugg ~= xi and SS.GetOwner(sugg) == nil, "when the previous spot is taken the guide suggests another free plot", tostring(sugg) .. " (previous " .. tostring(xi) .. ")")
+	local x2 = indexOf(claimAt(X2, sugg))
+	T.check(x2 ~= nil and x2 == sugg, "...which can be claimed")
 	T.eq(profileOf(X2).SpotIndex, x2, "...and the new index is stored")
 
-	-- full: fill every spot, the next player gets none
+	-- full: every plot claimed, the next player gets none
 	local fillers = {}
 	local guard = 0
 	while select(2, taken()) < count and guard < count + 4 do
 		guard = guard + 1
-		fillers[#fillers + 1] = freshPlayers(1, "Fill")[1]
+		local f = freshPlayers(1, "Fill")[1]
+		fillers[#fillers + 1] = f
+		claimAt(f, lowestFree())
 	end
 	local _, ownedNow = taken()
 	T.eq(ownedNow, count, "all " .. count .. " spots can be owned at the same time")
@@ -512,20 +585,23 @@ S.spots = guarded("spots", function()
 	T.eq(SS.GetSpot(extra), nil, "with every spot taken a newcomer gets none (GetSpot = nil)")
 	T.eq(extra:GetAttribute("SpotIndex"), nil, "...and no SpotIndex attribute")
 	T.check(root(extra) ~= nil, "...but still spawns normally")
-	T.eq(SS.Teleport(extra), false, "SpotService.Teleport is a no-op without a spot")
-	local mark = logSize()
+	T.eq(SS.Teleport(extra), false, "SpotService.Teleport is a no-op without a spot and without a free plot")
+	mark = logSize()
 	local before2 = root(extra).Position
 	Mock.FromClient(remoteFolder().GoToSpot, extra)
 	advance(0.3)
 	T.check(distance(root(extra).Position, before2) < 1, "GoToSpot without a spot does not move the player")
-	T.check(notified(extra, "spot", "bad", mark), "...it answers with a small toast instead")
-	-- freeing a spot hands it to the waiting player
+	T.check(notified(extra, "Every home is taken", "bad", mark), "...it answers with a small toast instead")
+	-- a spot that frees up can be claimed by the waiting player
 	local leaver = fillers[#fillers]
 	local leaverIndex = SS.GetSpot(leaver).Index
 	Mock.RemovePlayer(leaver)
 	fillers[#fillers] = nil
 	advance(1.5)
-	T.check(SS.GetSpot(extra) ~= nil and SS.GetSpot(extra).Index == leaverIndex, "a player without a spot gets the next one that frees up", tostring(SS.GetSpot(extra) and SS.GetSpot(extra).Index))
+	T.eq(SS.GetSpot(extra), nil, "a freed spot is not handed out automatically (Phase 2: claimed with E)")
+	T.eq(indexOf(SS.SuggestSpot(extra)), leaverIndex, "...the guide leads the waiting player to it")
+	claimAt(extra, leaverIndex)
+	T.check(SS.GetSpot(extra) ~= nil and SS.GetSpot(extra).Index == leaverIndex, "...and E at its gate claims it", tostring(SS.GetSpot(extra) and SS.GetSpot(extra).Index))
 	T.eq(extra:GetAttribute("SpotIndex"), leaverIndex, "...and the SpotIndex attribute follows")
 	removePlayers(fillers)
 	removePlayers({ extra, W1, X2, Y2, Z })
@@ -562,9 +638,9 @@ S.spots = guarded("spots", function()
 		advance(0.3)
 	end
 
-	-- nameplate follows tokens and pets; showcase podium shows the best pet
+	-- nameplate follows the home; showcase podium shows the best pet (built standing still, animated by the client)
 	local Q = freshPlayers(1, "Showy")[1]
-	local qs = SS.GetSpot(Q)
+	local qs = claimAt(Q, lowestFree())
 	if not T.check(qs ~= nil, "showcase owner has a spot") then
 		removePlayers({ Q })
 		return
@@ -572,12 +648,14 @@ S.spots = guarded("spots", function()
 	local common, mythic = petOfRarity("Common", 1), CONTRACT.v2.mascotPetId
 	local common2 = petOfRarity("Common", 2)
 	T.check(qs.Folder:FindFirstChild("ShowcasePet", true) == nil, "a player without pets has an empty podium")
-	DataS.AddTokens(Q, 130)
-	advance(1.6)
-	T.check(tostring(qs.SubLabel.Text):find("130", 1, true) ~= nil, "the nameplate shows the new token total after AddTokens", qs.SubLabel.Text)
+	local okTy, Tycoon = pcall(require, K.moduleInstance("server/Services/TycoonService"))
+	if okTy and type(Tycoon) == "table" and type(Tycoon.Buy) == "function" then
+		Tycoon.Buy(Q, "Press1")
+		advance(1.6)
+		T.eq(qs.SubLabel.Text, "Home Level 1", "the nameplate follows the Home Level (Press 1 built)")
+	end
 	grant(Q, common, 2)
 	advance(1.6)
-	T.check(tostring(qs.SubLabel.Text):match("^2 pets "), "the nameplate counts pets (total of all stacks)", qs.SubLabel.Text)
 	local show1 = qs.Folder:FindFirstChild("ShowcasePet", true)
 	if T.check(show1 ~= nil and show1:IsA("Model"), "the podium shows a pet model once the owner has a pet") then
 		local def = PC.Get(common)
@@ -587,54 +665,25 @@ S.spots = guarded("spots", function()
 		local got = show1:GetExtentsSize().Y
 		T.check(abs(got - want) <= want * 0.25, "...at scale 1.4", fmt(got, 2) .. " vs " .. fmt(want, 2))
 		T.check(show1:FindFirstChild("WingL", true) ~= nil, "...built by PetBuilder (it has wings)")
-		-- ONE welded assembly: the model's PrimaryPart is the only Anchored part and every other part is unanchored and
-		-- welded to it, so a spin / bob step is a single CFrame write that replicates as one change (a ~70-part pet
-		-- moved part by part would flood every client). The pet keeps a static rest pose (no PetBuilder.Animate).
-		local rootPart = show1.PrimaryPart
-		local anchoredCount, partCount, welded = 0, 0, 0
+		-- Replication rule (Phase 2 podium): the server builds it standing still, every part Anchored, and tags it for
+		-- ShowcaseController, which hovers / turns it on each client
+		local anchored, partCount = 0, 0
 		for _, d in ipairs(show1:GetDescendants()) do
 			if d:IsA("BasePart") then
 				partCount = partCount + 1
-				if d.Anchored then
-					anchoredCount = anchoredCount + 1
-				end
-				if d ~= rootPart and d:FindFirstChildOfClass("Weld") and d:FindFirstChildOfClass("Weld").Part0 == rootPart and d:FindFirstChildOfClass("Weld").Part1 == d then
-					welded = welded + 1
+				if d.Anchored and not d.CanCollide then
+					anchored = anchored + 1
 				end
 			end
 		end
-		T.check(rootPart ~= nil and rootPart.Anchored and anchoredCount == 1, "the podium pet has exactly one Anchored part (its PrimaryPart)", anchoredCount .. " anchored of " .. partCount)
-		T.eq(welded, partCount - 1, "...and every other part is welded to it (Weld.Part0 = the root)")
-		-- rotation + bob: the server moves a showcase only while somebody is within the cull radius (55 studs) of the podium
-		local podiumPos = qs.PodiumCFrame.Position
-		local wing = show1:FindFirstChild("WingL", true)
-		local wingRel = wing and rootPart and rootPart.CFrame:Inverse() * wing.CFrame
-		local farLook = show1:GetPivot().LookVector
-		advance(1.2)
-		T.check((show1:GetPivot().LookVector - farLook).Magnitude < 0.01, "a showcase nobody is near (the owner is at the plaza) stays still (no server-side animation cost)")
-		Mock.Teleport(Q, podiumPos + Vector3.new(70, 0, 0))
-		advance(1.2)
-		T.check((show1:GetPivot().LookVector - farLook).Magnitude < 0.01, "a showcase stays still while the nearest player is 70 studs away (radius 55)")
-		Mock.Teleport(Q, podiumPos + Vector3.new(40, 0, 0))
-		advance(1.2)
-		local near1 = (show1:GetPivot().LookVector - farLook).Magnitude
-		T.check(near1 > 0.02, "...and starts turning once a player is 40 studs away", "look vector changed by " .. fmt(near1, 3))
+		T.check(partCount > 0 and anchored == partCount, "every part of the podium pet is Anchored and non-colliding", anchored .. " of " .. partCount)
+		T.check(CS:HasTag(show1, "NC_Showcase") and show1:GetAttribute("Ready") == true and type(show1:GetAttribute("HoverAmp")) == "number",
+			"...tagged NC_Showcase (Ready, HoverAmp) for the client animation")
+		local look0, at0 = show1:GetPivot().LookVector, show1:GetPivot().Position
 		Mock.Teleport(Q, qs.SpawnCFrame)
-		advance(1.2)
-		local look0, y0 = show1:GetPivot().LookVector, show1:GetPivot().Position.Y
-		local lo, hi = y0, y0
-		for _ = 1, 40 do
-			advance(0.1)
-			local y = show1:GetPivot().Position.Y
-			lo, hi = min(lo, y), max(hi, y)
-		end
-		local turned = (show1:GetPivot().LookVector - look0).Magnitude
-		T.check(turned > 0.05, "the showcase pet turns slowly", "look vector changed by " .. fmt(turned, 3))
-		T.check(hi - lo > 0.15, "...and bobs up and down", "range " .. fmt(hi - lo, 2) .. " studs")
-		if wing and wingRel then
-			local nowRel = rootPart.CFrame:Inverse() * wing.CFrame
-			T.check((nowRel.Position - wingRel.Position).Magnitude < 0.01 and (nowRel.LookVector - wingRel.LookVector).Magnitude < 0.01, "the welded parts follow the root rigidly (static rest pose: the wing keeps its place relative to the body)", tostring(nowRel.Position) .. " vs " .. tostring(wingRel.Position))
-		end
+		advance(2.0)
+		T.check((show1:GetPivot().LookVector - look0).Magnitude < 1e-6 and (show1:GetPivot().Position - at0).Magnitude < 1e-6,
+			"the server never moves the showcase (no CFrame writes, even with its owner next to it)")
 		local tagText = {}
 		for _, d in ipairs(qs.Folder:GetDescendants()) do
 			if d:IsA("TextLabel") then
@@ -1343,11 +1392,12 @@ S.profile_sync = guarded("profile_sync", function()
 		local perks = first.Perks
 		T.check(perks and perks.MaxHealth == 0 and perks.TokenBonus == 0 and perks.StaminaRegen == 0 and perks.CheckpointHeal == 0, "...with all four perks at 0")
 		T.check(first.SpotIndex == nil or type(first.SpotIndex) == "number", "SpotIndex is a number or absent")
-		-- v3: Discovered, IndexClaimed, Tutorial travel in the snapshot (Cash / Gems stay hidden until phase 2)
+		-- v3: Discovered, IndexClaimed, Tutorial travel in the snapshot (Phase 2: Cash / Gems too, and their attributes)
 		T.check(type(first.Discovered) == "table" and next(first.Discovered) == nil and type(first.IndexClaimed) == "table" and next(first.IndexClaimed) == nil,
 			"v3: the join snapshot carries empty Discovered / IndexClaimed sets")
 		T.check(type(first.Tutorial) == "table" and first.Tutorial.Step == 1 and first.Tutorial.Done == false and first.Tutorial.Gifted == false, "v3: ...and Tutorial = { Step = 1, Done = false, Gifted = false }")
-		T.check(p:GetAttribute(Config.Attr.Cash) == nil and p:GetAttribute(Config.Attr.Gems) == nil, "v3: the Cash / Gems attributes stay unset in phase 1 (the HUD hides them)")
+		T.check(p:GetAttribute(Config.Attr.Cash) == 0 and p:GetAttribute(Config.Attr.Gems) == 0 and first.Cash == 0 and first.Gems == 0,
+			"Phase 2: a new player's Cash / Gems attributes (the HUD currency stack) and snapshot read 0")
 	end
 	-- RequestProfile
 	mark = logSize()

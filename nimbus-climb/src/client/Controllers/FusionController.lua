@@ -909,10 +909,10 @@ local function newTile(key)
 		Visible = false,
 	})
 	round(tile.Equipped)
-	tile.Mark = makeText(button, "Mark", "", "Title", 22, WHITE, {
-		AnchorPoint = Vector2.new(0.5, 0.5),
-		Position = UDim2.new(0.5, 0, 0, 50),
-		Size = UDim2.fromOffset(36, 36),
+	-- the Mix pick order (1 = Body, 2 = Style) sits in the top-left corner, clear of the pet's face
+	tile.Mark = makeText(button, "Mark", "", "Title", 20, WHITE, {
+		Position = UDim2.fromOffset(4, 4),
+		Size = UDim2.fromOffset(30, 30),
 		BackgroundTransparency = 0,
 		BackgroundColor3 = ACCENT,
 		ZIndex = 4,
@@ -945,7 +945,6 @@ local function paintTile(tile, order, ready)
 		tile.Name.Size = UDim2.new(1, -10, 0, S.Short and 26 or 44)
 		tile.Name.TextWrapped = not S.Short
 		tile.Name.Position = UDim2.new(0.5, 0, 1, S.Short and -4 or -6)
-		tile.Mark.Position = UDim2.new(0.5, 0, 0, S.Short and 36 or 50)
 	end
 	tile.Button.LayoutOrder = order
 	tile.Name.Text = nameOf(def, tile.Key)
@@ -976,6 +975,8 @@ local function paintTile(tile, order, ready)
 	tile.Stroke.Thickness = selected and 4 or 3
 	tile.Mark.Visible = mark ~= nil
 	tile.Mark.Text = mark or ""
+	-- the equipped star moves down a row while the pick mark holds the corner
+	tile.Equipped.Position = UDim2.fromOffset(mark and 6 or 5, mark and 38 or 5)
 	local rarity = type(def) == "table" and def.Rarity or nil
 	if not selected and rarity then
 		tile.Stroke.Color = Theme.Darken(rarityAccent(rarity), 0.35)
@@ -1161,6 +1162,15 @@ layoutPreview = function()
 	U.Details.Position = UDim2.new(0, 14, 0, y)
 	U.Details.Size = UDim2.new(1, -28, 1, -(y + bottomH + (short and 8 or 20)))
 	U.ServerNote.Position = UDim2.new(0, 14, 1, -(bottomH + (short and 10 or 18)))
+	-- the locked card: a smaller crystal and no teaser line on short screens
+	if U.LockedSub then
+		U.LockedSub.Visible = not short
+		U.LockedIcon.Size = short and UDim2.fromOffset(64, 64) or UDim2.fromOffset(90, 90)
+		U.LockedIcon.TextSize = short and 46 or 64
+		U.LockedIcon.Position = UDim2.new(0.5, 0, short and 0.42 or 0.4, 0)
+		U.LockedText.Position = UDim2.new(0.5, 0, short and 0.46 or 0.43, 0)
+		U.LockedSub.Position = UDim2.new(0.5, 0, 0.43, 70)
+	end
 end
 
 local function setNotes(plan)
@@ -1169,6 +1179,7 @@ local function setNotes(plan)
 			child:Destroy()
 		end
 	end
+	U.Info.Visible = true
 	local order = 1
 	local function add(text, color)
 		order = order + 1
@@ -1201,6 +1212,32 @@ local function setNotes(plan)
 	end
 	for _, line in ipairs(lines) do
 		add(line.Text, line.Color)
+	end
+	-- when the explanation and the notes do not both fit (smaller screens, long names), the notes win: the general
+	-- explanation steps aside instead of a warning being clipped at the bottom
+	if #lines > 0 then
+		local function fit()
+			if not U.Details or not U.Info.Parent then
+				return
+			end
+			U.Info.Visible = true
+			-- the stacked height of the lines (their absolute sizes plus the list padding)
+			local scale = (U.Fit and U.Fit.Scale) or 1
+			local used, n = 0, 0
+			for _, child in ipairs(U.Details:GetChildren()) do
+				if child:IsA("GuiObject") and child.Visible then
+					used = used + child.AbsoluteSize.Y
+					n = n + 1
+				end
+			end
+			used = used + math.max(0, n - 1) * 6 * scale
+			local room = U.Details.AbsoluteSize.Y
+			if room > 0 and used > room + 1 then
+				U.Info.Visible = false
+			end
+		end
+		fit()
+		task.defer(fit)
 	end
 end
 
@@ -1929,16 +1966,18 @@ local function buildPreview(body)
 	})
 	corner(U.ServerNote, 8)
 
-	-- locked overlay (no Prestige / no machine yet)
+	-- locked overlay (no Prestige / no machine yet): an opaque card (nothing of the preview shows through it) with the
+	-- crystal, the reason and a line about what the machine will do
 	U.Locked = makeFrame(preview, "Locked", {
 		Size = UDim2.new(1, 0, 1, 0),
-		BackgroundTransparency = 0.08,
-		BackgroundColor3 = Color3.fromRGB(18, 22, 56),
+		BackgroundTransparency = 0,
+		BackgroundColor3 = WHITE, -- the gradient below colours it
 		ZIndex = 20,
 		Visible = false,
 	})
 	corner(U.Locked, 12)
-	makeText(U.Locked, "Icon", G.Crystal, "Title", 64, WHITE, {
+	Theme.Gradient(U.Locked, Color3.fromRGB(58, 46, 120), Color3.fromRGB(18, 22, 56), 90)
+	U.LockedIcon = makeText(U.Locked, "Icon", G.Crystal, "Title", 64, WHITE, {
 		AnchorPoint = Vector2.new(0.5, 1),
 		Position = UDim2.new(0.5, 0, 0.45, 0),
 		Size = UDim2.fromOffset(90, 90),
@@ -1947,10 +1986,18 @@ local function buildPreview(body)
 	U.LockedText = makeText(U.Locked, "Text", "", "Heading", 24, WHITE, {
 		AnchorPoint = Vector2.new(0.5, 0),
 		Position = UDim2.new(0.5, 0, 0.48, 0),
-		Size = UDim2.new(1, -60, 0, 90),
+		Size = UDim2.new(1, -60, 0, 64),
 		TextWrapped = true,
 		ZIndex = 21,
 	})
+	U.LockedSub = makeText(U.Locked, "Sub", "Fuse 3 copies into a Golden or Rainbow pet, or mix two pets into a brand-new hybrid!",
+		"Body", 19, Color3.fromRGB(196, 186, 240), {
+			AnchorPoint = Vector2.new(0.5, 0),
+			Position = UDim2.new(0.5, 0, 0.48, 70),
+			Size = UDim2.new(1, -60, 0, 52),
+			TextWrapped = true,
+			ZIndex = 21,
+		})
 end
 
 local function buildWindow()

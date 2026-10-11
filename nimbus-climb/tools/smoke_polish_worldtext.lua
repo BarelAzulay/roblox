@@ -11,10 +11,10 @@
 --                             panel), LightInfluence 0, MaxDistance 50-150 (AlwaysOnTop beacons may reach further). Surface
 --                             signs: 40-60 px per stud, LightInfluence 0, no TextScaled, the biggest line >= 0.95 stud
 --                             and every line >= 0.6 stud, the text fits its box. The home nameplate: "Free home" /
---                             "Step in to claim" with the "+" icon; the owner's name, "<n> pets • <n> Cloud Tokens",
---                             the headshot (Players:GetUserThumbnailAsync, once per user, cached) or the silhouette when
---                             the request fails; back to free when the owner leaves; readable from ~80 studs; the
---                             "No. N" gate signs; the podium tag of the best pet.
+--                             "Press E at the gate" with the "+" icon; once claimed with E at the gate (Phase 2) the
+--                             owner's name, "Home Level <n>", the headshot (Players:GetUserThumbnailAsync, once per user,
+--                             cached) or the silhouette when the request fails; back to free when the owner leaves;
+--                             readable from ~80 studs; the "No. N" gate signs; the podium tag of the best pet.
 --   client_polish_worldtext   (client, 1920x1080) the tutorial guide sign and the NPC nameplates as the client
 --                             controllers show them (their UIScale included).
 -- The Storm Altar (another engineer's file, audited by smoke_storm.lua) and transient damage numbers are reported only.
@@ -469,7 +469,7 @@ local function serverScenarios()
 
 		local plates = T.tally("home nameplates: a pixel-sized tag readable from ~80 studs (MaxDistance 80-120), name >= " .. NAME_MIN
 			.. " px over an info line >= " .. INFO_MIN .. " px, an avatar disc (Headshot / Silhouette / FreeIcon) and the '#N' badge")
-		local free = T.tally("free homes read 'Free home' / 'Step in to claim' with the '+' on the disc (no headshot)")
+		local free = T.tally("free homes read 'Free home' / 'Press E at the gate' with the '+' on the disc (no headshot)")
 		local signs = T.tally("every plot's gate sign reads 'No. N' on both faces in letters >= 1 stud")
 		for i, spot in ipairs(info.Spots) do
 			local gui, disc = discOf(spot)
@@ -482,7 +482,7 @@ local function serverScenarios()
 				.. ", badge " .. tostring(badgeText and badgeText.Text))
 			if not SS.GetSpot or spot.NameLabel.Text == "Free home" or spot.NameLabel.Text == "Free spot" then
 				local state, image = avatarState(spot)
-				free:case(spot.NameLabel.Text == "Free home" and spot.SubLabel.Text == "Step in to claim" and state == "free" and image == "",
+				free:case(spot.NameLabel.Text == "Free home" and spot.SubLabel.Text == "Press E at the gate" and state == "free" and image == "",
 					"spot " .. i .. ": '" .. spot.NameLabel.Text .. "' / '" .. spot.SubLabel.Text .. "', disc " .. state)
 			end
 			local sign = spot.Folder:FindFirstChild("NumberSign", true)
@@ -502,24 +502,40 @@ local function serverScenarios()
 		free:report()
 		signs:report()
 
-		-- an owner: name, "<n> pets • <n> Cloud Tokens", the headshot (fetched once), the podium tag
+		-- Phase 2: a home is claimed with E at its gate (its ClaimPrompt; TycoonService answers it)
+		local function claimHome(player)
+			local target = SS.FindFreeSpot and SS.FindFreeSpot(nil, nil)
+			if not target then
+				return nil
+			end
+			local gate = SS.GateCFrame and SS.GateCFrame(target)
+			if gate then
+				Mock.Teleport(player, gate * CFrame.new(0, 3, -5))
+			end
+			for _, d in ipairs(target.Folder:GetDescendants()) do
+				if d:IsA("ProximityPrompt") and d.Name == "ClaimPrompt" then
+					Mock.Trigger(d, player)
+				end
+			end
+			advance(0.6)
+			return SS.GetSpot(player)
+		end
+
+		-- an owner: name, "Home Level <n>", the headshot (fetched once), the podium tag
 		local p = K.freshPlayers(1, "Wt")[1]
 		advance(1.0)
-		local spot = SS.GetSpot(p)
-		if T.check(spot ~= nil, "a joining player owns a home (precondition)") then
-			T.eq(spot.NameLabel.Text, p.DisplayName, "the owner's nameplate shows their display name")
-			DataS.AddTokens(p, 35)
+		local spot = claimHome(p)
+		if T.check(spot ~= nil, "a player claims a home with E at its gate (precondition)") then
 			advance(1.5)
-			local pets, tokens = tostring(spot.SubLabel.Text):match("^(%d+) pets? " .. BULLET .. " ([%d,%.KMBTQai]+) Cloud Tokens?$")
-			T.check(pets ~= nil, "the info line reads '<n> pets " .. BULLET .. " <n> Cloud Tokens'", spot.SubLabel.Text)
-			local have = p:GetAttribute(Config.Attr.Tokens) or 0
-			T.eq(tokens, mod("Theme") and mod("Theme").ShortNumber(have, 100000) or tokens, "...with the owner's Cloud Tokens (" .. tostring(have) .. ")")
+			T.eq(spot.NameLabel.Text, p.DisplayName, "the owner's nameplate shows their display name")
+			T.check(tostring(spot.SubLabel.Text):match("^Home Level %d+") ~= nil, "the info line reads 'Home Level <n>' (Phase 2)", spot.SubLabel.Text)
 			local state, image, disc = avatarState(spot)
 			T.check(state == "headshot" and image == thumbContent(p.UserId), "the avatar disc shows the owner's headshot (Players:GetUserThumbnailAsync)", state .. " '" .. image .. "'")
 			T.check(disc ~= nil and disc.BackgroundColor3 == disc:GetAttribute("OwnedColor"), "...on the plot's owned colour")
 			T.eq(THUMB.calls[p.UserId], 1, "the headshot is requested once")
 			for _ = 1, 3 do
 				DataS.AddTokens(p, 1)
+				SS.Refresh(p)
 				advance(1.1)
 			end
 			T.eq(THUMB.calls[p.UserId], 1, "...not again on every nameplate refresh")
@@ -578,13 +594,12 @@ local function serverScenarios()
 			K.removePlayers({ p })
 			advance(0.5)
 			local state2, image2 = avatarState(info.Spots[index])
-			T.check(info.Spots[index].NameLabel.Text == "Free home" and info.Spots[index].SubLabel.Text == "Step in to claim" and state2 == "free" and image2 == "",
-				"leaving frees the nameplate: 'Free home' / 'Step in to claim', the '+', no headshot", info.Spots[index].NameLabel.Text .. " / " .. state2)
+			T.check(info.Spots[index].NameLabel.Text == "Free home" and info.Spots[index].SubLabel.Text == "Press E at the gate" and state2 == "free" and image2 == "",
+				"leaving frees the nameplate: 'Free home' / 'Press E at the gate', the '+', no headshot", info.Spots[index].NameLabel.Text .. " / " .. state2)
 			-- coming back: the cached headshot, no second request
 			local again = K.joinPlayer("WtAgain", userId)
-			K.waitFor(function()
-				return SS.GetSpot(again) ~= nil
-			end, 8)
+			advance(1.0)
+			claimHome(again)
 			advance(0.6)
 			local spot2 = SS.GetSpot(again)
 			local state3 = spot2 and avatarState(spot2) or "none"
@@ -595,9 +610,8 @@ local function serverScenarios()
 		-- a failing thumbnail request (Studio test players, web outage): the silhouette stays
 		THUMB.fail[977001] = true
 		local q = K.joinPlayer("WtNoThumb", 977001)
-		K.waitFor(function()
-			return SS.GetSpot(q) ~= nil
-		end, 5)
+		advance(1.0)
+		claimHome(q)
 		advance(0.6)
 		local qs = SS.GetSpot(q)
 		local stateQ = qs and avatarState(qs) or "none"

@@ -137,15 +137,26 @@ local function winBonusList()
 	return table.concat(parts, ", ")
 end
 
--- "Cloud 50 ☁, Storm 250 ☁, ..."
-local function roulettePriceList()
-	local parts = {}
+-- "Cloud 50 ☁ up to Celestial 5,000 ☁": the cheapest and the priciest token roulette
+local function rouletteRange()
+	local low, high = nil, nil
 	for _, r in ipairs(Config.Roulettes or {}) do
 		if tonumber(r.Price) then
-			parts[#parts + 1] = shortName(r) .. " " .. tokens(r.Price)
+			if not low or r.Price < low.Price then
+				low = r
+			end
+			if not high or r.Price > high.Price then
+				high = r
+			end
 		end
 	end
-	return table.concat(parts, ", ")
+	if not low then
+		return "the roulettes"
+	end
+	if low == high then
+		return shortName(low) .. " " .. tokens(low.Price)
+	end
+	return shortName(low) .. " " .. tokens(low.Price) .. " up to " .. shortName(high) .. " " .. tokens(high.Price)
 end
 
 -- "Sky (3%) and Celestial (15%)": every roulette that can roll a Mythic, with its chance
@@ -229,9 +240,9 @@ for i, text in ipairs(wheel) do
 end
 local rivalLine
 if rivals[1] then
-	rivalLine = rivals[1][1] .. " and " .. rivals[1][2] .. " are rivals: each one beats the other. Light versus dark!"
+	rivalLine = rivals[1][1] .. " and " .. rivals[1][2] .. " beat each other!"
 else
-	rivalLine = "Some elements are rivals and beat each other. Light versus dark!"
+	rivalLine = "Some elements are rivals and beat each other!"
 end
 -- element name -> its colour (the dialog paints the element names in their own colours)
 local function elementColors()
@@ -336,7 +347,7 @@ local rainbowMul = number(tierMul.Rainbow or 2.5)
 local fusionCopies = number((type(TC.Fusion) == "table" and TC.Fusion.Copies) or 3)
 local fusionWhen = "After your first Prestige"
 if tonumber(PR.FusionUnlock) and tonumber(PR.FusionUnlock) ~= 1 then
-	fusionWhen = "At Prestige " .. number(PR.FusionUnlock)
+	fusionWhen = "From Prestige " .. number(PR.FusionUnlock)
 end
 local levelBonus = percent(0.1)
 local secretRoulette = type(G.SecretRoulette) == "table" and G.SecretRoulette or {}
@@ -402,9 +413,9 @@ NpcDialog.Npcs = {
 		Accent = Color3.fromRGB(160, 126, 222),
 		Keywords = { "roulette machines", "shop island", "Mythic", "Pet Index", "Kitchen", "Feed", "Pets menu" },
 		Lines = {
-			"Hoo-hoo! New pets come from the roulette machines on the shop island. " .. roulettePriceList()
-				.. ": the pricier, the rarer.",
-			"Mythic pets only appear in the " .. mythicChances() .. " roulettes. The shop shows every chance.",
+			"Hoo-hoo! New pets hatch from the roulettes on the shop island: " .. rouletteRange() .. ". Pricier means rarer!",
+			"Mythic pets only appear in the " .. mythicChances() .. " roulettes. "
+				.. (cheapGemSpin and ("Gems buy spins too: a " .. cheapGemSpin .. "!") or "The shop shows every chance."),
 			"Every pet you find fills the Pet Index. Complete a rarity group for a reward: " .. indexRewardRange() .. "!",
 			"Hungry pets grow! Build a Kitchen at home and cook pet food with Cash: " .. foodLine() .. ".",
 			"Then open the Pets menu, pick a buddy and press Feed. Every level makes a pet " .. levelBonus
@@ -441,7 +452,7 @@ NpcDialog.Npcs = {
 		Lines = {
 			"Welcome to Nimbus Village! Walk up to a free gate on the big ring and press E to claim your very own home.",
 			"Start with a Cloud Press and the Collector: they make Cash while you play. Step on the Collector to bank it!",
-			"Every purchase raises your Home Level: build " .. houseLine() .. ". Bigger houses unlock bigger upgrades!",
+			"Every purchase raises your Home Level. Build " .. houseLine() .. "!",
 			"Home Level " .. prestigeLevel .. " and a " .. castleName .. "? Prestige! You start over with a star: x"
 				.. prestigeMul .. " income forever and " .. prestigeGems .. " Gems.",
 			"Economy pets earn Cash in your Garden. Tap Home in the menu to see every station, your income and upgrades!",
@@ -459,12 +470,12 @@ NpcDialog.Npcs = {
 		Lines = {
 			"Blub! Every pet has an Element. " .. joinAnd(wheelA) .. ".",
 			joinAnd(wheelB) .. ". " .. rivalLine,
-			"In the coming Pet Battles a strong element hits for x" .. strongMul .. " damage, a weak one only x"
-				.. weakMul .. ". Pick your team wisely!",
-			fusionWhen .. " you can build the Fusion Machine: fuse " .. fusionCopies .. " copies into a Golden pet (x"
-				.. goldenMul .. "), then Rainbow (x" .. rainbowMul .. "), or mix two pets into a brand-new hybrid!",
-			"Secret pets like Stormfang are summoned at the Storm Altar for " .. secretPrice .. " Gems. "
-				.. (cheapGemSpin and ("In the Shop's Gems tab a " .. cheapGemSpin .. "!") or "Gems also buy roulette spins in the Shop!"),
+			"In Pet Battles a strong element hits for x" .. strongMul .. " damage, a weak one only x" .. weakMul
+				.. ". Pick your team wisely!",
+			fusionWhen .. ", build the Fusion Machine: " .. fusionCopies .. " copies make a Golden pet (x" .. goldenMul
+				.. "), " .. fusionCopies .. " Golden a Rainbow one (x" .. rainbowMul .. ")!",
+			"It also mixes two pets into a one-of-a-kind hybrid. Secret pets like Stormfang come from the Storm Altar for "
+				.. secretPrice .. " Gems!",
 		},
 	},
 }

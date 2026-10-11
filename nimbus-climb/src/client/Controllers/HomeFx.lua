@@ -22,7 +22,9 @@
 --   * owner-only prompts: every ProximityPrompt inside a home that is not the local player's (BuyPrompt,
 --     CollectPrompt, FusionPrompt, ... by their OwnerUserId attribute, else the home's) is disabled locally, and the
 --     pad signs (`PadSign`) of other players' pads are hidden; the "Claim Home" prompts of other plots are disabled
---     while the local player owns a home (one home per player). The server still checks everything.
+--     while the local player owns a home (one home per player). The server still checks everything. The signs of
+--     the player's own LOCKED pads (their lock reason) only show within K.LOCKED_SIGN_NEAR studs, so the yard is not
+--     a field of lock signs: from afar it shows what can be bought now, like a classic tycoon.
 --   * the local player's own pads glow when the Cash attribute can pay their Price and dim (price in red) when not.
 --   * the pets at work: every key of the plot's GardenPets attribute ("1=cat;3=fox@Golden", written by TycoonService
 --     on the plot folder) stands on the Garden's Spot<slot> cushion, every key of GymPets (PetCareService) on the
@@ -92,6 +94,9 @@ local K = {
 	SWIRL_BOB = 0.25,
 	PAD_PULSE = 3.2,
 	PAD_DIM = 0.6, -- glow transparency of a pad the local player cannot pay for yet
+	LOCKED_SIGN_NEAR = 30, -- studs: the sign of one of the local player's LOCKED pads (its lock reason) shows only
+	LOCKED_SIGN_FAR = 34, -- this close (hidden again beyond FAR), so from afar the yard shows what can be bought now
+	SIGN_CHECK = 0.25, -- seconds between two of those distance checks
 	PET_NEAR = 110, -- garden / gym pets are shown for homes this close to the camera (hysteresis +20)
 	PET_SCALE = 0.85,
 	PET_ANIM_STEP = 0.125, -- seconds between two PetBuilder.Animate calls of the garden / gym pets
@@ -119,14 +124,17 @@ local pool = {} -- idle block parts
 local poolCreated = 0
 local fxFolder = nil
 local petFolder = nil
-local petLows = {} -- [key] = height of the pet's lowest block under its pivot (studs), or false (cannot build)
+local petLows = {} -- [key|scale] = height of the pet's lowest block under its pivot (studs), or false (cannot build)
 -- the stations whose pets HomeFx shows, by Kind: the plot attribute that lists them and how lively they look
 local PET_STATIONS = {
-	Garden = { Attr = "GardenPets", Anim = { Flap = 0.6 } },
-	Gym = { Attr = "GymPets", Anim = { Flap = 1.4, Excited = 1 } },
+	Garden = { Attr = "GardenPets", Anim = { Flap = 0.6 }, Scale = 1 }, -- 5 studs between two cushions
+	Gym = { Attr = "GymPets", Anim = { Flap = 1.4, Excited = 1 }, Scale = 0.85 }, -- 3 studs between two targets
 }
 local overrides = setmetatable({}, { __mode = "k" }) -- [ProximityPrompt] = state
 local signs = setmetatable({}, { __mode = "k" }) -- [BillboardGui] = home rec
+local signNear = setmetatable({}, { __mode = "k" }) -- [BillboardGui] = true while a locked pad's sign is close enough
+local signFocus = nil -- where the local player is (character, else camera), refreshed every K.SIGN_CHECK
+local nextSignCheck = 0
 local clock = 0
 local nextPopStart = 0
 local loopConn = nil
@@ -357,6 +365,24 @@ local function trackPrompt(prompt, rec)
 	applyPrompt(prompt)
 end
 
+-- true when a sign belongs to a locked pad and the local player is not close to it (hysteresis NEAR / FAR)
+local function lockedAndFar(gui, rec)
+	local pad = ancestorWith(gui.Parent, "Locked", rec.Folder)
+	local locked = pad and pad:GetAttribute("Locked")
+	if locked == nil or locked == "" or not signFocus then
+		signNear[gui] = nil
+		return false
+	end
+	local anchor = gui.Adornee or gui.Parent
+	if not anchor or not anchor:IsA("BasePart") then
+		return false
+	end
+	local d = (anchor.Position - signFocus).Magnitude
+	local near = d <= (signNear[gui] and K.LOCKED_SIGN_FAR or K.LOCKED_SIGN_NEAR)
+	signNear[gui] = near or nil
+	return not near
+end
+
 local function applySign(gui)
 	local rec = signs[gui]
 	if not rec or not gui.Parent then
@@ -365,8 +391,39 @@ local function applySign(gui)
 	local holder = ancestorWith(gui.Parent, "OwnerUserId", rec.Folder)
 	local uid = holder and tonumber(holder:GetAttribute("OwnerUserId")) or homeOwner(rec)
 	local show = uid == localUid and uid ~= 0
+	if show and lockedAndFar(gui, rec) then
+		show = false
+	end
 	if gui.Enabled ~= show then
 		gui.Enabled = show
+	end
+end
+
+-- the local player's position for the locked-pad signs: the character, else the camera
+local function focusPos()
+	local character = localPlayer and localPlayer.Character
+	local root = character and character:FindFirstChild("HumanoidRootPart")
+	if root and root:IsA("BasePart") then
+		return root.Position
+	end
+	local cam = Workspace.CurrentCamera
+	return cam and cam.CFrame.Position or nil
+end
+
+-- re-checks the signs of the local player's own home (locked pads show their reason only up close)
+local function stepSigns()
+	if clock < nextSignCheck then
+		return
+	end
+	nextSignCheck = clock + K.SIGN_CHECK
+	if not ownsHome then
+		return
+	end
+	signFocus = focusPos()
+	for gui, rec in pairs(signs) do
+		if gui.Parent and homeOwner(rec) == localUid then
+			applySign(gui)
+		end
 	end
 end
 
@@ -1040,6 +1097,10 @@ local function registerPad(rec, model)
 	end)
 	model:GetAttributeChangedSignal("Locked"):Connect(function()
 		refreshPad(rec, pad)
+		local sign = model:FindFirstChild("PadSign", true)
+		if sign then
+			applySign(sign)
+		end
 	end)
 	refreshPad(rec, pad)
 end
@@ -1107,18 +1168,20 @@ end
 
 -- a fresh Low-detail model of the pet (PetBuilder caches the sculpt and clones), anchored and inert, plus the
 -- height of its lowest block under the pivot
-local function buildPet(key)
-	if not PetBuilder or petLows[key] == false then
+local function buildPet(key, scale)
+	scale = tonumber(scale) or K.PET_SCALE
+	local lowKey = key .. "|" .. scale
+	if not PetBuilder or petLows[lowKey] == false then
 		return nil
 	end
 	local def = petDefOf(key)
 	if not def then
-		petLows[key] = false
+		petLows[lowKey] = false
 		return nil
 	end
-	local ok, model = pcall(PetBuilder.Build, def, { Detail = "Low", Scale = K.PET_SCALE })
+	local ok, model = pcall(PetBuilder.Build, def, { Detail = "Low", Scale = scale })
 	if not ok or typeof(model) ~= "Instance" then
-		petLows[key] = false
+		petLows[lowKey] = false
 		return nil
 	end
 	model.Name = "HomePet"
@@ -1130,7 +1193,7 @@ local function buildPet(key)
 		part.CanQuery = false
 		part.CanTouch = false
 	end
-	local lo = petLows[key]
+	local lo = petLows[lowKey]
 	if lo == nil then
 		model:PivotTo(CFrame.new())
 		lo = 0
@@ -1143,7 +1206,7 @@ local function buildPet(key)
 				end
 			end
 		end
-		petLows[key] = lo
+		petLows[lowKey] = lo
 	end
 	return model, lo
 end
@@ -1184,7 +1247,7 @@ local function syncPets(rec, kind)
 		if not pk.Pets[slot] then
 			local att = st.Model:FindFirstChild("Spot" .. slot, true)
 			if att and att:IsA("Attachment") then
-				local model, lo = buildPet(key)
+				local model, lo = buildPet(key, PET_STATIONS[kind].Scale)
 				if model then
 					model.Name = kind .. "Pet"
 					model:PivotTo(att.WorldCFrame * CFrame.new(0, K.PET_HOVER - lo, 0))
@@ -1479,6 +1542,7 @@ local function step(dt)
 		stepPops()
 	end
 	local eye = cameraPos()
+	stepSigns()
 	for _, rec in ipairs(homeList) do
 		if rec.Folder.Parent then
 			updateNear(rec, eye)

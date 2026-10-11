@@ -1414,7 +1414,7 @@ S.lobby = guarded("lobby", function()
 	local centres = {}
 	local spotProblems = T.tally("every SpotInfo has Index/Folder/Center/SpawnCFrame/NameLabel/SubLabel/PodiumCFrame on solid ground")
 	local ringProblems = T.tally("spots stand on the outer ring (radius " .. Config.Lobby.SpotRingRadius .. ")")
-	local freeProblems = T.tally("unowned spots read 'Free home' / 'Step in to claim'")
+	local freeProblems = T.tally("unowned spots read 'Free home' / 'Press E at the gate' (Phase 2: claimed with E at the gate)")
 	for i = 1, Config.Lobby.SpotCount do
 		local sp = info.Spots and info.Spots[i]
 		if sp then
@@ -1427,7 +1427,7 @@ S.lobby = guarded("lobby", function()
 				spotProblems:case(sp.NameLabel:IsDescendantOf(sp.Folder) or sp.NameLabel:IsDescendantOf(folder), "spot " .. i .. ": nameplate is outside the lobby")
 				local horiz = math.sqrt((sp.Center.X - Config.Lobby.Origin.X) ^ 2 + (sp.Center.Z - Config.Lobby.Origin.Z) ^ 2)
 				ringProblems:case(math.abs(horiz - Config.Lobby.SpotRingRadius) <= 30, "spot " .. i .. " is " .. fmt(horiz) .. " from the origin")
-				freeProblems:case(sp.NameLabel.Text == "Free home" and sp.SubLabel.Text == "Step in to claim", "spot " .. i .. " reads '" .. sp.NameLabel.Text .. "' / '" .. sp.SubLabel.Text .. "'")
+				freeProblems:case(sp.NameLabel.Text == "Free home" and sp.SubLabel.Text == "Press E at the gate", "spot " .. i .. " reads '" .. sp.NameLabel.Text .. "' / '" .. sp.SubLabel.Text .. "'")
 				for j = 1, #centres do
 					if (centres[j] - sp.Center).Magnitude < 20 then
 						spotProblems:case(false, "spots " .. j .. " and " .. i .. " overlap")
@@ -2042,12 +2042,30 @@ S.players = guarded("players", function()
 		return alice.Character ~= nil and hum(alice) ~= nil and hum(alice).Health > 0
 	end, Config.Match and 12 or 12), "a reset character respawns")
 	advance(0.8)
+	-- Phase 2 (ARCHITECTURE_V3.md "Phase 2: Tycoon homes"): no plot on join, a home is claimed with E at its gate
 	local SpotService = mod("SpotService")
-	local spot = SpotService and SpotService.GetSpot(alice)
-	if T.check(spot ~= nil, "Alice owns a lobby spot (assigned after her profile loaded)") then
-		T.check(root(alice) ~= nil and planar(root(alice).Position, spot.SpawnCFrame.Position) <= 10, "a lobby respawn lands at the owner's own spot", root(alice) and fmt(planar(root(alice).Position, spot.SpawnCFrame.Position)))
+	T.check(SpotService ~= nil and SpotService.GetSpot(alice) == nil and alice:GetAttribute("SpotIndex") == nil, "Alice owns no home plot until she claims one (Phase 2)")
+	T.check(root(alice) ~= nil and planar(root(alice).Position, info.SpawnCFrame.Position) <= 10, "the respawn lands in the lobby")
+	-- with a claimed home, a lobby respawn lands there (the home is released again: later scenarios claim their own)
+	local tyInst = moduleInstance("server/Services/TycoonService")
+	local okTy, Tycoon = false, nil
+	if tyInst then
+		okTy, Tycoon = pcall(require, tyInst)
+	end
+	local free = SpotService and SpotService.FindFreeSpot(nil, nil)
+	if okTy and type(Tycoon) == "table" and type(Tycoon.Claim) == "function" and free and Tycoon.Claim(alice, free.Index) then
+		Mock.Kill(alice)
+		T.check(waitFor(function()
+			return alice.Character ~= nil and hum(alice) ~= nil and hum(alice).Health > 0
+		end, 12), "a reset character respawns (with a home)")
+		advance(0.8)
+		local spot = SpotService.GetSpot(alice)
+		T.check(spot ~= nil and root(alice) ~= nil and planar(root(alice).Position, spot.SpawnCFrame.Position) <= 10, "a lobby respawn lands at the owner's own home", root(alice) and spot and fmt(planar(root(alice).Position, spot.SpawnCFrame.Position)))
+		Tycoon.Release(alice)
+		advance(0.3)
+		T.check(SpotService.GetSpot(alice) == nil, "(the home is released again)")
 	else
-		T.check(root(alice) ~= nil and planar(root(alice).Position, info.SpawnCFrame.Position) <= 10, "the respawn lands in the lobby")
+		T.fail("Alice could not claim a home (TycoonService.Claim)")
 	end
 	T.near(hum(alice).MaxHealth, Config.Physics.MaxHealth, 0.01, "respawned character gets the Config stats again")
 	flushErrors("players")
